@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import os
+from functools import partial
 from typing import Any
 
 from surreal_memory.engine.embedding.provider import EmbeddingProvider
@@ -93,10 +94,11 @@ class GeminiEmbedding(EmbeddingProvider):
         batch_size = 100
         for i in range(0, len(texts), batch_size):
             chunk = texts[i : i + batch_size]
-            # chunk is awaited immediately below, so a plain closure is safe
-            # (no late-binding across loop iterations) and types cleanly.
+            # functools.partial binds `chunk` at creation (satisfies ruff B023,
+            # no loop-var late binding) and types cleanly for mypy.
             response = await call_with_retry(
-                lambda: client.aio.models.embed_content(
+                partial(
+                    client.aio.models.embed_content,
                     model=self._model,
                     contents=chunk,
                     config={"task_type": self._task_type},
