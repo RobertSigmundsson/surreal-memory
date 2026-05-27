@@ -1,0 +1,316 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "surreal-memory"
+version = "2.0.0"
+description = "Reflex-based memory system for AI agents with SurrealDB backend — retrieval through activation, not search"
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.11"
+authors = [
+    { name = "Toni Nowak", email = "t.nowak@ai-flow.no" },
+    { name = "Surreal-Memory Contributors (upstream)" }
+]
+keywords = [
+    "ai",
+    "memory",
+    "agents",
+    "neural",
+    "graph",
+    "retrieval",
+    "llm",
+]
+classifiers = [
+    "Development Status :: 5 - Production/Stable",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Typing :: Typed",
+]
+dependencies = [
+    "pydantic>=2.0",
+    "networkx>=3.0",
+
+    "typer>=0.9.0,<0.26",
+    "aiohttp>=3.9.0",
+    "aiosqlite>=0.19.0",
+    "rich>=13.0.0",
+    "typing_extensions>=4.0",
+]
+
+[project.optional-dependencies]
+server = [
+    "fastapi>=0.100",
+    "uvicorn[standard]>=0.23",
+    "python-multipart>=0.0.22",
+    "httpx>=0.24",
+]
+surrealdb = [
+    "surrealdb>=0.4.0",
+]
+encryption = [
+    "cryptography>=46.0.5",
+]
+nlp-en = [
+    "spacy>=3.6",
+]
+nlp-vi = [
+    "underthesea>=6.0",
+    "pyvi>=0.1",
+]
+nlp = [
+    "surreal-memory[nlp-en,nlp-vi]",
+]
+chromadb = [
+    "chromadb>=0.4.0",
+]
+mem0 = [
+    "mem0ai>=0.1.0",
+]
+cognee = [
+    "cognee>=0.1.0",
+]
+graphiti = [
+    "graphiti-core>=0.1.0",
+]
+llamaindex = [
+    "llama-index-core>=0.10.0",
+]
+watch = [
+    "watchdog>=4.0.0",
+]
+extract = [
+    "pymupdf4llm>=0.0.10",
+    "python-docx>=1.0",
+    "python-pptx>=0.6.23",
+    "beautifulsoup4>=4.12",
+    "markdownify>=0.11",
+    "openpyxl>=3.1",
+]
+reranker = [
+    "sentence-transformers>=2.2.0",
+]
+embeddings = [
+    "sentence-transformers>=2.0",
+]
+embeddings-openai = [
+    "openai>=1.0",
+]
+embeddings-openrouter = [
+    "openai>=1.0",
+]
+embeddings-gemini = [
+    "google-genai>=1.0",
+]
+integration = [
+    "surreal-memory[chromadb,mem0]",
+]
+all = [
+    "surreal-memory[server,surrealdb,embeddings-gemini,nlp,integration]",
+]
+dev = [
+    "pytest>=7.0",
+    "pytest-asyncio>=0.21",
+    "pytest-cov>=4.0",
+    "pytest-xdist>=3.5",
+    "ruff>=0.1.0",
+    "mypy>=1.5",
+    "pre-commit>=3.0",
+    "pytest-timeout>=2.2",
+    "httpx>=0.24",
+    "click>=8.0",
+]
+docs = [
+    "mkdocs>=1.5",
+    "mkdocs-material>=9.5",
+    "mkdocstrings[python]>=0.24",
+    "mike>=2.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/acidkill/surreal-memory"
+Documentation = "https://github.com/acidkill/surreal-memory/blob/main/docs/getting-started/quickstart.md"
+Repository = "https://github.com/acidkill/surreal-memory"
+Issues = "https://github.com/acidkill/surreal-memory/issues"
+
+[project.scripts]
+smem = "surreal_memory.cli:main"
+smem-mcp = "surreal_memory.mcp:main"
+smem-hook-pre-compact = "surreal_memory.hooks.pre_compact:main"
+smem-hook-stop = "surreal_memory.hooks.stop:main"
+smem-hook-post-tool-use = "surreal_memory.hooks.post_tool_use:main"
+smem-hook-session-start = "surreal_memory.hooks.session_start:main"
+
+[tool.hatch.build.targets.sdist]
+include = [
+    "/src",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/surreal_memory"]
+
+[tool.hatch.build]
+artifacts = [
+    "src/surreal_memory/server/static/dist/**",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = [
+    "E",      # pycodestyle errors
+    "F",      # pyflakes
+    "I",      # isort
+    "N",      # pep8-naming
+    "W",      # pycodestyle warnings
+    "UP",     # pyupgrade
+    "B",      # flake8-bugbear
+    "C4",     # flake8-comprehensions
+    "SIM",    # flake8-simplify
+    "TC",     # flake8-type-checking
+    "RUF",    # ruff-specific
+    "S",      # flake8-bandit (security)
+    "A",      # flake8-builtins
+    "DTZ",    # flake8-datetimez
+    "T20",    # flake8-print
+    "PT",     # flake8-pytest-style
+    "PERF",   # perflint
+    "PIE",    # flake8-pie
+    "ERA",    # eradicate (commented-out code)
+]
+ignore = [
+    "E501",   # line too long (handled by formatter)
+    "RUF022", # __all__ sorting (we use comments for organization)
+    "RUF012", # mutable class attributes (false positives on frozen sets)
+    "RUF005", # list concatenation (clearer in some cases)
+    "RUF059", # unused variable in unpacking (test fixtures)
+    "TC001",  # move app imports to type-checking block
+    "TC003",  # move stdlib imports to type-checking block
+    "SIM102", # nested if (clearer in some cases)
+    "SIM103", # return negated condition (clearer explicitly)
+    "SIM105", # contextlib.suppress (try-except clearer)
+    "SIM108", # ternary operator (if-else clearer)
+    "SIM117", # nested with statements (clearer in some cases)
+    "B904",   # raise from (not always needed)
+    "S101",   # assert usage (fine in tests, checked via per-file-ignores)
+    "S110",   # try-except-pass (used for graceful cleanup/fallback)
+    "S112",   # try-except-continue (used for graceful iteration)
+    "S311",   # pseudo-random (not used for crypto)
+    "S324",   # MD5 (used for simhash fingerprints, not crypto)
+    "A002",   # builtin shadowing (type param in public API is intentional)
+    "PERF401",# manual list comprehension (loop is often clearer)
+    "PT023",  # pytest mark parentheses (style preference)
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["S101", "S108", "S314", "S405", "DTZ001", "DTZ005", "T20", "ERA001", "PT001", "PT006", "PT011", "PT018"]
+"src/surreal_memory/mcp/server.py" = ["T201"]    # stdio transport uses print
+"src/surreal_memory/utils/config.py" = ["S104"]   # configurable bind address
+"src/surreal_memory/utils/simhash.py" = ["S324"]  # MD5 for fingerprint, not crypto
+"src/surreal_memory/storage/sqlite_*.py" = ["S608"] # SQL with hardcoded column names
+"src/surreal_memory/storage/surrealdb/**" = ["S608", "S107"] # SurrealDB queries + default credentials
+"src/surreal_memory/cli/**" = ["T201", "S603", "S607", "S310"]  # CLI: print, subprocess, url open
+"src/surreal_memory/safety/sensitive.py" = ["S105"] # pattern names, not actual secrets
+"src/surreal_memory/engine/db_introspector.py" = ["S608"]  # identifier-validated SQL
+"src/surreal_memory/git_context.py" = ["S603", "S607"]     # git subprocess calls
+"src/surreal_memory/server/app.py" = ["B008"]              # FastAPI Depends() in defaults
+"scripts/**" = ["T201", "S603", "S105", "ERA001", "E741", "SIM110", "SIM212", "B905", "F541", "N806", "C401"]  # CLI scripts: print, subprocess, ANSI codes, style
+
+[tool.ruff.lint.isort]
+known-first-party = ["surreal_memory"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+warn_return_any = true
+warn_unused_ignores = true
+disallow_untyped_defs = true
+disallow_incomplete_defs = true
+check_untyped_defs = true
+no_implicit_optional = true
+warn_redundant_casts = true
+plugins = ["pydantic.mypy"]
+
+[[tool.mypy.overrides]]
+module = [
+    "networkx.*",
+    "underthesea.*",
+    "pyvi.*",
+    "chromadb.*",
+    "mem0.*",
+    "cognee.*",
+    "graphiti_core.*",
+    "llama_index.*",
+    "pymupdf4llm.*",
+    "pymupdf.*",
+    "docx.*",
+    "pptx.*",
+    "bs4.*",
+    "markdownify.*",
+    "openpyxl.*",
+    "google.genai.*",
+    "watchdog.*",
+]
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = [
+    "surreal_memory.server.app",
+    "surreal_memory.server.routes.*",
+]
+disallow_untyped_decorators = false
+
+[[tool.mypy.overrides]]
+module = "surreal_memory.engine.file_watcher"
+disallow_subclassing_any = false
+warn_unused_ignores = false
+
+[[tool.mypy.overrides]]
+module = "surreal_memory.engine.reranker"
+warn_unused_ignores = false
+
+[[tool.mypy.overrides]]
+module = "surreal_memory.engine.doc_extractor"
+disallow_untyped_calls = false
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+addopts = "-v --tb=short"
+timeout = 60
+markers = [
+    "stress: real-world workflow stress tests with SQLiteStorage",
+]
+filterwarnings = [
+    "ignore::DeprecationWarning:pyvi",
+    "ignore::DeprecationWarning:numpy",
+    "ignore:dtype:DeprecationWarning",
+    "ignore:coroutine .* was never awaited:RuntimeWarning",
+]
+
+[tool.coverage.run]
+source = ["src/surreal_memory"]
+branch = true
+
+[tool.coverage.report]
+fail_under = 65
+exclude_lines = [
+    "pragma: no cover",
+    "def __repr__",
+    "raise AssertionError",
+    "raise NotImplementedError",
+    "if TYPE_CHECKING:",
+    "@abstractmethod",
+]
+
+[tool.bandit]
+exclude_dirs = ["tests"]
+skips = ["B101", "B311", "B324"]

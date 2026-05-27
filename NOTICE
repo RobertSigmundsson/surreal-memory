@@ -1,0 +1,26 @@
+Surreal-Memory
+==============
+
+This project is a fork of NeuralMemory
+(https://github.com/nhadaututtheky/neural-memory) by nhadaututtheky,
+licensed under the MIT License (see LICENSE).
+
+The original copyright notice is retained per the terms of the MIT License:
+
+    Copyright (c) 2024 NeuralMemory Contributors
+
+Significant modifications by Toni Nowak / AI-Flow NOWAK, also released
+under the MIT License:
+
+  - SurrealDB storage backend replacing SQLite as the primary store
+  - Community plugin unlocking advanced features without Pro gating
+  - PyPI package renamed to `surreal-memory`
+  - Python module renamed to `surreal_memory` (planned in v2.0.0)
+  - npm package renamed to `surrealmemory` (planned in v2.0.0)
+  - VS Code extension renamed to `surrealmemory` / "Surreal-Memory" (planned in v2.0.0)
+  - CLI commands renamed `nmem-*` → `smem-*` (planned in v2.0.0)
+  - Additional Claude Code hooks (`session_start`)
+  - Rebuilt CI/CD pipeline for the new branding
+
+If you find Surreal-Memory useful, please also consider starring the
+original NeuralMemory project that made this work possible.

@@ -1,0 +1,238 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# C extensions
+*.so
+
+# Distribution / packaging
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# PyInstaller
+*.manifest
+*.spec
+
+# Installer logs
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Unit test / coverage reports
+htmlcov/
+.tox/
+.nox/
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+*.py,cover
+.hypothesis/
+.pytest_cache/
+
+# Translations
+*.mo
+*.pot
+
+# Django stuff:
+*.log
+local_settings.py
+db.sqlite3
+db.sqlite3-journal
+
+# Flask stuff:
+instance/
+.webassets-cache
+
+# Scrapy stuff:
+.scrapy
+
+# Sphinx documentation
+docs/_build/
+
+# PyBuilder
+.pybuilder/
+target/
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# IPython
+profile_default/
+ipython_config.py
+
+# pyenv
+.python-version
+
+# pipenv
+Pipfile.lock
+
+# poetry
+poetry.lock
+
+# pdm
+.pdm.toml
+.pdm-python
+.pdm-build/
+
+# PEP 582
+__pypackages__/
+
+# Celery stuff
+celerybeat-schedule
+celerybeat.pid
+
+# SageMath parsed files
+*.sage.py
+
+# Environments
+.env
+.venv
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+
+# Spyder project settings
+.spyderproject
+.spyproject
+
+# Rope project settings
+.ropeproject
+
+# mkdocs documentation
+/site
+
+# mypy
+.mypy_cache/
+.dmypy.json
+dmypy.json
+
+# Pyre type checker
+.pyre/
+
+# pytype static type analyzer
+.pytype/
+
+# Cython debug symbols
+cython_debug/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+nul
+
+# VS Code extension packages
+*.vsix
+
+# Project specific
+*.db
+*.sqlite
+data/
+logs/
+.surreal_memory/
+.claude/
+CLAUDE.md
+.rune/
+chatbot/
+.mcp.json
+/agents/
+/commands/
+/hooks/
+/skills/
+VISION.md
+.github/internal/
+
+# Temp/debug artifacts
+.tmp_*
+.tmp.*
+nonexistent_path_*
+MagicMock/
+companion-setup-brain.json
+.venv-*/
+
+# Root-level screenshots (use docs/assets/images/ instead)
+/*.png
+/*.jpg
+
+# Secrets / runtime config (defence-in-depth)
+config.toml
+*.key
+.env
+
+# Dashboard (React SPA)
+dashboard/node_modules/
+dashboard/dist/
+# Bundled dashboard UI for pip install — must be tracked
+!src/surreal_memory/server/static/dist/
+# OpenClaw plugin dist — must be tracked for git installs + npm publish
+!integrations/surrealmemory/dist/
+
+# spaCy models
+en_core_web_sm/
+en_core_web_md/
+en_core_web_lg/
+# Gemini CLI settings (contains user-specific config)
+.gemini/
+.gitnexus
+
+# Node (root-level tooling — dashboard has its own entry above)
+node_modules/
+package-lock.json
+package.json
+
+# Pay-hub (Cloudflare Worker — closed source, separate repo)
+pay-hub/
+
+# Playwright MCP
+.playwright-mcp/
+
+# Plugin zip artifacts
+surreal-memory-plugin-*.zip
+
+# uv lockfile
+uv.lock
+
+# Local-only docs/plans
+docs/plans/
+
+# Misc local files
+AUDIT-REPORT.md
+lefthook.yml
+integrations/surrealmemory/coverage/
+
+# Local surreal-memory brain data (never commit)
+.surrealmemory/
+.neuralmemory/
+
+# Serena MCP project cache (never commit)
+.serena/
+
+# Task Master AI — local dev planning (never commit)
+.taskmaster/

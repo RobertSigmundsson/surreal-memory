@@ -1,0 +1,20 @@
+name = "surreal-memory-sync-hub"
+main = "src/index.ts"
+compatibility_date = "2025-01-01"
+compatibility_flags = ["nodejs_compat"]
+
+# D1 Database
+[[d1_databases]]
+binding = "SYNC_DB"
+database_name = "surreal-memory-sync"
+database_id = "359518de-a552-4484-ab75-dfbaea3a7e31"
+
+# R2 Bucket (for brain snapshots — Phase 1 placeholder)
+# [[r2_buckets]]
+# binding = "BRAIN_SNAPSHOTS"
+# bucket_name = "surreal-memory-brains"
+
+# KV Namespace (for rate limiting — Phase 2)
+# [[kv_namespaces]]
+# binding = "RATE_LIMITS"
+# id = ""

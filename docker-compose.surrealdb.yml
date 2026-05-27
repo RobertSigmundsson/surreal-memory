@@ -1,0 +1,80 @@
+# SurrealMemory + SurrealDB + Cloudflare Sync Hub
+# Usage:
+#   cp .env.example .env   # edit with your keys
+#   docker compose -f docker-compose.surrealdb.yml up -d
+#
+# Dashboard:  http://localhost:8000/ui
+# API:        http://localhost:8000
+# Health:     http://localhost:8000/health
+# SurrealDB:  http://localhost:8001 (internal only)
+
+services:
+  surrealdb:
+    image: surrealdb/surrealdb:latest
+    command: start --user root --pass ${SURREALDB_PASS:-surrealmemory} --bind 0.0.0.0:8001
+    ports:
+      - "8001:8001"
+    volumes:
+      - surrealdb_data:/surrealdb/data
+    healthcheck:
+      test: ["CMD", "/surreal", "isready", "--endpoint", "http://localhost:8001"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 5s
+    restart: unless-stopped
+
+  surreal-memory:
+    build:
+      context: .
+      dockerfile: Dockerfile.surrealdb
+    ports:
+      - "8000:8000"
+      - "8765:8765"
+    environment:
+      # Core
+      - SURREAL_MEMORY_DIR=/data
+      - SURREAL_MEMORY_BRAIN=${SURREAL_MEMORY_BRAIN:-default}
+      - SURREAL_MEMORY_HOST=0.0.0.0
+      - SURREAL_MEMORY_PORT=8000
+
+      # SurrealDB
+      - SURREAL_MEMORY_STORAGE=surrealdb
+      - SURREALDB_URL=http://surrealdb:8001
+      - SURREALDB_USER=${SURREALDB_USER:-root}
+      - SURREALDB_PASS=${SURREALDB_PASS:-surrealmemory}
+      - SURREALDB_NS=surreal_memory
+      - SURREALDB_DB=default
+
+      # Embedding (Gemini 2.0)
+      - SURREAL_MEMORY_EMBEDDING_ENABLED=true
+      - SURREAL_MEMORY_EMBEDDING_PROVIDER=gemini
+      - SURREAL_MEMORY_EMBEDDING_MODEL=${SURREAL_MEMORY_EMBEDDING_MODEL:-gemini-embedding-exp-03-07}
+      - GEMINI_API_KEY=${GEMINI_API_KEY}
+
+      # Cloud Sync
+      - SURREAL_MEMORY_SYNC_ENABLED=true
+      - SURREAL_MEMORY_SYNC_AUTO=true
+      - SURREAL_MEMORY_HUB_URL=https://surreal-memory-sync-hub.toni-nowak84.workers.dev
+      # Set SURREAL_MEMORY_API_KEY in your .env — never hardcode it in this committed file.
+      - SURREAL_MEMORY_API_KEY=${SURREAL_MEMORY_API_KEY:-}
+
+      # Encryption (optional)
+      - SURREAL_MEMORY_ENCRYPTION_ENABLED=${SURREAL_MEMORY_ENCRYPTION_ENABLED:-false}
+      - SURREAL_MEMORY_ENCRYPTION_KEYS_DIR=/data/keys
+
+      # MCP — use stdio transport: each tool spawns `smem-mcp` directly
+      # Port 8765 exposed for optional HTTP transport: smem-mcp --http 8765
+      # Claude Code: claude mcp add --scope user surreal-memory -- smem-mcp
+      # opencode: add to opencode MCP config (see below)
+
+    depends_on:
+      surrealdb:
+        condition: service_healthy
+    volumes:
+      - nm_data:/data
+    restart: unless-stopped
+
+volumes:
+  surrealdb_data:
+  nm_data:

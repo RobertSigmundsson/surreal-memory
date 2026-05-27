@@ -1,0 +1,50 @@
+name: Publish TypeScript SDK (rolling RC)
+
+# Rolling release-candidate publish to npm whenever the SDK source changes
+# on `main`. Stable releases ride on the version tag flow via release.yml.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "integrations/surreal-memory-client/**"
+      - ".github/workflows/publish-sdk.yml"
+  workflow_dispatch:
+
+jobs:
+  publish-rc:
+    name: Publish prerelease to npm
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          registry-url: "https://registry.npmjs.org"
+
+      - name: Compute RC version
+        id: ver
+        working-directory: integrations/surreal-memory-client
+        run: |
+          BASE=$(node -p "require('./package.json').version")
+          SHA=${GITHUB_SHA::7}
+          echo "version=${BASE}-rc.${SHA}" >> "$GITHUB_OUTPUT"
+
+      - name: Set RC version
+        working-directory: integrations/surreal-memory-client
+        run: npm version --no-git-tag-version "${{ steps.ver.outputs.version }}"
+
+      - name: Install + typecheck + build
+        working-directory: integrations/surreal-memory-client
+        run: |
+          npm ci || npm install
+          npm run typecheck
+          npm run build
+
+      - name: Publish prerelease (--tag next)
+        working-directory: integrations/surreal-memory-client
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: npm publish --tag next --access public

@@ -1,0 +1,265 @@
+{
+  "name": "surrealmemory",
+  "displayName": "Surreal-Memory",
+  "description": "Visual brain explorer, inline recall, and memory management for Surreal-Memory",
+  "version": "2.0.0",
+  "publisher": "ai-flow-nowak",
+  "license": "MIT",
+  "preview": true,
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/acidkill/surreal-memory"
+  },
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Other",
+    "Visualization"
+  ],
+  "keywords": [
+    "neural",
+    "memory",
+    "brain",
+    "knowledge-graph",
+    "recall"
+  ],
+  "icon": "media/icon.png",
+  "activationEvents": [
+    "onView:surrealmemory.memories"
+  ],
+  "main": "./dist/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "surrealmemory.encode",
+        "title": "Encode Selection as Memory",
+        "category": "Surreal-Memory"
+      },
+      {
+        "command": "surrealmemory.encodeInput",
+        "title": "Encode Text as Memory",
+        "category": "Surreal-Memory"
+      },
+      {
+        "command": "surrealmemory.recall",
+        "title": "Recall Memory",
+        "category": "Surreal-Memory"
+      },
+      {
+        "command": "surrealmemory.openGraph",
+        "title": "Open Graph Explorer",
+        "category": "Surreal-Memory"
+      },
+      {
+        "command": "surrealmemory.switchBrain",
+        "title": "Switch Brain",
+        "category": "Surreal-Memory"
+      },
+      {
+        "command": "surrealmemory.createBrain",
+        "title": "Create Brain",
+        "category": "Surreal-Memory"
+      },
+      {
+        "command": "surrealmemory.refreshMemories",
+        "title": "Refresh Memory Tree",
+        "category": "Surreal-Memory",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "surrealmemory.startServer",
+        "title": "Start Server",
+        "category": "Surreal-Memory"
+      },
+      {
+        "command": "surrealmemory.connectServer",
+        "title": "Connect to Server",
+        "category": "Surreal-Memory"
+      },
+      {
+        "command": "surrealmemory.recallFromTree",
+        "title": "Recall Related Memories",
+        "category": "Surreal-Memory",
+        "icon": "$(search)"
+      },
+      {
+        "command": "surrealmemory.indexCodebase",
+        "title": "Index Codebase",
+        "category": "Surreal-Memory",
+        "icon": "$(search-fuzzy)"
+      },
+      {
+        "command": "surrealmemory.importMemories",
+        "title": "Import Memories from External Source",
+        "category": "Surreal-Memory",
+        "icon": "$(cloud-download)"
+      },
+      {
+        "command": "surrealmemory.recap",
+        "title": "Recap Session Context",
+        "category": "Surreal-Memory",
+        "icon": "$(history)"
+      },
+      {
+        "command": "surrealmemory.recapTopic",
+        "title": "Recap by Topic",
+        "category": "Surreal-Memory",
+        "icon": "$(search)"
+      },
+      {
+        "command": "surrealmemory.eternalSave",
+        "title": "Save Eternal Context",
+        "category": "Surreal-Memory",
+        "icon": "$(save)"
+      },
+      {
+        "command": "surrealmemory.eternalStatus",
+        "title": "Eternal Context Status",
+        "category": "Surreal-Memory",
+        "icon": "$(info)"
+      }
+    ],
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "surrealmemory",
+          "title": "Surreal-Memory",
+          "icon": "media/brain.svg"
+        }
+      ]
+    },
+    "views": {
+      "surrealmemory": [
+        {
+          "id": "surrealmemory.memories",
+          "name": "Memories",
+          "icon": "media/neuron.svg"
+        }
+      ]
+    },
+    "menus": {
+      "view/title": [
+        {
+          "command": "surrealmemory.refreshMemories",
+          "when": "view == surrealmemory.memories",
+          "group": "navigation"
+        }
+      ],
+      "view/item/context": [
+        {
+          "command": "surrealmemory.recallFromTree",
+          "when": "view == surrealmemory.memories && viewItem == surrealmemory.neuron",
+          "group": "inline"
+        },
+        {
+          "command": "surrealmemory.recallFromTree",
+          "when": "view == surrealmemory.memories && viewItem == surrealmemory.neuron",
+          "group": "1_actions"
+        }
+      ]
+    },
+    "keybindings": [
+      {
+        "command": "surrealmemory.encode",
+        "key": "ctrl+shift+m e",
+        "mac": "cmd+shift+m e",
+        "when": "editorTextFocus"
+      },
+      {
+        "command": "surrealmemory.recall",
+        "key": "ctrl+shift+m r",
+        "mac": "cmd+shift+m r"
+      },
+      {
+        "command": "surrealmemory.openGraph",
+        "key": "ctrl+shift+m g",
+        "mac": "cmd+shift+m g"
+      },
+      {
+        "command": "surrealmemory.indexCodebase",
+        "key": "ctrl+shift+m i",
+        "mac": "cmd+shift+m i"
+      },
+      {
+        "command": "surrealmemory.recap",
+        "key": "ctrl+shift+m c",
+        "mac": "cmd+shift+m c"
+      }
+    ],
+    "configuration": {
+      "title": "Surreal-Memory",
+      "properties": {
+        "surrealmemory.pythonPath": {
+          "type": "string",
+          "default": "python",
+          "description": "Path to Python interpreter with surreal-memory installed"
+        },
+        "surrealmemory.autoStart": {
+          "type": "boolean",
+          "default": true,
+          "description": "Automatically start the Surreal-Memory server on activation"
+        },
+        "surrealmemory.serverUrl": {
+          "type": "string",
+          "default": "http://127.0.0.1:8000",
+          "description": "URL of the Surreal-Memory server"
+        },
+        "surrealmemory.graphNodeLimit": {
+          "type": "number",
+          "default": 1000,
+          "minimum": 50,
+          "maximum": 10000,
+          "description": "Maximum number of nodes to render in the graph explorer"
+        },
+        "surrealmemory.codeLensEnabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show CodeLens hints for memory-related comments"
+        },
+        "surrealmemory.commentTriggers": {
+          "type": "array",
+          "default": [
+            "remember:",
+            "note:",
+            "decision:",
+            "todo:"
+          ],
+          "items": {
+            "type": "string"
+          },
+          "description": "Comment patterns that trigger encode suggestions"
+        }
+      }
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run build",
+    "build": "node esbuild.js --production",
+    "watch": "node esbuild.js --watch",
+    "lint": "eslint src --ext ts",
+    "pretest": "tsc -p test/tsconfig.json",
+    "test": "node ./out/test/runTest.js",
+    "test:unit": "node test/unit/build.js && mocha out/test/unit/**/*.test.js --timeout 10000",
+    "test:perf": "npx playwright test test/webview/graph.perf.test.ts",
+    "package": "vsce package"
+  },
+  "devDependencies": {
+    "@types/cytoscape": "^3.21.9",
+    "@types/glob": "^8.1.0",
+    "@types/mocha": "^10.0.10",
+    "@types/node": "^20.0.0",
+    "@types/vscode": "^1.85.0",
+    "@types/ws": "^8.5.0",
+    "@vscode/test-electron": "^2.3.0",
+    "@vscode/vsce": "^2.22.0",
+    "esbuild": "^0.19.0",
+    "glob": "^13.0.1",
+    "mocha": "^11.7.5",
+    "typescript": "^5.3.0"
+  },
+  "dependencies": {
+    "cytoscape": "^3.33.1",
+    "ws": "^8.16.0"
+  }
+}

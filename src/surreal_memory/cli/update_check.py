@@ -1,0 +1,181 @@
+"""Non-blocking update checker for the CLI.
+
+Checks PyPI for newer versions of surreal-memory, cached for 24 hours.
+Runs in background thread to avoid slowing down CLI commands.
+
+Cache location: ~/.surrealmemory/.update_check
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+import os
+import threading
+import time
+from pathlib import Path
+from typing import Any
+
+logger = logging.getLogger(__name__)
+
+PYPI_URL = "https://pypi.org/pypi/surreal-memory/json"
+CHECK_INTERVAL_SECONDS = 24 * 60 * 60  # 24 hours
+REQUEST_TIMEOUT_SECONDS = 3
+
+
+def _get_cache_path() -> Path:
+    """Get path to update check cache file."""
+    data_dir = os.environ.get("SURREAL_MEMORY_DIR") or str(Path.home() / ".surrealmemory")
+    return Path(data_dir) / ".update_check"
+
+
+def _read_cache() -> dict[str, Any]:
+    """Read cached update check result."""
+    try:
+        cache_path = _get_cache_path()
+        if not cache_path.exists():
+            return {}
+        result: dict[str, Any] = json.loads(cache_path.read_text(encoding="utf-8"))
+        return result
+    except (OSError, json.JSONDecodeError, ValueError):
+        logger.debug("Failed to read update cache", exc_info=True)
+        return {}
+
+
+def _write_cache(data: dict[str, Any]) -> None:
+    """Write update check result to cache."""
+    try:
+        cache_path = _get_cache_path()
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        cache_path.write_text(json.dumps(data), encoding="utf-8")
+    except OSError:
+        logger.debug("Failed to write update cache", exc_info=True)
+
+
+def _parse_version(version_str: str) -> tuple[int, ...]:
+    """Parse version string into comparable tuple."""
+    parts: list[int] = []
+    for part in version_str.split(".")[:3]:
+        digits = ""
+        for ch in part:
+            if ch.isdigit():
+                digits += ch
+            else:
+                break
+        if digits:
+            parts.append(int(digits))
+    return tuple(parts)
+
+
+def _is_newer(remote: str, local: str) -> bool:
+    """Check if remote version is newer than local."""
+    return _parse_version(remote) > _parse_version(local)
+
+
+def _fetch_latest_version() -> str | None:
+    """Fetch latest version from PyPI. Returns None on failure."""
+    try:
+        from urllib.request import Request, urlopen
+
+        req = Request(
+            PYPI_URL,
+            headers={"Accept": "application/json", "User-Agent": "surreal-memory-cli"},
+        )
+        with urlopen(req, timeout=REQUEST_TIMEOUT_SECONDS) as resp:
+            if resp.status != 200:
+                return None
+            data = json.loads(resp.read())
+            version: str | None = data.get("info", {}).get("version")
+            return version
+    except (OSError, ValueError, KeyError):
+        logger.debug("Failed to fetch latest version from PyPI", exc_info=True)
+        return None
+
+
+def _check_and_notify() -> None:
+    """Background worker: check PyPI and print update notice if needed."""
+    try:
+        from surreal_memory import __version__
+
+        cache = _read_cache()
+        last_check = cache.get("last_check", 0)
+
+        # Throttle: skip if checked recently
+        if time.time() - last_check < CHECK_INTERVAL_SECONDS:
+            # Still show cached notification if not dismissed
+            cached_version = cache.get("latest_version")
+            if (
+                cached_version
+                and _is_newer(cached_version, __version__)
+                and not cache.get("dismissed")
+            ):
+                _print_update_notice(__version__, cached_version)
+            return
+
+        latest = _fetch_latest_version()
+        if not latest:
+            return
+
+        # Update cache
+        new_cache: dict[str, Any] = {
+            "last_check": time.time(),
+            "latest_version": latest,
+            "dismissed": False,
+        }
+        _write_cache(new_cache)
+
+        if _is_newer(latest, __version__):
+            _print_update_notice(__version__, latest)
+    except (OSError, ValueError, KeyError):
+        logger.debug("Update check failed", exc_info=True)
+
+
+def _is_editable_install() -> bool:
+    """Detect if surreal-memory is installed in editable/development mode."""
+    try:
+        from importlib.metadata import distribution
+
+        dist = distribution("surreal-memory")
+        direct_url = dist.read_text("direct_url.json")
+        if direct_url and '"editable"' in direct_url:
+            return True
+    except Exception:
+        logger.debug("Failed to check editable install via metadata", exc_info=True)
+
+    try:
+        import surreal_memory
+
+        pkg_dir = Path(surreal_memory.__file__).resolve().parent
+        for parent in [pkg_dir, *list(pkg_dir.parents)]:
+            if (parent / "pyproject.toml").exists() and (parent / ".git").exists():
+                return True
+            if parent == parent.parent:
+                break
+    except Exception:
+        logger.debug("Failed to check editable install via filesystem", exc_info=True)
+
+    return False
+
+
+def _print_update_notice(current: str, latest: str) -> None:
+    """Print a styled update notice to stderr (doesn't pollute stdout)."""
+    import sys
+
+    if _is_editable_install():
+        notice = (
+            f"\n  Dev install (v{current}). PyPI latest: v{latest}.\n"
+            f"  Skipping update prompt for editable install.\n"
+        )
+    else:
+        notice = (
+            f"\n  Update available: surreal-memory {current} → {latest}\n"
+            f"  Run: pip install -U surreal-memory\n"
+        )
+    # Use stderr so it doesn't break piped output (e.g. smem recall ... | jq)
+    print(notice, file=sys.stderr, flush=True)
+
+
+def run_update_check_background() -> None:
+    """Launch update check in a daemon thread. Non-blocking, fire-and-forget."""
+    thread = threading.Thread(target=_check_and_notify, daemon=True)
+    thread.start()

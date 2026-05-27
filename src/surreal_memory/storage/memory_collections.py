@@ -1,0 +1,339 @@
+"""In-memory fiber, typed memory, and project operations mixin."""
+
+from __future__ import annotations
+
+from datetime import datetime, timedelta
+from typing import Literal
+
+from surreal_memory.core.fiber import Fiber
+from surreal_memory.core.memory_types import MemoryType, Priority, TypedMemory
+from surreal_memory.core.project import Project
+from surreal_memory.utils.timeutils import utcnow
+
+
+class InMemoryCollectionsMixin:
+    """Mixin providing fiber, typed memory, and project operations."""
+
+    _fibers: dict[str, dict[str, Fiber]]
+    _typed_memories: dict[str, dict[str, TypedMemory]]
+    _projects: dict[str, dict[str, Project]]
+
+    def _get_brain_id(self) -> str:
+        raise NotImplementedError
+
+    # ========== Fiber Operations ==========
+
+    async def add_fiber(self, fiber: Fiber) -> str:
+        brain_id = self._get_brain_id()
+
+        if fiber.id in self._fibers[brain_id]:
+            raise ValueError(f"Fiber {fiber.id} already exists")
+
+        self._fibers[brain_id][fiber.id] = fiber
+        return fiber.id
+
+    async def get_fiber(self, fiber_id: str) -> Fiber | None:
+        brain_id = self._get_brain_id()
+        return self._fibers[brain_id].get(fiber_id)
+
+    async def find_fibers(
+        self,
+        contains_neuron: str | None = None,
+        time_overlaps: tuple[datetime, datetime] | None = None,
+        tags: set[str] | None = None,
+        min_salience: float | None = None,
+        metadata_key: str | None = None,
+        limit: int = 100,
+    ) -> list[Fiber]:
+        limit = min(limit, 1000)
+        brain_id = self._get_brain_id()
+        results: list[Fiber] = []
+
+        for fiber in self._fibers[brain_id].values():
+            if contains_neuron is not None and contains_neuron not in fiber.neuron_ids:
+                continue
+            if time_overlaps is not None:
+                start, end = time_overlaps
+                if not fiber.overlaps_time(start, end):
+                    continue
+            if tags is not None and not tags.issubset(fiber.tags):
+                continue
+            if min_salience is not None and fiber.salience < min_salience:
+                continue
+            if metadata_key is not None and metadata_key not in fiber.metadata:
+                continue
+
+            results.append(fiber)
+
+        results.sort(key=lambda f: f.salience, reverse=True)
+        return results[:limit]
+
+    async def find_fibers_batch(
+        self,
+        neuron_ids: list[str],
+        limit_per_neuron: int = 10,
+        tags: set[str] | None = None,
+    ) -> list[Fiber]:
+        """Find fibers containing any of the given neurons from in-memory store."""
+        brain_id = self._get_brain_id()
+        nid_set = set(neuron_ids)
+        seen: set[str] = set()
+        result: list[Fiber] = []
+
+        for fiber in self._fibers[brain_id].values():
+            if fiber.id in seen:
+                continue
+            if not (fiber.neuron_ids & nid_set):
+                continue
+            # fiber.tags property = auto_tags | agent_tags (union)
+            if tags is not None and not tags.issubset(fiber.tags):
+                continue
+            seen.add(fiber.id)
+            result.append(fiber)
+
+        result.sort(key=lambda f: f.salience, reverse=True)
+        return result
+
+    async def update_fiber(self, fiber: Fiber) -> None:
+        brain_id = self._get_brain_id()
+
+        if fiber.id not in self._fibers[brain_id]:
+            raise ValueError(f"Fiber {fiber.id} does not exist")
+
+        self._fibers[brain_id][fiber.id] = fiber
+
+    async def delete_fiber(self, fiber_id: str) -> bool:
+        brain_id = self._get_brain_id()
+
+        if fiber_id not in self._fibers[brain_id]:
+            return False
+
+        del self._fibers[brain_id][fiber_id]
+        return True
+
+    async def get_fibers(
+        self,
+        limit: int = 10,
+        order_by: Literal["created_at", "salience", "frequency"] = "created_at",
+        descending: bool = True,
+    ) -> list[Fiber]:
+        brain_id = self._get_brain_id()
+        fibers = list(self._fibers[brain_id].values())
+
+        sort_keys = {
+            "created_at": lambda f: f.created_at,
+            "salience": lambda f: f.salience,
+            "frequency": lambda f: f.frequency,
+        }
+        fibers.sort(key=sort_keys[order_by], reverse=descending)
+        return fibers[:limit]
+
+    # ========== TypedMemory Operations ==========
+
+    async def add_typed_memory(self, typed_memory: TypedMemory) -> str:
+        brain_id = self._get_brain_id()
+
+        if typed_memory.fiber_id not in self._fibers[brain_id]:
+            raise ValueError(f"Fiber {typed_memory.fiber_id} does not exist")
+
+        self._typed_memories[brain_id][typed_memory.fiber_id] = typed_memory
+        return typed_memory.fiber_id
+
+    async def get_typed_memory(self, fiber_id: str) -> TypedMemory | None:
+        brain_id = self._get_brain_id()
+        return self._typed_memories[brain_id].get(fiber_id)
+
+    async def find_typed_memories(
+        self,
+        memory_type: MemoryType | None = None,
+        min_priority: Priority | None = None,
+        include_expired: bool = False,
+        project_id: str | None = None,
+        tags: set[str] | None = None,
+        limit: int = 100,
+        tier: str | None = None,
+    ) -> list[TypedMemory]:
+        limit = min(limit, 1000)
+        brain_id = self._get_brain_id()
+        results: list[TypedMemory] = []
+
+        for tm in self._typed_memories[brain_id].values():
+            if memory_type is not None and tm.memory_type != memory_type:
+                continue
+            if min_priority is not None and tm.priority < min_priority:
+                continue
+            if not include_expired and tm.is_expired:
+                continue
+            if project_id is not None and tm.project_id != project_id:
+                continue
+            if tags is not None and not tags.issubset(tm.tags):
+                continue
+            if tier is not None and tm.tier != tier:
+                continue
+
+            results.append(tm)
+            if len(results) >= limit:
+                break
+
+        results.sort(key=lambda t: (t.priority, t.created_at), reverse=True)
+        return results
+
+    async def count_typed_memories(
+        self,
+        tier: str | None = None,
+        memory_type: MemoryType | None = None,
+    ) -> int:
+        brain_id = self._get_brain_id()
+        count = 0
+        for tm in self._typed_memories[brain_id].values():
+            if tm.is_expired:
+                continue
+            if tier is not None and tm.tier != tier:
+                continue
+            if memory_type is not None and tm.memory_type != memory_type:
+                continue
+            count += 1
+        return count
+
+    async def update_typed_memory(self, typed_memory: TypedMemory) -> None:
+        brain_id = self._get_brain_id()
+
+        if typed_memory.fiber_id not in self._typed_memories[brain_id]:
+            raise ValueError(f"TypedMemory for fiber {typed_memory.fiber_id} does not exist")
+
+        self._typed_memories[brain_id][typed_memory.fiber_id] = typed_memory
+
+    async def delete_typed_memory(self, fiber_id: str) -> bool:
+        brain_id = self._get_brain_id()
+
+        if fiber_id not in self._typed_memories[brain_id]:
+            return False
+
+        del self._typed_memories[brain_id][fiber_id]
+        return True
+
+    async def get_expired_memories(self, limit: int = 100) -> list[TypedMemory]:
+        brain_id = self._get_brain_id()
+        limit = min(limit, 1000)
+        result: list[TypedMemory] = []
+        for tm in self._typed_memories[brain_id].values():
+            if tm.is_expired:
+                result.append(tm)
+                if len(result) >= limit:
+                    break
+        return result
+
+    async def get_expired_memory_count(self) -> int:
+        brain_id = self._get_brain_id()
+        return sum(1 for tm in self._typed_memories[brain_id].values() if tm.is_expired)
+
+    async def get_expiring_memories_for_fibers(
+        self,
+        fiber_ids: list[str],
+        within_days: int = 7,
+    ) -> list[TypedMemory]:
+        if not fiber_ids:
+            return []
+        brain_id = self._get_brain_id()
+        now = utcnow()
+        deadline = now + timedelta(days=within_days)
+        fiber_set = set(fiber_ids)
+
+        return [
+            tm
+            for tm in self._typed_memories[brain_id].values()
+            if tm.fiber_id in fiber_set
+            and tm.expires_at is not None
+            and now < tm.expires_at <= deadline
+        ]
+
+    async def get_expiring_memory_count(self, within_days: int = 7) -> int:
+        brain_id = self._get_brain_id()
+        now = utcnow()
+        deadline = now + timedelta(days=within_days)
+        return sum(
+            1
+            for tm in self._typed_memories[brain_id].values()
+            if tm.expires_at is not None and now < tm.expires_at <= deadline
+        )
+
+    async def get_project_memories(
+        self,
+        project_id: str,
+        include_expired: bool = False,
+    ) -> list[TypedMemory]:
+        brain_id = self._get_brain_id()
+        results: list[TypedMemory] = []
+
+        for tm in self._typed_memories[brain_id].values():
+            if tm.project_id != project_id:
+                continue
+            if not include_expired and tm.is_expired:
+                continue
+            results.append(tm)
+
+        results.sort(key=lambda t: (t.priority, t.created_at), reverse=True)
+        return results
+
+    # ========== Project Operations ==========
+
+    async def add_project(self, project: Project) -> str:
+        brain_id = self._get_brain_id()
+
+        if project.id in self._projects[brain_id]:
+            raise ValueError(f"Project {project.id} already exists")
+
+        self._projects[brain_id][project.id] = project
+        return project.id
+
+    async def get_project(self, project_id: str) -> Project | None:
+        brain_id = self._get_brain_id()
+        return self._projects[brain_id].get(project_id)
+
+    async def get_project_by_name(self, name: str) -> Project | None:
+        brain_id = self._get_brain_id()
+        name_lower = name.lower()
+        for project in self._projects[brain_id].values():
+            if project.name.lower() == name_lower:
+                return project
+        return None
+
+    async def list_projects(
+        self,
+        active_only: bool = False,
+        tags: set[str] | None = None,
+        limit: int = 100,
+    ) -> list[Project]:
+        limit = min(limit, 1000)
+        brain_id = self._get_brain_id()
+        results: list[Project] = []
+
+        for project in self._projects[brain_id].values():
+            if active_only and not project.is_active:
+                continue
+            if tags is not None and not tags.intersection(project.tags):
+                continue
+
+            results.append(project)
+            if len(results) >= limit:
+                break
+
+        results.sort(key=lambda p: (p.priority, p.start_date), reverse=True)
+        return results
+
+    async def update_project(self, project: Project) -> None:
+        brain_id = self._get_brain_id()
+
+        if project.id not in self._projects[brain_id]:
+            raise ValueError(f"Project {project.id} does not exist")
+
+        self._projects[brain_id][project.id] = project
+
+    async def delete_project(self, project_id: str) -> bool:
+        brain_id = self._get_brain_id()
+
+        if project_id not in self._projects[brain_id]:
+            return False
+
+        del self._projects[brain_id][project_id]
+        return True

@@ -1,0 +1,55 @@
+{
+  "name": "surrealmemory",
+  "version": "2.0.0",
+  "description": "Surreal-Memory plugin for OpenClaw — graph-based persistent memory for AI agents with SurrealDB backend",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "openclaw": {
+    "id": "surrealmemory",
+    "extensions": [
+      "./dist/index.js"
+    ],
+    "source": "./src/index.ts"
+  },
+  "scripts": {
+    "build": "tsc",
+    "typecheck": "tsc --noEmit",
+    "prepublishOnly": "npm run build",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:coverage": "vitest run --coverage"
+  },
+  "peerDependencies": {},
+  "keywords": [
+    "openclaw",
+    "openclaw-plugin",
+    "memory",
+    "surrealmemory",
+    "surreal-memory",
+    "surrealdb",
+    "ai-agent",
+    "persistent-memory"
+  ],
+  "author": "Toni Nowak / AI-Flow NOWAK",
+  "license": "MIT",
+  "homepage": "https://github.com/acidkill/surreal-memory#readme",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/acidkill/surreal-memory"
+  },
+  "files": [
+    "src/",
+    "dist/",
+    "openclaw.plugin.json"
+  ],
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^25.2.2",
+    "@vitest/coverage-v8": "^3.2.4",
+    "typescript": "^5.9.3",
+    "vitest": "^3.0.0"
+  }
+}

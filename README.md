@@ -1,0 +1,373 @@
+# Surreal-Memory
+
+[![PyPI](https://img.shields.io/pypi/v/surreal-memory.svg)](https://pypi.org/project/surreal-memory/)
+[![CI](https://github.com/acidkill/surreal-memory/workflows/CI/badge.svg)](https://github.com/acidkill/surreal-memory/actions)
+[![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](https://opensource.org/licenses/MIT)
+[![SurrealDB](https://img.shields.io/badge/Powered_by-SurrealDB-ff00e5)](https://surrealdb.com/)
+
+**Persistent graph memory for AI agents, powered by SurrealDB.**
+
+All features are free and open source. No license keys. No paywalls. No embedding API required for basic usage.
+
+```bash
+pip install surreal-memory[surrealdb]
+smem init --full
+```
+
+Restart your AI tool. Your agent now remembers.
+
+---
+
+## Why Surreal-Memory?
+
+Most AI memory tools are vector databases with a search API bolted on. Surreal-Memory is a **graph that thinks** — memories are stored as interconnected neurons and recalled through spreading activation, backed by SurrealDB's multi-model engine (document + graph + vector in one database).
+
+```
+Query: "Why did Tuesday's outage happen?"
+
+Surreal-Memory traces the chain:
+outage ← CAUSED_BY ← JWT expiry ← SUGGESTED_BY ← Alice's review
+```
+
+**Relationships are explicit** — `CAUSED_BY`, `LEADS_TO`, `RESOLVED_BY`, `CONTRADICTS` — so your agent doesn't just find memories, it *reasons* through them.
+
+| | RAG / Vector Search | Surreal-Memory |
+|--|---------------------|----------------|
+| Backend | Pinecone / Chroma | **SurrealDB** (doc + graph + vector) |
+| Retrieval | Similarity score | Graph traversal + vector search |
+| Relationships | None | 24 explicit synapse types |
+| LLM required | Yes (embeddings) | No — works fully offline |
+| Multi-hop reasoning | Multiple queries | One traversal |
+| Memory lifecycle | Static | Decay, reinforcement, consolidation |
+| Cost per 1K queries | ~$0.02 | **$0.00** |
+
+---
+
+## What's Different From Surreal-Memory?
+
+Surreal-Memory builds on the neural graph memory architecture but replaces the SQLite + paid-Pro model with **SurrealDB + free community plugin**:
+
+| | Surreal-Memory | Surreal-Memory |
+|--|---------------|----------------|
+| Storage engine | SQLite (limited) | **SurrealDB** (all features free) |
+| Vector search | Paid Pro feature | **Built-in** via SurrealDB HNSW |
+| Semantic recall | Paid Pro feature | **Free** via community plugin |
+| Smart consolidation | Paid Pro feature | **Free** via community plugin |
+| Compression | Paid Pro feature | **Free** via community plugin |
+| License required | Yes for Pro features | **No** — everything is free |
+| Multi-model | No | **Yes** — document + graph + vector |
+
+---
+
+## Quick Start
+
+### Automated Setup (Claude Code)
+
+Give this to Claude Code on any machine and it handles everything — prerequisites, Docker, MCP registration, and verification:
+
+```
+Please read INSTALL_PROMPT.md and follow the instructions to set up Surreal-Memory on this machine.
+```
+
+Or clone and point Claude Code at the file:
+
+```bash
+git clone https://github.com/acidkill/surreal-memory.git
+# then in Claude Code:
+# "Read INSTALL_PROMPT.md and follow the setup instructions"
+```
+
+### Docker (manual)
+
+```bash
+cp .env.example .env    # edit with your keys
+docker compose -f docker-compose.surrealdb.yml up -d
+```
+
+Dashboard at http://localhost:8000/ui, SurrealDB at localhost:8001.
+
+### Manual
+
+```bash
+pip install surreal-memory[surrealdb]
+smem init --full
+```
+
+### First Memory
+
+```bash
+smem remember "Fixed auth bug with null check in login.py:42"
+smem recall "auth bug"
+# → "Fixed auth bug with null check in login.py:42"
+```
+
+---
+
+## 3 Tools. That's It.
+
+53 MCP tools are available, but you only need three:
+
+| Tool | What it does |
+|------|-------------|
+| `smem_remember` | Store a memory — auto-detects type, tags, and connections |
+| `smem_recall` | Recall through spreading activation + vector search |
+| `smem_health` | Brain health score (A–F) with actionable fix suggestions |
+
+Everything else — sessions, context loading, habit tracking, maintenance — works transparently in the background.
+
+---
+
+## Architecture
+
+```
+                    ┌──────────────────────────────┐
+                    │       MCP Server (53 tools)   │
+                    └──────────┬───────────────────┘
+                               │
+                    ┌──────────▼───────────────────┐
+                    │     Engine (encoding +        │
+                    │     retrieval pipeline)       │
+                    └──────────┬───────────────────┘
+                               │
+              ┌────────────────▼────────────────┐
+              │        SurrealDB Backend         │
+              │  ┌─────────┬─────────┬────────┐ │
+              │  │ Document │  Graph  │ Vector │ │
+              │  │  Store   │ Queries │  HNSW  │ │
+              │  └─────────┴─────────┴────────┘ │
+              └─────────────────────────────────┘
+```
+
+### Core Data Model
+
+- **Brain** — top-level container with configuration
+- **Neuron** — atomic knowledge node (entity, concept, time, action, intent, state)
+- **Synapse** — typed, directed edge between neurons (24 types: `CAUSED_BY`, `LEADS_TO`, etc.)
+- **Fiber** — a memory record: typed content with metadata, priority, tags, lifecycle stage
+
+### Engine
+
+- **Encoding Pipeline** — composable async steps: extract entities → create neurons → link synapses → bundle into fibers
+- **Reflex Retrieval** — spreading activation through the neuron graph, combined with SurrealDB vector search when available
+- **Consolidation** — merges similar neurons, reinforces strong paths, prunes weak ones
+- **Compression** — 5-tier lifecycle: full → summary → essence → ghost → metadata
+
+### Community Plugin
+
+The built-in `CommunityPlugin` provides all Pro-tier features at no cost:
+
+- **Cone Queries** — HNSW vector search via SurrealDB for semantic recall
+- **Smart Merge** — embedding-based neuron consolidation
+- **Directional Compression** — multi-axis semantic preservation
+- **SurrealDB Storage Backend** — registered automatically when `[surrealdb]` extra is installed
+
+---
+
+## Cloud Sync
+
+Sync your brain across every machine through your own Cloudflare Worker:
+
+```
+Laptop ←→ Your Cloudflare Worker ←→ Desktop
+                  ↕
+              Your Phone
+```
+
+You deploy the sync hub to **your own Cloudflare account**. Your D1 database, your encryption key, your data.
+
+```bash
+smem sync --full    # bi-directional sync
+smem sync --auto    # auto-sync after every remember/recall
+```
+
+Sync uses **Merkle delta** — only diffs travel, not the full brain.
+
+---
+
+## Features
+
+#### Memory & Recall
+- **14 memory types** — fact, decision, error, insight, preference, workflow, instruction, and more
+- **Spreading activation** — memories surface by association, not keyword match
+- **Vector search** — SurrealDB HNSW for semantic similarity (when embeddings are configured)
+- **Cognitive reasoning** — hypothesize, submit evidence, make predictions, verify with Bayesian confidence
+
+#### Knowledge Ingestion
+- **Train from documents** — PDF, DOCX, PPTX, HTML, JSON, XLSX, CSV ingested into permanent brain knowledge
+- **Train from database schemas** — extract table structures and FK relationships
+- **Import adapters** — migrate from ChromaDB, Mem0, Cognee, Graphiti, LlamaIndex
+
+#### Lifecycle & Storage
+- **Memory consolidation** — episodic memories mature into semantic knowledge
+- **Compression tiers** — full → summary → essence → ghost → metadata
+- **Brain versioning** — snapshot, rollback, diff, transplant memories between brains
+
+#### Ecosystem
+- **Web dashboard** — 7-page React UI with graph visualization, health radar, timeline
+- **VS Code extension** — memory tree, graph explorer, CodeLens, WebSocket sync
+- **Safety** — Fernet encryption, sensitive content auto-detection, input firewall
+- **Plugin system** — extend with custom retrieval strategies, compression, and storage backends
+
+---
+
+## Setup by Tool
+
+<details>
+<summary><b>Claude Code (Plugin)</b></summary>
+
+```bash
+/plugin marketplace add acidkill/surreal-memory
+/plugin install surreal-memory@surreal-memory-marketplace
+```
+
+</details>
+
+<details>
+<summary><b>Cursor / Windsurf / Other MCP Clients</b></summary>
+
+```bash
+pip install surreal-memory[surrealdb]
+```
+
+Add to your editor's MCP config:
+
+```json
+{
+  "mcpServers": {
+    "surreal-memory": { "command": "smem-mcp" }
+  }
+}
+```
+
+</details>
+
+<details>
+<summary><b>OpenClaw (Plugin)</b></summary>
+
+```bash
+pip install surreal-memory[surrealdb] && npm install -g surrealmemory
+```
+
+Set memory slot in `~/.openclaw/openclaw.json`:
+```json
+{ "plugins": { "slots": { "memory": "surrealmemory" } } }
+```
+
+</details>
+
+<details>
+<summary><b>TypeScript / JavaScript (REST SDK)</b></summary>
+
+```bash
+npm install @acidkill/surreal-memory-client
+```
+
+```ts
+import { SurrealMemoryClient } from "@acidkill/surreal-memory-client"
+
+const client = new SurrealMemoryClient({
+  baseUrl: "http://localhost:8000",
+  brain: "myproject",
+})
+
+await client.remember({ content: "Fixed auth bug", type: "fix", priority: 7 })
+const { results } = await client.recall({ query: "auth bug" })
+```
+
+Full reference: [`integrations/surreal-memory-client/README.md`](integrations/surreal-memory-client/README.md).
+
+</details>
+
+<details>
+<summary><b>Docker (self-hosted)</b></summary>
+
+```bash
+cp .env.example .env          # configure SurrealDB + embeddings
+docker compose -f docker-compose.surrealdb.yml up -d
+```
+
+Dashboard: http://localhost:8000/ui
+
+</details>
+
+---
+
+## Python API
+
+```python
+import asyncio
+from surreal_memory import Brain
+from surreal_memory.storage import create_storage
+from surreal_memory.core.brain_mode import BrainModeConfig, BrainMode
+from surreal_memory.engine.encoder import MemoryEncoder
+from surreal_memory.engine.retrieval import ReflexPipeline
+
+async def main():
+    config = BrainModeConfig(mode=BrainMode.LOCAL)
+    storage = await create_storage(config, brain_id="my_brain")
+
+    encoder = MemoryEncoder(storage, brain.config)
+    await encoder.encode("Met Alice to discuss API design")
+    await encoder.encode("Decided to use FastAPI for backend")
+
+    pipeline = ReflexPipeline(storage, brain.config)
+    result = await pipeline.query("What did we decide about backend?")
+    print(result.context)  # "Decided to use FastAPI for backend"
+
+asyncio.run(main())
+```
+
+---
+
+## Development
+
+```bash
+git clone https://github.com/acidkill/surreal-memory
+cd surreal-memory && pip install -e ".[dev]"
+smem doctor --dev        # Verify contributor setup
+pytest tests/ -v          # 7100+ tests
+ruff check src/ tests/    # Lint
+make verify               # Full CI gate
+```
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
+
+## Acknowledgments
+
+Surreal-Memory is built on top of [**NeuralMemory**](https://github.com/nhadaututtheky/neural-memory) by [nhadaututtheky](https://github.com/nhadaututtheky) — an exceptional graph-based memory system for AI agents. The core architecture (neurons, synapses, fibers, spreading activation, consolidation, compression, and the 53-tool MCP interface) is entirely their work.
+
+Surreal-Memory extends it with a SurrealDB storage backend and a community plugin that makes all advanced features available for free.
+
+Equally important: this project would not exist without [**SurrealDB**](https://surrealdb.com/). The combined document + graph + vector model in a single engine is what made it possible to retire the SQLite + paid-Pro split. The shift specifically depends on the changes shipped in **SurrealDB 3.0** — without them, the storage backend in this fork would still be vaporware.
+
+> If you find Surreal-Memory useful, please also star both the [original NeuralMemory project](https://github.com/nhadaututtheky/neural-memory) and [SurrealDB](https://github.com/surrealdb/surrealdb).
+
+## Roadmap
+
+Items here are explicitly **not** in the current release. Community PRs welcome — see [CONTRIBUTING.md](CONTRIBUTING.md) and [AGENTS.md](AGENTS.md).
+
+### Deferred (external action required)
+
+- **ClawHub slug migration** — currently registered upstream as `surreal-memory` on the ClawHub platform. Needs a coordinated rename to `surreal-memory` on their side. Workflow already targets `--slug surreal-memory`; just waiting on the registry.
+- **VS Code Marketplace publisher** — `vscode-extension/package.json` now uses publisher `ai-flow-nowak`. The publisher account needs to be created / verified before the next release can push to Marketplace.
+- **PyPI `surreal-memory` deprecation note** — if a `surreal-memory` package exists on PyPI under any account we control, flag it `Development Status :: 7 - Inactive` with a README pointing at `surreal-memory`.
+
+### Nice-to-haves (community contributions welcome)
+
+- **PostCompact context restore hook** — analog to `session_start.py` but fired right after a Claude Code compaction. Pipes `smem recap` + `smem context --limit 20` to stdout as a `## Context restored after compaction` block, so the agent doesn't lose the thread when the 80% buffer kicks in.
+- **PostToolUse memory auto-capture** — observer hook that records memorable patterns (errors solved, decisions made, repeated commands) after Bash / Edit / Write tool calls — no explicit `smem remember` required.
+- **JetBrains IDE plugin** — Kotlin / Java plugin using the same REST API as the dashboard. Parity feature for IntelliJ-family IDEs.
+- **Cross-device sync UI** — visualize Merkle delta progress, device roster, conflict resolution flow in the dashboard.
+- **Cloudflare Pages for docs** — alternative to the removed GitHub Pages workflow. Static `mkdocs build` deployed to CF Pages, no GitHub dependency.
+- **LangChain / LlamaIndex retriever adapter** — `from surreal_memory.adapters.langchain import SurrealMemoryRetriever`. Opens the project to the RAG ecosystem.
+- **More embedding providers** — Voyage AI, Cohere, Mistral. Current set: Gemini, OpenAI, OpenRouter, local.
+- **Upstream sync bot** — scheduled workflow that scans `nhadaututtheky/neural-memory` for new commits, classifies them GREEN / YELLOW / RED against our fork, and opens a draft PR for the green batch.
+- **Two-way Telegram bot** — `notify-telegram.yml` is one-way (release notes). Extend with `smem remember` via bot commands.
+- **Public benchmarks dashboard** — `benchmarks/` already has stress scripts; publish results as a static dashboard.
+- **Brain templates / starter packs** — pre-seeded brains for common workflows (Python dev, K8s admin, research notes).
+- **Auto-upgrade path for `~/.surrealmemory/` → `~/.surrealmemory/`** — one-shot migration command for users coming from v1.x.
+
+## License
+
+MIT — see [LICENSE](LICENSE).

@@ -1,0 +1,12 @@
+{% extends "base.html" %}
+
+{% block extrahead %}
+<script>
+if (
+  window.location.hostname === 'surrealmemory.theio.vn' &&
+  (window.location.pathname === '/' || window.location.pathname === '/index.html')
+) {
+  window.location.replace('/landing/pro-landing.html');
+}
+</script>
+{% endblock %}

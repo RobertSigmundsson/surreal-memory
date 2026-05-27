@@ -1,0 +1,1022 @@
+"""System health diagnostic — smem doctor.
+
+Checks Python version, dependencies, config validity, brain accessibility,
+embedding provider, storage integrity, schema version, hooks, dedup,
+and knowledge surface. Produces green/yellow/red status per check
+with actionable fix suggestions. Supports --fix for auto-remediation.
+"""
+
+from __future__ import annotations
+
+import importlib
+import importlib.metadata
+import json
+import shutil
+import sys
+from pathlib import Path
+from typing import Any
+
+import typer
+
+from surreal_memory.cli._helpers import run_async
+
+# Check result constants
+OK = "ok"
+WARN = "warn"
+FAIL = "fail"
+SKIP = "skip"
+
+# Priority tiers (used to group output so users know which warnings actually matter)
+TIER_CORE = "core"  # required for basic operation
+TIER_RECOMMENDED = "recommended"  # recommended for full power (embeddings, MCP, hooks)
+TIER_OPTIONAL = "optional"  # nice-to-have (surface snapshot, pro plugin, etc.)
+TIER_DEV = "dev"  # contributor/source checkout diagnostics
+
+# Check name → tier mapping. Unassigned defaults to RECOMMENDED.
+_CHECK_TIERS: dict[str, str] = {
+    "Python version": TIER_CORE,
+    "Configuration": TIER_CORE,
+    "Brain database": TIER_CORE,
+    "Dependencies": TIER_CORE,
+    "Schema version": TIER_CORE,
+    "CLI tools": TIER_CORE,
+    "Embedding provider": TIER_RECOMMENDED,
+    "MCP configuration": TIER_RECOMMENDED,
+    "MCP server": TIER_RECOMMENDED,
+    "Hooks": TIER_RECOMMENDED,
+    "Dedup": TIER_OPTIONAL,
+    "Knowledge surface": TIER_OPTIONAL,
+    "Config freshness": TIER_OPTIONAL,
+    "Pro features": TIER_OPTIONAL,
+    "Orphan fibers": TIER_OPTIONAL,
+    "Source checkout": TIER_DEV,
+    "Editable install": TIER_DEV,
+    "Dev dependencies": TIER_DEV,
+    "Checkout version": TIER_DEV,
+}
+
+QUICKSTART_URL = "https://nhadaututtheky.github.io/surreal-memory/guides/quickstart/"
+
+
+def run_doctor(
+    *,
+    json_output: bool = False,
+    fix: bool = False,
+    dev: bool = False,
+) -> dict[str, Any]:
+    """Run all diagnostic checks and return results.
+
+    Args:
+        json_output: Return machine-readable output.
+        fix: Auto-fix what's possible (enable config flags, install hooks).
+        dev: Include source checkout diagnostics for contributors.
+    """
+    checks: list[dict[str, Any]] = []
+
+    checks.append(_check_python_version())
+    checks.append(_check_config())
+    checks.append(_check_brain())
+    checks.append(_check_dependencies())
+    checks.append(_check_embedding_provider())
+    checks.append(_check_schema_version())
+    checks.append(_check_mcp_config())
+    checks.append(_check_mcp_connection())
+    checks.append(_check_hooks())
+    checks.append(_check_dedup())
+    checks.append(_check_surface())
+    checks.append(_check_config_freshness())
+    checks.append(_check_cli_tools())
+    checks.append(_check_pro_plugin())
+    if dev:
+        checks.extend(_check_dev_environment())
+
+    # Annotate every check with its priority tier (see _CHECK_TIERS).
+    for check in checks:
+        check["tier"] = _CHECK_TIERS.get(check.get("name", ""), TIER_RECOMMENDED)
+
+    # Auto-fix pass
+    if fix:
+        checks = _auto_fix(checks)
+
+    result = {
+        "checks": checks,
+        "passed": sum(1 for c in checks if c["status"] == OK),
+        "warnings": sum(1 for c in checks if c["status"] == WARN),
+        "failed": sum(1 for c in checks if c["status"] == FAIL),
+        "total": len(checks),
+    }
+
+    if not json_output:
+        _render_results(result)
+
+    return result
+
+
+def _source_checkout_root() -> Path | None:
+    """Return the repository root when running from a source checkout."""
+    root = Path(__file__).resolve().parents[3]
+    if (root / "pyproject.toml").exists() and (root / "src" / "surreal_memory").exists():
+        return root
+    return None
+
+
+def _read_checkout_version(root: Path) -> str | None:
+    """Read ``project.version`` from a source checkout."""
+    try:
+        import tomllib
+
+        data = tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8"))
+        version = data.get("project", {}).get("version")
+        return str(version) if version else None
+    except Exception:
+        return None
+
+
+def _check_dev_environment() -> list[dict[str, Any]]:
+    """Contributor-focused diagnostics for source checkouts."""
+    root = _source_checkout_root()
+    return [
+        _check_dev_source_checkout(root),
+        _check_dev_editable_install(root),
+        _check_dev_dependencies(),
+        _check_dev_checkout_version(root),
+    ]
+
+
+def _check_dev_source_checkout(root: Path | None = None) -> dict[str, Any]:
+    """Check whether doctor is running from a repository checkout."""
+    root = _source_checkout_root() if root is None else root
+    if root is None:
+        return {
+            "name": "Source checkout",
+            "status": SKIP,
+            "detail": "not running from a source checkout",
+        }
+    return {
+        "name": "Source checkout",
+        "status": OK,
+        "detail": str(root),
+    }
+
+
+def _check_dev_editable_install(root: Path | None = None) -> dict[str, Any]:
+    """Check whether imports resolve to the current checkout."""
+    root = _source_checkout_root() if root is None else root
+    if root is None:
+        return {
+            "name": "Editable install",
+            "status": SKIP,
+            "detail": "source checkout not detected",
+        }
+
+    try:
+        import surreal_memory
+
+        package_path = Path(surreal_memory.__file__).resolve()
+        package_path.relative_to(root / "src")
+        return {
+            "name": "Editable install",
+            "status": OK,
+            "detail": "importing from checkout src/",
+        }
+    except ValueError:
+        return {
+            "name": "Editable install",
+            "status": WARN,
+            "detail": "importing installed package, not checkout src/",
+            "fix": 'Run: pip install -e ".[dev]"',
+        }
+    except Exception:
+        return {
+            "name": "Editable install",
+            "status": WARN,
+            "detail": "could not inspect import path",
+            "fix": 'Run: pip install -e ".[dev]"',
+        }
+
+
+def _check_dev_dependencies() -> dict[str, Any]:
+    """Check contributor tooling dependencies."""
+    required = {
+        "pytest": "pytest",
+        "pytest-asyncio": "pytest_asyncio",
+        "ruff": "ruff",
+        "mypy": "mypy",
+    }
+    missing = []
+    for package_name, module_name in required.items():
+        try:
+            importlib.import_module(module_name)
+        except ImportError:
+            missing.append(package_name)
+
+    if missing:
+        return {
+            "name": "Dev dependencies",
+            "status": FAIL,
+            "detail": f"missing: {', '.join(missing)}",
+            "fix": 'Run: pip install -e ".[dev]"',
+        }
+
+    return {
+        "name": "Dev dependencies",
+        "status": OK,
+        "detail": "pytest, pytest-asyncio, ruff, mypy available",
+    }
+
+
+def _check_dev_checkout_version(root: Path | None = None) -> dict[str, Any]:
+    """Compare checkout version with the installed package metadata."""
+    root = _source_checkout_root() if root is None else root
+    if root is None:
+        return {
+            "name": "Checkout version",
+            "status": SKIP,
+            "detail": "source checkout not detected",
+        }
+
+    checkout_version = _read_checkout_version(root)
+    if checkout_version is None:
+        return {
+            "name": "Checkout version",
+            "status": WARN,
+            "detail": "could not read pyproject.toml version",
+        }
+
+    try:
+        installed_version = importlib.metadata.version("surreal-memory")
+    except importlib.metadata.PackageNotFoundError:
+        return {
+            "name": "Checkout version",
+            "status": WARN,
+            "detail": f"checkout {checkout_version}; package not installed",
+            "fix": 'Run: pip install -e ".[dev]"',
+        }
+
+    if installed_version == checkout_version:
+        return {
+            "name": "Checkout version",
+            "status": OK,
+            "detail": f"checkout {checkout_version}; installed {installed_version}",
+        }
+
+    return {
+        "name": "Checkout version",
+        "status": WARN,
+        "detail": f"checkout {checkout_version}; installed {installed_version}",
+        "fix": 'Run: pip install -e ".[dev]"',
+    }
+
+
+def _check_python_version() -> dict[str, Any]:
+    """Check Python version is 3.11+."""
+    version = sys.version_info
+    version_str = f"{version.major}.{version.minor}.{version.micro}"
+
+    if version >= (3, 11):
+        return {"name": "Python version", "status": OK, "detail": version_str}
+
+    return {
+        "name": "Python version",
+        "status": FAIL,
+        "detail": f"{version_str} (requires 3.11+)",
+        "fix": "Install Python 3.11 or newer",
+    }
+
+
+def _check_config() -> dict[str, Any]:
+    """Check config.toml exists and is valid."""
+    from surreal_memory.unified_config import get_surrealmemory_dir
+
+    data_dir = get_surrealmemory_dir()
+    config_path = data_dir / "config.toml"
+
+    if not config_path.exists():
+        return {
+            "name": "Configuration",
+            "status": FAIL,
+            "detail": f"{config_path} not found",
+            "fix": "Run: smem init",
+        }
+
+    try:
+        from surreal_memory.unified_config import get_config
+
+        config = get_config(reload=True)
+        return {
+            "name": "Configuration",
+            "status": OK,
+            "detail": f"{config_path} (brain: {config.current_brain})",
+        }
+    except Exception:
+        return {
+            "name": "Configuration",
+            "status": FAIL,
+            "detail": "parse error — run: smem init --force",
+            "fix": "Run: smem init --force",
+        }
+
+
+def _check_brain() -> dict[str, Any]:
+    """Check default brain DB exists and is accessible."""
+    from surreal_memory.unified_config import get_surrealmemory_dir
+
+    data_dir = get_surrealmemory_dir()
+
+    try:
+        from surreal_memory.unified_config import get_config
+
+        config = get_config(reload=True)
+        brain_name = config.current_brain
+    except Exception:
+        brain_name = "default"
+
+    brains_dir = data_dir / "brains"
+    db_path = brains_dir / f"{brain_name}.db"
+
+    if not db_path.exists():
+        return {
+            "name": "Brain database",
+            "status": FAIL,
+            "detail": f"{db_path} not found",
+            "fix": f"Run: smem brain create {brain_name}",
+        }
+
+    size_kb = db_path.stat().st_size / 1024
+    return {
+        "name": "Brain database",
+        "status": OK,
+        "detail": f"{brain_name} ({size_kb:.0f} KB)",
+    }
+
+
+def _check_dependencies() -> dict[str, Any]:
+    """Check core dependencies are importable."""
+    required = ["aiosqlite", "typer"]
+    missing = []
+
+    for dep in required:
+        try:
+            importlib.import_module(dep)
+        except ImportError:
+            missing.append(dep)
+
+    if missing:
+        return {
+            "name": "Dependencies",
+            "status": FAIL,
+            "detail": f"Missing: {', '.join(missing)}",
+            "fix": "Run: pip install surreal-memory",
+        }
+
+    return {"name": "Dependencies", "status": OK, "detail": "all core deps available"}
+
+
+def _check_embedding_provider() -> dict[str, Any]:
+    """Check embedding provider availability."""
+    try:
+        from surreal_memory.unified_config import get_config
+
+        config = get_config(reload=True)
+    except Exception:
+        return {
+            "name": "Embedding provider",
+            "status": SKIP,
+            "detail": "config not loaded",
+        }
+
+    if not config.embedding.enabled:
+        return {
+            "name": "Embedding provider",
+            "status": WARN,
+            "detail": "disabled (semantic search unavailable)",
+            "fix": "Run: smem setup embeddings",
+        }
+
+    provider = config.embedding.provider
+
+    # Check if provider package is importable
+    provider_checks: dict[str, str] = {
+        "sentence_transformer": "sentence_transformers",
+        "openai": "openai",
+        "openrouter": "openai",
+        "gemini": "google.genai",
+        "ollama": "ollama",
+    }
+
+    module_name = provider_checks.get(provider)
+    if module_name:
+        try:
+            importlib.import_module(module_name)
+            return {
+                "name": "Embedding provider",
+                "status": OK,
+                "detail": f"{provider} (model: {config.embedding.model})",
+            }
+        except ImportError:
+            install_hint = {
+                "sentence_transformer": "pip install surreal-memory[embeddings]",
+                "openai": "pip install surreal-memory[embeddings-openai]",
+                "openrouter": "pip install surreal-memory[embeddings-openrouter]",
+                "gemini": "pip install surreal-memory[embeddings-gemini]",
+                "ollama": "pip install surreal-memory[embeddings]",
+            }
+            return {
+                "name": "Embedding provider",
+                "status": FAIL,
+                "detail": f"{provider} configured but not installed",
+                "fix": f"Run: {install_hint.get(provider, 'pip install surreal-memory[embeddings]')}",
+            }
+
+    return {
+        "name": "Embedding provider",
+        "status": OK,
+        "detail": f"{provider} (model: {config.embedding.model})",
+    }
+
+
+def _check_schema_version() -> dict[str, Any]:
+    """Check database schema version."""
+    try:
+        from surreal_memory.unified_config import get_config, get_surrealmemory_dir
+
+        config = get_config(reload=True)
+        brain_name = config.current_brain
+        db_path = get_surrealmemory_dir() / "brains" / f"{brain_name}.db"
+
+        if not db_path.exists() or db_path.stat().st_size == 0:
+            return {
+                "name": "Schema version",
+                "status": SKIP,
+                "detail": "empty database (schema created on first use)",
+            }
+
+        async def _get_version() -> int:
+            import aiosqlite
+
+            async with aiosqlite.connect(str(db_path)) as db:
+                # NM stores schema version in schema_version table, not PRAGMA
+                try:
+                    cursor = await db.execute("SELECT version FROM schema_version LIMIT 1")
+                    row = await cursor.fetchone()
+                    return row[0] if row else 0
+                except Exception:
+                    # Table may not exist in very old databases
+                    return 0
+
+        version = run_async(_get_version())
+
+        from surreal_memory.storage.sqlite_schema import SCHEMA_VERSION as CURRENT_VERSION
+
+        if version == CURRENT_VERSION:
+            return {
+                "name": "Schema version",
+                "status": OK,
+                "detail": f"v{version} (current)",
+            }
+        if version < CURRENT_VERSION:
+            return {
+                "name": "Schema version",
+                "status": WARN,
+                "detail": f"v{version} (latest: v{CURRENT_VERSION})",
+                "fix": "Schema will auto-migrate on next use",
+            }
+        return {
+            "name": "Schema version",
+            "status": WARN,
+            "detail": f"v{version} (newer than expected v{CURRENT_VERSION})",
+        }
+    except Exception:
+        return {
+            "name": "Schema version",
+            "status": WARN,
+            "detail": "could not check — ensure brain is accessible",
+        }
+
+
+def _check_mcp_config() -> dict[str, Any]:
+    """Check MCP server is configured in Claude Code."""
+    claude_json = Path.home() / ".claude.json"
+    if not claude_json.exists():
+        return {
+            "name": "MCP configuration",
+            "status": WARN,
+            "detail": "~/.claude.json not found",
+            "fix": "Run: smem init",
+        }
+
+    try:
+        data = json.loads(claude_json.read_text(encoding="utf-8"))
+        servers = data.get("mcpServers", {})
+        if "surreal-memory" in servers:
+            return {
+                "name": "MCP configuration",
+                "status": OK,
+                "detail": "surreal-memory registered in Claude Code",
+            }
+        return {
+            "name": "MCP configuration",
+            "status": WARN,
+            "detail": "surreal-memory not found in ~/.claude.json",
+            "fix": "Run: smem init",
+        }
+    except (json.JSONDecodeError, OSError):
+        return {
+            "name": "MCP configuration",
+            "status": WARN,
+            "detail": "could not parse ~/.claude.json",
+            "fix": "Run: smem init",
+        }
+
+
+def _check_mcp_connection() -> dict[str, Any]:
+    """Test that the MCP server can actually start."""
+    import subprocess
+
+    smem_mcp = shutil.which("smem-mcp")
+    if not smem_mcp:
+        # Fallback to module execution
+        smem_mcp = None
+
+    try:
+        cmd = [smem_mcp] if smem_mcp else [sys.executable, "-m", "surreal_memory.mcp"]
+        result = subprocess.run(
+            cmd,
+            input='{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"doctor","version":"1.0"}}}\n',
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+        # MCP server over stdio will output JSON-RPC response
+        if result.stdout and "result" in result.stdout:
+            return {
+                "name": "MCP server",
+                "status": OK,
+                "detail": "server responds to initialize",
+            }
+        if result.returncode == 0 or result.stdout:
+            return {
+                "name": "MCP server",
+                "status": OK,
+                "detail": "server starts successfully",
+            }
+        return {
+            "name": "MCP server",
+            "status": WARN,
+            "detail": f"server exited with code {result.returncode}",
+            "fix": "Check: smem-mcp or python -m surreal_memory.mcp",
+        }
+    except subprocess.TimeoutExpired:
+        # Timeout is actually expected — MCP servers run indefinitely on stdio
+        return {
+            "name": "MCP server",
+            "status": OK,
+            "detail": "server starts (stdio mode)",
+        }
+    except FileNotFoundError:
+        return {
+            "name": "MCP server",
+            "status": WARN,
+            "detail": "smem-mcp not found on PATH",
+            "fix": "Run: pip install surreal-memory",
+        }
+    except Exception:
+        return {
+            "name": "MCP server",
+            "status": WARN,
+            "detail": "could not test MCP server",
+        }
+
+
+def _check_cli_tools() -> dict[str, Any]:
+    """Check CLI tools are on PATH."""
+    tools = ["smem", "smem-mcp"]
+    found = [t for t in tools if shutil.which(t)]
+    missing = [t for t in tools if t not in found]
+
+    if not missing:
+        return {
+            "name": "CLI tools",
+            "status": OK,
+            "detail": "smem + smem-mcp on PATH",
+        }
+
+    if "smem" in missing:
+        return {
+            "name": "CLI tools",
+            "status": FAIL,
+            "detail": f"missing: {', '.join(missing)}",
+            "fix": "Run: pip install surreal-memory",
+        }
+
+    return {
+        "name": "CLI tools",
+        "status": WARN,
+        "detail": f"missing: {', '.join(missing)} (smem mcp fallback available)",
+    }
+
+
+def _check_pro_plugin() -> dict[str, Any]:
+    """Check if Surreal-Memory Pro plugin is installed and active."""
+    try:
+        from surreal_memory.plugins import get_plugins, has_pro
+
+        if has_pro():
+            plugins = get_plugins()
+            names = [f"{p.name} v{p.version}" for p in plugins]
+            return {
+                "name": "Pro plugin",
+                "status": OK,
+                "detail": ", ".join(names),
+            }
+
+        # Check if Pro package is importable but not registered
+        try:
+            import surreal_memory_pro  # noqa: F401
+
+            return {
+                "name": "Pro plugin",
+                "status": WARN,
+                "detail": "Package installed but not registered — check entry_points",
+            }
+        except ImportError:
+            pass
+
+        # Check license
+        from surreal_memory.unified_config import get_config
+
+        config = get_config()
+        if config.is_pro():
+            return {
+                "name": "Pro plugin",
+                "status": WARN,
+                "detail": "License active but plugin not installed",
+                "fix": "Run: pip install surreal-memory-pro",
+            }
+
+        return {
+            "name": "Pro plugin",
+            "status": SKIP,
+            "detail": "Not installed (free tier)",
+        }
+    except Exception:
+        return {
+            "name": "Pro plugin",
+            "status": SKIP,
+            "detail": "Could not check",
+        }
+
+
+def _check_hooks() -> dict[str, Any]:
+    """Check Claude Code hooks are installed."""
+    claude_dir = Path.home() / ".claude"
+    settings_path = claude_dir / "settings.json"
+
+    if not settings_path.exists():
+        return {
+            "name": "Hooks",
+            "status": WARN,
+            "detail": "~/.claude/settings.json not found",
+            "fix": "Run: smem init",
+            "fixable": True,
+        }
+
+    try:
+        data = json.loads(settings_path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return {
+            "name": "Hooks",
+            "status": WARN,
+            "detail": "could not parse settings.json",
+        }
+
+    hooks_section = data.get("hooks", {})
+    expected = ["PreCompact", "Stop", "PostToolUse"]
+    found: list[str] = []
+
+    for event in expected:
+        entries = hooks_section.get(event, [])
+        for entry in entries:
+            for hook in entry.get("hooks", []):
+                cmd = hook.get("command", "")
+                if "surreal_memory" in cmd or "smem" in cmd:
+                    found.append(event)
+                    break
+
+    if len(found) == len(expected):
+        return {
+            "name": "Hooks",
+            "status": OK,
+            "detail": f"{len(found)}/{len(expected)} installed ({', '.join(found)})",
+        }
+
+    missing = [e for e in expected if e not in found]
+    return {
+        "name": "Hooks",
+        "status": WARN,
+        "detail": f"{len(found)}/{len(expected)} — missing: {', '.join(missing)}",
+        "fix": "Run: smem init",
+        "fixable": True,
+    }
+
+
+def _check_dedup() -> dict[str, Any]:
+    """Check dedup is enabled in config."""
+    try:
+        from surreal_memory.unified_config import get_config
+
+        config = get_config(reload=True)
+    except Exception:
+        return {"name": "Dedup", "status": SKIP, "detail": "config not loaded"}
+
+    if config.dedup.enabled:
+        return {"name": "Dedup", "status": OK, "detail": "enabled"}
+
+    return {
+        "name": "Dedup",
+        "status": WARN,
+        "detail": "disabled (duplicate memories not caught)",
+        "fix": "Run: smem init --full",
+        "fixable": True,
+    }
+
+
+def _check_surface() -> dict[str, Any]:
+    """Check knowledge surface (.nm file) exists."""
+    try:
+        from surreal_memory.surface.resolver import get_surface_path
+        from surreal_memory.unified_config import get_config
+
+        config = get_config(reload=True)
+        surface_path = get_surface_path(config.current_brain)
+
+        if surface_path.exists():
+            size_kb = surface_path.stat().st_size / 1024
+            return {
+                "name": "Knowledge surface",
+                "status": OK,
+                "detail": f"{surface_path.name} ({size_kb:.1f} KB)",
+            }
+
+        return {
+            "name": "Knowledge surface",
+            "status": WARN,
+            "detail": "not generated yet",
+            "fix": "Run: smem surface generate (via MCP or after first session)",
+        }
+    except Exception:
+        return {
+            "name": "Knowledge surface",
+            "status": SKIP,
+            "detail": "surface module not available",
+        }
+
+
+def _check_config_freshness() -> dict[str, Any]:
+    """Check if config.toml has all sections from current version."""
+    try:
+        import tomllib
+
+        from surreal_memory.unified_config import get_surrealmemory_dir
+
+        config_path = get_surrealmemory_dir() / "config.toml"
+        if not config_path.exists():
+            return {
+                "name": "Config freshness",
+                "status": SKIP,
+                "detail": "no config.toml",
+            }
+
+        raw = tomllib.loads(config_path.read_text(encoding="utf-8"))
+        expected_sections = [
+            "brain",
+            "embedding",
+            "auto",
+            "eternal",
+            "maintenance",
+            "conflict",
+            "safety",
+            "encryption",
+            "write_gate",
+            "dedup",
+            "tool_memory",
+        ]
+        missing = [s for s in expected_sections if s not in raw]
+        if missing:
+            return {
+                "name": "Config freshness",
+                "status": WARN,
+                "detail": f"missing sections: {', '.join(missing)}",
+                "fix": "Run: smem doctor --fix",
+                "fixable": True,
+            }
+
+        return {
+            "name": "Config freshness",
+            "status": OK,
+            "detail": "all sections present",
+        }
+    except Exception:
+        return {
+            "name": "Config freshness",
+            "status": SKIP,
+            "detail": "could not check config freshness",
+        }
+
+
+# ---------------------------------------------------------------------------
+# Auto-fix
+# ---------------------------------------------------------------------------
+
+
+def _auto_fix(checks: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Attempt to auto-fix fixable issues. Returns updated checks."""
+    fixed_checks: list[dict[str, Any]] = []
+
+    for check in checks:
+        if check.get("fixable") and check["status"] in (WARN, FAIL):
+            fixed = _try_fix(check)
+            if fixed:
+                fixed_checks.append(fixed)
+                continue
+        fixed_checks.append(check)
+
+    return fixed_checks
+
+
+def _try_fix(check: dict[str, Any]) -> dict[str, Any] | None:
+    """Try to fix a single check. Returns updated check or None."""
+    name = check["name"]
+
+    handler = _FIX_HANDLERS.get(name)
+    if handler is None:
+        return None
+    if name == "Embedding provider" and "disabled" not in check.get("detail", ""):
+        return None
+    result: dict[str, Any] | None = handler()
+    if result:
+        result["_fixed"] = True
+    return result
+
+
+_FIX_HANDLERS: dict[str, Any] = {
+    "Hooks": lambda: _fix_hooks(),
+    "Dedup": lambda: _fix_dedup(),
+    "Embedding provider": lambda: _fix_embedding(),
+    "Config freshness": lambda: _fix_config_freshness(),
+}
+
+
+def _fix_hooks() -> dict[str, Any]:
+    """Auto-fix: install missing hooks."""
+    try:
+        from surreal_memory.cli.setup import setup_hooks_claude
+
+        status = setup_hooks_claude()
+        if status in ("added", "exists"):
+            return {
+                "name": "Hooks",
+                "status": OK,
+                "detail": "auto-fixed: hooks installed",
+            }
+    except Exception:
+        pass
+    return {
+        "name": "Hooks",
+        "status": WARN,
+        "detail": "auto-fix failed",
+        "fix": "Run: smem init",
+    }
+
+
+def _fix_dedup() -> dict[str, Any]:
+    """Auto-fix: enable dedup in config."""
+    try:
+        from dataclasses import replace
+
+        from surreal_memory.unified_config import get_config
+
+        config = get_config(reload=True)
+        updated = replace(config, dedup=replace(config.dedup, enabled=True))
+        updated.save()
+        return {
+            "name": "Dedup",
+            "status": OK,
+            "detail": "auto-fixed: enabled",
+        }
+    except Exception:
+        pass
+    return {
+        "name": "Dedup",
+        "status": WARN,
+        "detail": "auto-fix failed",
+    }
+
+
+def _fix_embedding() -> dict[str, Any]:
+    """Auto-fix: detect and enable embedding provider."""
+    try:
+        from surreal_memory.cli.full_setup import detect_embedding_provider, enable_config_defaults
+
+        provider = detect_embedding_provider()
+        if provider:
+            enable_config_defaults(embedding_provider=provider)
+            return {
+                "name": "Embedding provider",
+                "status": OK,
+                "detail": f"auto-fixed: {provider['key']} enabled",
+            }
+    except Exception:
+        pass
+    return {
+        "name": "Embedding provider",
+        "status": WARN,
+        "detail": "no provider available to auto-enable",
+        "fix": "Run: smem setup embeddings",
+    }
+
+
+def _fix_config_freshness() -> dict[str, Any]:
+    """Auto-fix: re-save config.toml to add missing sections with defaults."""
+    try:
+        from surreal_memory.unified_config import get_config
+
+        config = get_config(reload=True)
+        config.save()
+        return {
+            "name": "Config freshness",
+            "status": OK,
+            "detail": "auto-fixed: config.toml updated with new sections",
+        }
+    except Exception:
+        pass
+    return {
+        "name": "Config freshness",
+        "status": WARN,
+        "detail": "auto-fix failed",
+    }
+
+
+def _render_results(result: dict[str, Any]) -> None:
+    """Render diagnostic results to terminal."""
+    typer.echo()
+    typer.secho("  Surreal-Memory Doctor", bold=True)
+    typer.secho("  ───────────────────", dim=True)
+    typer.echo()
+
+    icons = {
+        OK: typer.style("[OK]", fg=typer.colors.GREEN),
+        WARN: typer.style("[!!]", fg=typer.colors.YELLOW),
+        FAIL: typer.style("[XX]", fg=typer.colors.RED),
+        SKIP: typer.style("[--]", fg=typer.colors.BRIGHT_BLACK),
+    }
+
+    tier_labels = {
+        TIER_CORE: ("CORE", "required for basic operation"),
+        TIER_RECOMMENDED: ("RECOMMENDED", "full-power setup"),
+        TIER_OPTIONAL: ("OPTIONAL", "nice-to-have, not needed for basic use"),
+        TIER_DEV: ("DEV", "source checkout and contributor tooling"),
+    }
+
+    for tier in (TIER_CORE, TIER_RECOMMENDED, TIER_OPTIONAL, TIER_DEV):
+        tier_checks = [c for c in result["checks"] if c.get("tier") == tier]
+        if not tier_checks:
+            continue
+        label, hint = tier_labels[tier]
+        typer.secho(f"  [{label}] ", fg=typer.colors.CYAN, bold=True, nl=False)
+        typer.secho(hint, dim=True)
+        for check in tier_checks:
+            icon = icons.get(check["status"], icons[SKIP])
+            typer.echo(f"    {icon} {check['name']:<22}{check['detail']}")
+            if "fix" in check:
+                typer.secho(f"         Fix: {check['fix']}", dim=True)
+        typer.echo()
+
+    typer.echo()
+    passed = result["passed"]
+    total = result["total"]
+    warns = result["warnings"]
+    fails = result["failed"]
+
+    summary_parts = [f"{passed}/{total} passed"]
+    if warns:
+        summary_parts.append(f"{warns} warnings")
+    if fails:
+        summary_parts.append(f"{fails} failed")
+
+    color = (
+        typer.colors.RED
+        if fails > 0
+        else (typer.colors.YELLOW if warns > 0 else typer.colors.GREEN)
+    )
+    typer.secho(f"  {', '.join(summary_parts)}", fg=color, bold=True)
+
+    # Suggest guide if there are issues
+    if warns > 0 or fails > 0:
+        typer.echo()
+        typer.secho(f"  See full setup guide: {QUICKSTART_URL}", dim=True)
+        if not any(c.get("_fixed") for c in result["checks"]):
+            typer.secho("  Auto-fix available issues: smem doctor --fix", dim=True)
+
+    typer.echo()

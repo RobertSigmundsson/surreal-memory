@@ -1,0 +1,61 @@
+{
+  "name": "@acidkill/surreal-memory-client",
+  "version": "2.0.0",
+  "description": "TypeScript client for the Surreal-Memory REST API — typed access to brains, neurons, synapses, fibers, recall, and sync.",
+  "type": "module",
+  "main": "dist/index.cjs",
+  "module": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "require": "./dist/index.cjs"
+    }
+  },
+  "files": [
+    "dist/",
+    "src/",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "tsup src/index.ts --format esm,cjs --dts --clean",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "prepublishOnly": "npm run build"
+  },
+  "keywords": [
+    "surreal-memory",
+    "surrealmemory",
+    "surrealdb",
+    "memory",
+    "ai-agent",
+    "client",
+    "sdk",
+    "rest"
+  ],
+  "author": "Toni Nowak / AI-Flow NOWAK",
+  "license": "MIT",
+  "homepage": "https://github.com/acidkill/surreal-memory#readme",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/acidkill/surreal-memory.git",
+    "directory": "integrations/surreal-memory-client"
+  },
+  "bugs": {
+    "url": "https://github.com/acidkill/surreal-memory/issues"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "tsup": "^8.0.0",
+    "typescript": "^5.4.0",
+    "vitest": "^1.6.0"
+  }
+}

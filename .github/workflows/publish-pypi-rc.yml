@@ -1,0 +1,55 @@
+name: Publish PyPI (manual RC)
+
+# Manual-only trigger — keep PyPI version history clean.
+# Stable releases go through release.yml on tag v*.
+on:
+  workflow_dispatch:
+    inputs:
+      reason:
+        description: "Why publish this RC? (one-line note for audit)"
+        required: true
+
+jobs:
+  publish-rc:
+    name: Publish prerelease to PyPI
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/p/surreal-memory
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Compute RC version
+        id: ver
+        run: |
+          BASE=$(python -c "import re, pathlib; print(re.search(r'^version\\s*=\\s*\"([^\"]+)\"', pathlib.Path('pyproject.toml').read_text(), re.M).group(1))")
+          SHA=${GITHUB_SHA::7}
+          echo "version=${BASE}rc${SHA}" >> "$GITHUB_OUTPUT"
+          echo "Computed RC version: ${BASE}rc${SHA}"
+
+      - name: Patch pyproject.toml version
+        run: |
+          python - <<'PY'
+          import pathlib, re
+          p = pathlib.Path('pyproject.toml')
+          text = p.read_text()
+          new = re.sub(r'^version\s*=\s*"[^"]+"', f'version = "${{ steps.ver.outputs.version }}"', text, count=1, flags=re.M)
+          p.write_text(new)
+          PY
+
+      - name: Build
+        run: |
+          pip install build
+          python -m build
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          skip-existing: true

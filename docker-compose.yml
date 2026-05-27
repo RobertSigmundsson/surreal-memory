@@ -1,0 +1,23 @@
+version: '3.8'
+
+services:
+  surreal-memory:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "8000:8000"
+    environment:
+      - SURREAL_MEMORY_HOST=0.0.0.0
+      - SURREAL_MEMORY_PORT=8000
+      - SURREAL_MEMORY_DEBUG=false
+      - SURREAL_MEMORY_STORAGE=memory
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 5s
+    restart: unless-stopped
+
+# For SurrealDB-backed deployments, use docker-compose.surrealdb.yml.

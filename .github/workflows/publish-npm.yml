@@ -1,0 +1,45 @@
+name: Publish npm (rolling RC)
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'integrations/surrealmemory/**'
+  workflow_dispatch:
+
+jobs:
+  publish-rc:
+    name: Publish prerelease to npm
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: Compute RC version
+        id: ver
+        working-directory: integrations/surrealmemory
+        run: |
+          BASE=$(node -p "require('./package.json').version")
+          SHA=${GITHUB_SHA::7}
+          echo "version=${BASE}-rc.${SHA}" >> "$GITHUB_OUTPUT"
+
+      - name: Set RC version
+        working-directory: integrations/surrealmemory
+        run: npm version --no-git-tag-version "${{ steps.ver.outputs.version }}"
+
+      - name: Install + build
+        working-directory: integrations/surrealmemory
+        run: |
+          npm ci || npm install
+          npm run build
+
+      - name: Publish prerelease (--tag next)
+        working-directory: integrations/surrealmemory
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: npm publish --tag next --access public

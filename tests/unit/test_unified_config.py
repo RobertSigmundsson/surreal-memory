@@ -1,0 +1,356 @@
+"""Tests for unified_config.py — legacy DB migration + config sync."""
+
+import sqlite3
+from pathlib import Path
+from unittest.mock import patch
+
+import pytest
+
+from surreal_memory.cli.config import _sync_brain_to_toml
+from surreal_memory.unified_config import (
+    _MIN_LEGACY_DB_BYTES,
+    UnifiedConfig,
+    _migrate_legacy_db,
+    _read_current_brain_from_toml,
+    _read_legacy_brain,
+)
+
+
+def _create_fake_db(path: Path, *, size: int = 0) -> None:
+    """Create a minimal SQLite database at *path*.
+
+    If *size* is given and larger than a bare DB, pad with extra data so
+    ``stat().st_size >= size``.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(str(path))
+    conn.execute("CREATE TABLE IF NOT EXISTS neurons (id TEXT PRIMARY KEY)")
+    conn.execute("INSERT OR IGNORE INTO neurons VALUES ('test-neuron-1')")
+    conn.commit()
+    conn.close()
+
+    # Pad to requested size if needed.
+    current = path.stat().st_size
+    if size > current:
+        with open(path, "ab") as f:
+            f.write(b"\x00" * (size - current))
+
+
+@pytest.fixture()
+def tmp_data_dir(tmp_path: Path) -> Path:
+    """Return a temporary Surreal-Memory data directory."""
+    return tmp_path / ".surrealmemory"
+
+
+def _make_config(data_dir: Path) -> UnifiedConfig:
+    """Build a UnifiedConfig pointing at *data_dir* with brain='default'."""
+    return UnifiedConfig(data_dir=data_dir, current_brain="default")
+
+
+# ── Happy path ───────────────────────────────────────────────────
+
+
+class TestMigrateLegacyDb:
+    def test_copies_when_old_exists_and_new_does_not(self, tmp_data_dir: Path) -> None:
+        old_db = tmp_data_dir / "default.db"
+        _create_fake_db(old_db, size=_MIN_LEGACY_DB_BYTES + 1024)
+
+        config = _make_config(tmp_data_dir)
+        _migrate_legacy_db(config, None)
+
+        new_db = tmp_data_dir / "brains" / "default.db"
+        assert new_db.exists()
+        assert new_db.stat().st_size == old_db.stat().st_size
+
+        # Old file still exists (backup).
+        assert old_db.exists()
+
+    def test_copies_wal_and_shm_if_present(self, tmp_data_dir: Path) -> None:
+        old_db = tmp_data_dir / "default.db"
+        _create_fake_db(old_db, size=_MIN_LEGACY_DB_BYTES + 1024)
+
+        # Create fake WAL/SHM companions.
+        wal = old_db.with_name("default.db-wal")
+        shm = old_db.with_name("default.db-shm")
+        wal.write_bytes(b"wal-data")
+        shm.write_bytes(b"shm-data")
+
+        config = _make_config(tmp_data_dir)
+        _migrate_legacy_db(config, None)
+
+        brains = tmp_data_dir / "brains"
+        assert (brains / "default.db-wal").read_bytes() == b"wal-data"
+        assert (brains / "default.db-shm").read_bytes() == b"shm-data"
+
+    # ── Skip conditions ──────────────────────────────────────────
+
+    def test_skips_when_new_already_exists(self, tmp_data_dir: Path) -> None:
+        old_db = tmp_data_dir / "default.db"
+        _create_fake_db(old_db, size=_MIN_LEGACY_DB_BYTES + 1024)
+
+        new_db = tmp_data_dir / "brains" / "default.db"
+        new_db.parent.mkdir(parents=True, exist_ok=True)
+        new_db.write_text("existing")
+
+        config = _make_config(tmp_data_dir)
+        _migrate_legacy_db(config, None)
+
+        # Should NOT overwrite existing new DB.
+        assert new_db.read_text() == "existing"
+
+    def test_skips_non_default_brain(self, tmp_data_dir: Path) -> None:
+        old_db = tmp_data_dir / "default.db"
+        _create_fake_db(old_db, size=_MIN_LEGACY_DB_BYTES + 1024)
+
+        config = _make_config(tmp_data_dir)
+        _migrate_legacy_db(config, "my-custom-brain")
+
+        new_db = tmp_data_dir / "brains" / "default.db"
+        assert not new_db.exists()
+
+    def test_skips_small_file(self, tmp_data_dir: Path) -> None:
+        """An empty-schema DB (< _MIN_LEGACY_DB_BYTES) is not migrated."""
+        old_db = tmp_data_dir / "default.db"
+        old_db.parent.mkdir(parents=True, exist_ok=True)
+        old_db.write_bytes(b"\x00" * 4096)
+
+        config = _make_config(tmp_data_dir)
+        _migrate_legacy_db(config, None)
+
+        new_db = tmp_data_dir / "brains" / "default.db"
+        assert not new_db.exists()
+
+    def test_skips_when_old_does_not_exist(self, tmp_data_dir: Path) -> None:
+        tmp_data_dir.mkdir(parents=True, exist_ok=True)
+        config = _make_config(tmp_data_dir)
+        _migrate_legacy_db(config, None)
+
+        new_db = tmp_data_dir / "brains" / "default.db"
+        assert not new_db.exists()
+
+    # ── Error resilience ─────────────────────────────────────────
+
+    def test_handles_copy_error_gracefully(self, tmp_data_dir: Path) -> None:
+        old_db = tmp_data_dir / "default.db"
+        _create_fake_db(old_db, size=_MIN_LEGACY_DB_BYTES + 1024)
+
+        config = _make_config(tmp_data_dir)
+
+        with patch("surreal_memory.unified_config.shutil.copy2", side_effect=OSError("disk full")):
+            # Should not raise — logs warning instead.
+            _migrate_legacy_db(config, None)
+
+        new_db = tmp_data_dir / "brains" / "default.db"
+        assert not new_db.exists()
+
+    # ── Config brain name resolution ─────────────────────────────
+
+    def test_uses_config_current_brain_when_none(self, tmp_data_dir: Path) -> None:
+        """When brain_name is None, uses config.current_brain."""
+        old_db = tmp_data_dir / "default.db"
+        _create_fake_db(old_db, size=_MIN_LEGACY_DB_BYTES + 1024)
+
+        config = _make_config(tmp_data_dir)
+        assert config.current_brain == "default"
+
+        _migrate_legacy_db(config, None)
+
+        new_db = tmp_data_dir / "brains" / "default.db"
+        assert new_db.exists()
+
+
+# ── Config sync tests ────────────────────────────────────────────
+
+
+def _write_toml(data_dir: Path, brain_name: str = "default") -> Path:
+    """Write a minimal config.toml and return its path."""
+    data_dir.mkdir(parents=True, exist_ok=True)
+    toml_path = data_dir / "config.toml"
+    toml_path.write_text(
+        f'version = "1.0"\ncurrent_brain = "{brain_name}"\n\n[brain]\ndecay_rate = 0.1\n',
+        encoding="utf-8",
+    )
+    return toml_path
+
+
+class TestSyncBrainToToml:
+    """Tests for CLI → TOML sync via _sync_brain_to_toml."""
+
+    def test_updates_current_brain_in_toml(self, tmp_data_dir: Path) -> None:
+        _write_toml(tmp_data_dir, "default")
+
+        _sync_brain_to_toml(tmp_data_dir, "work")
+
+        content = (tmp_data_dir / "config.toml").read_text(encoding="utf-8")
+        assert 'current_brain = "work"' in content
+
+    def test_preserves_other_toml_content(self, tmp_data_dir: Path) -> None:
+        _write_toml(tmp_data_dir, "default")
+
+        _sync_brain_to_toml(tmp_data_dir, "work")
+
+        content = (tmp_data_dir / "config.toml").read_text(encoding="utf-8")
+        assert "decay_rate = 0.1" in content
+        assert 'version = "1.0"' in content
+
+    def test_noop_when_toml_missing(self, tmp_data_dir: Path) -> None:
+        tmp_data_dir.mkdir(parents=True, exist_ok=True)
+        # Should not raise
+        _sync_brain_to_toml(tmp_data_dir, "work")
+
+    def test_rejects_invalid_brain_name(self, tmp_data_dir: Path) -> None:
+        _write_toml(tmp_data_dir, "default")
+
+        _sync_brain_to_toml(tmp_data_dir, "../escape")
+
+        # Should not have changed
+        content = (tmp_data_dir / "config.toml").read_text(encoding="utf-8")
+        assert 'current_brain = "default"' in content
+
+    def test_handles_write_error_gracefully(self, tmp_data_dir: Path) -> None:
+        _write_toml(tmp_data_dir, "default")
+
+        with patch("surreal_memory.cli.config.Path.write_text", side_effect=OSError("perm")):
+            # Should not raise
+            _sync_brain_to_toml(tmp_data_dir, "work")
+
+
+class TestReadCurrentBrainFromToml:
+    """Tests for MCP-side toml reading via _read_current_brain_from_toml."""
+
+    def test_reads_brain_name(self, tmp_data_dir: Path) -> None:
+        _write_toml(tmp_data_dir, "my-brain")
+
+        with patch(
+            "surreal_memory.unified_config.get_surrealmemory_dir", return_value=tmp_data_dir
+        ):
+            result = _read_current_brain_from_toml()
+        assert result == "my-brain"
+
+    def test_returns_none_when_missing(self, tmp_path: Path) -> None:
+        with patch("surreal_memory.unified_config.get_surrealmemory_dir", return_value=tmp_path):
+            result = _read_current_brain_from_toml()
+        assert result is None
+
+    def test_returns_none_for_invalid_name(self, tmp_data_dir: Path) -> None:
+        data_dir = tmp_data_dir
+        data_dir.mkdir(parents=True, exist_ok=True)
+        toml_path = data_dir / "config.toml"
+        toml_path.write_text('current_brain = "../hacked"\n', encoding="utf-8")
+
+        with patch("surreal_memory.unified_config.get_surrealmemory_dir", return_value=data_dir):
+            result = _read_current_brain_from_toml()
+        assert result is None
+
+
+class TestEndToEndBrainSync:
+    """Integration test: CLI save → TOML sync → MCP reads new brain."""
+
+    def test_cli_save_syncs_to_toml_and_mcp_reads_it(self, tmp_data_dir: Path) -> None:
+        _write_toml(tmp_data_dir, "default")
+
+        # Simulate CLI brain switch
+        _sync_brain_to_toml(tmp_data_dir, "work")
+
+        # Simulate MCP reading the toml
+        with patch(
+            "surreal_memory.unified_config.get_surrealmemory_dir", return_value=tmp_data_dir
+        ):
+            result = _read_current_brain_from_toml()
+        assert result == "work"
+
+        # Verify the config singleton would pick it up
+        config = _make_config(tmp_data_dir)
+        assert config.current_brain == "default"  # old value in memory
+
+        # After sync detection, config updates
+        if result is not None and result != config.current_brain:
+            config.current_brain = result
+        assert config.current_brain == "work"
+
+
+# ── Legacy brain migration tests ────────────────────────────────
+
+
+def _write_legacy_json(data_dir: Path, brain_name: str) -> Path:
+    """Write a legacy config.json with the given brain name."""
+    import json
+
+    data_dir.mkdir(parents=True, exist_ok=True)
+    config_file = data_dir / "config.json"
+    config_file.write_text(
+        json.dumps({"current_brain": brain_name}),
+        encoding="utf-8",
+    )
+    return config_file
+
+
+class TestReadLegacyBrain:
+    """Tests for _read_legacy_brain — reads current_brain from config.json."""
+
+    def test_reads_from_same_dir(self, tmp_data_dir: Path) -> None:
+        _write_legacy_json(tmp_data_dir, "myproject")
+        result = _read_legacy_brain(tmp_data_dir)
+        assert result == "myproject"
+
+    def test_returns_none_for_default_brain(self, tmp_data_dir: Path) -> None:
+        _write_legacy_json(tmp_data_dir, "default")
+        result = _read_legacy_brain(tmp_data_dir)
+        assert result is None
+
+    def test_returns_none_when_no_json(self, tmp_data_dir: Path) -> None:
+        tmp_data_dir.mkdir(parents=True, exist_ok=True)
+        result = _read_legacy_brain(tmp_data_dir)
+        assert result is None
+
+    def test_reads_from_legacy_dir(self, tmp_path: Path) -> None:
+        """Falls back to ~/.surreal-memory/ when data_dir has no config.json."""
+        data_dir = tmp_path / ".surrealmemory"
+        data_dir.mkdir(parents=True, exist_ok=True)
+
+        legacy_dir = tmp_path / ".surreal-memory"
+        _write_legacy_json(legacy_dir, "work-brain")
+
+        with patch("surreal_memory.unified_config.Path.home", return_value=tmp_path):
+            result = _read_legacy_brain(data_dir)
+        assert result == "work-brain"
+
+    def test_rejects_invalid_brain_name(self, tmp_data_dir: Path) -> None:
+        _write_legacy_json(tmp_data_dir, "../escape")
+        result = _read_legacy_brain(tmp_data_dir)
+        assert result is None
+
+    def test_handles_corrupt_json(self, tmp_data_dir: Path) -> None:
+        tmp_data_dir.mkdir(parents=True, exist_ok=True)
+        (tmp_data_dir / "config.json").write_text("not json", encoding="utf-8")
+        result = _read_legacy_brain(tmp_data_dir)
+        assert result is None
+
+
+class TestConfigLoadMigratesBrain:
+    """Tests for UnifiedConfig.load() migrating current_brain from config.json."""
+
+    def test_migrates_brain_from_legacy_json(self, tmp_data_dir: Path) -> None:
+        """When config.toml doesn't exist, load() picks up brain from config.json."""
+        _write_legacy_json(tmp_data_dir, "myproject")
+
+        config = UnifiedConfig.load(config_path=tmp_data_dir / "config.toml")
+
+        assert config.current_brain == "myproject"
+        # config.toml should now exist with the migrated brain
+        toml_content = (tmp_data_dir / "config.toml").read_text(encoding="utf-8")
+        assert 'current_brain = "myproject"' in toml_content
+
+    def test_defaults_when_no_legacy_json(self, tmp_data_dir: Path) -> None:
+        """When neither config.toml nor config.json exist, uses default."""
+        tmp_data_dir.mkdir(parents=True, exist_ok=True)
+        config = UnifiedConfig.load(config_path=tmp_data_dir / "config.toml")
+        assert config.current_brain == "default"
+
+    def test_existing_toml_not_overridden(self, tmp_data_dir: Path) -> None:
+        """When config.toml already exists, config.json is NOT consulted."""
+        _write_legacy_json(tmp_data_dir, "old-brain")
+        _write_toml(tmp_data_dir, "toml-brain")
+
+        config = UnifiedConfig.load(config_path=tmp_data_dir / "config.toml")
+        assert config.current_brain == "toml-brain"

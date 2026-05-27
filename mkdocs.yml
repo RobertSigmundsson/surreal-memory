@@ -1,0 +1,147 @@
+site_name: Surreal-Memory
+site_description: Reflex-based memory system for AI agents - retrieval through activation, not search
+site_url: https://surrealmemory.theio.vn
+repo_url: https://github.com/acidkill/surreal-memory
+repo_name: acidkill/surreal-memory
+edit_uri: edit/main/docs/
+
+theme:
+  name: material
+  custom_dir: docs/overrides
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: deep purple
+      accent: purple
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: deep purple
+      accent: purple
+      toggle:
+        icon: material/brightness-4
+        name: Switch to light mode
+  features:
+    - navigation.instant
+    - navigation.tracking
+    - navigation.sections
+    - navigation.expand
+    - navigation.top
+    - navigation.footer
+    - search.suggest
+    - search.highlight
+    - content.code.copy
+    - content.code.annotate
+    - content.tabs.link
+  icon:
+    repo: fontawesome/brands/github
+  logo: assets/logo.svg
+  favicon: assets/favicon.png
+
+plugins:
+  - search
+  - mkdocstrings:
+      handlers:
+        python:
+          options:
+            show_source: true
+            show_root_heading: true
+            heading_level: 2
+
+exclude_docs: |
+  llm-wiki/
+
+markdown_extensions:
+  - pymdownx.highlight:
+      anchor_linenums: true
+      line_spans: __span
+      pygments_lang_class: true
+  - pymdownx.inlinehilite
+  - pymdownx.snippets
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format
+  - pymdownx.tabbed:
+      alternate_style: true
+  - pymdownx.tasklist:
+      custom_checkbox: true
+  - pymdownx.emoji:
+      emoji_index: !!python/name:material.extensions.emoji.twemoji
+      emoji_generator: !!python/name:material.extensions.emoji.to_svg
+  - admonition
+  - pymdownx.details
+  - attr_list
+  - md_in_html
+  - tables
+  - toc:
+      permalink: true
+
+nav:
+  - Home: index.md
+  - Getting Started:
+    - Installation: getting-started/installation.md
+    - Quick Start: getting-started/quickstart.md
+    - CLI Guide: getting-started/cli.md
+    - CLI Reference: getting-started/cli-reference.md
+  - Concepts:
+    - How It Works: concepts/how-it-works.md
+    - Neurons & Synapses: concepts/neurons-synapses.md
+    - Memory Types: concepts/memory-types.md
+    - Spreading Activation: concepts/spreading-activation.md
+  - Guides:
+    - Quickstart Guide: guides/quickstart-guide.md
+    - Integration: guides/integration.md
+    - MCP Server: guides/mcp-server.md
+    - Embedding Setup: guides/embedding-setup.md
+    - Cloud Sync: guides/cloud-sync.md
+    - Brain Sharing: guides/brain-sharing.md
+    - Multi-Brain Setup: guides/multi-brain-setup.md
+    - Brain Health Guide: guides/brain-health.md
+    - Agent Memory Governance: guides/agent-memory-governance.md
+    - OpenClaw Plugin: guides/openclaw-plugin.md
+    - Cognitive Reasoning: guides/cognitive-reasoning.md
+    - Schema v21 Migration: guides/schema-v21-migration.md
+    - Learning Habits: guides/learning-habits.md
+    - Safety & Security: guides/safety.md
+    - Companion Setup: guides/companion-setup.md
+    - Docs Chatbot: guides/docs-chatbot.md
+  - API Reference:
+    - MCP Tools: api/mcp-tools.md
+    - Python API: api/python.md
+    - Server API: api/server.md
+  - Architecture:
+    - Overview: architecture/overview.md
+    - Scalability: architecture/scalability.md
+  - Benchmarks: benchmarks.md
+  - FAQ: FAQ.md
+  - Contributing: contributing.md
+  - Changelog: changelog.md
+  - Pro:
+    - Why Pro: landing/pro.md
+    - Pro Quickstart: guides/pro-quickstart.md
+    - Pricing: landing/pricing.md
+  - Blog:
+    - Why I Built Surreal-Memory: blog/why-i-built-surrealmemory.md
+    - Honest Comparison 2026: blog/honest-comparison-2026.md
+    - OpenClaw Integration: blog/surreal-memory-openclaw.md
+
+extra_css:
+  - assets/css/quickstart.css
+
+extra_javascript:
+  - assets/js/quickstart.js
+
+extra:
+  social:
+    - icon: fontawesome/brands/github
+      link: https://github.com/acidkill/surreal-memory
+    - icon: fontawesome/brands/python
+      link: https://pypi.org/project/surreal-memory/
+  version:
+    provider: mike
+
+copyright: Copyright &copy; 2024-2026 Surreal-Memory Contributors

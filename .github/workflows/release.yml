@@ -1,0 +1,271 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  # ── Gate: validate version consistency ──────────────────────────
+  validate:
+    name: Validate version
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check tag matches source version
+        run: |
+          TAG="${GITHUB_REF#refs/tags/v}"
+          PYPROJECT=$(python3 -c "
+          import re, pathlib
+          text = pathlib.Path('pyproject.toml').read_text()
+          m = re.search(r'^version\s*=\s*\"([^\"]+)\"', text, re.M)
+          print(m.group(1))
+          ")
+          INIT=$(python3 -c "
+          import re, pathlib
+          text = pathlib.Path('src/surreal_memory/__init__.py').read_text()
+          m = re.search(r'^__version__\s*=\s*\"([^\"]+)\"', text, re.M)
+          print(m.group(1))
+          ")
+
+          echo "Tag version:        $TAG"
+          echo "pyproject.toml:     $PYPROJECT"
+          echo "__init__.py:        $INIT"
+
+          if [ "$TAG" != "$PYPROJECT" ]; then
+            echo "::error::Tag v$TAG does not match pyproject.toml version $PYPROJECT"
+            exit 1
+          fi
+          if [ "$TAG" != "$INIT" ]; then
+            echo "::error::Tag v$TAG does not match __init__.py version $INIT"
+            exit 1
+          fi
+          echo "Version $TAG is consistent across all sources."
+
+  # ── Gate: run full CI before publishing ─────────────────────────
+  ci:
+    name: CI checks
+    needs: validate
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install -e ".[dev,server]"
+
+      - name: Lint
+        run: |
+          ruff check src/ tests/
+          ruff format --check src/ tests/
+
+      - name: Type check
+        run: mypy src/ --ignore-missing-imports
+
+      - name: Test
+        run: pytest tests/ -v --timeout=60 -n auto -m "not stress" --cov=surreal_memory --cov-report=term-missing --cov-fail-under=67 --dist worksteal
+
+  # ── Build distribution ──────────────────────────────────────────
+  build:
+    name: Build distribution
+    needs: ci
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+          cache-dependency-path: dashboard/package-lock.json
+
+      - name: Build dashboard
+        working-directory: dashboard
+        run: npm ci && npm run build
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install build dependencies
+        run: pip install build
+
+      - name: Build package
+        run: python -m build
+
+      - name: Store distribution packages
+        uses: actions/upload-artifact@v4
+        with:
+          name: python-package-distributions
+          path: dist/
+
+  # ── Publish to PyPI ─────────────────────────────────────────────
+  publish:
+    name: Publish to PyPI
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/p/surreal-memory
+    permissions:
+      id-token: write
+
+    steps:
+      - name: Download distributions
+        uses: actions/download-artifact@v4
+        with:
+          name: python-package-distributions
+          path: dist/
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          skip-existing: true
+
+  # ── GitHub Release ──────────────────────────────────────────────
+  github-release:
+    name: Create GitHub Release
+    needs: publish
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download distributions
+        uses: actions/download-artifact@v4
+        with:
+          name: python-package-distributions
+          path: dist/
+
+      - name: Create GitHub Release
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view '${{ github.ref_name }}' --repo '${{ github.repository }}' > /dev/null 2>&1; then
+            echo "Release ${{ github.ref_name }} already exists — uploading assets only."
+            gh release upload '${{ github.ref_name }}' \
+              --repo '${{ github.repository }}' \
+              --clobber \
+              dist/* || true
+          else
+            gh release create '${{ github.ref_name }}' \
+              --repo '${{ github.repository }}' \
+              --title '${{ github.ref_name }}' \
+              --generate-notes \
+              dist/*
+          fi
+
+  # ── Publish npm (OpenClaw plugin) ──────────────────────────────
+  publish-npm:
+    name: Publish to npm
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          registry-url: "https://registry.npmjs.org"
+
+      - name: Build and publish OpenClaw plugin
+        working-directory: integrations/surrealmemory
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          npm ci || npm install
+          npm run build
+          npm publish --access public || echo "Version already published — skipping"
+
+  # ── Publish TypeScript SDK ─────────────────────────────────────
+  publish-sdk:
+    name: Publish TypeScript SDK to npm
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          registry-url: "https://registry.npmjs.org"
+
+      - name: Build and publish SDK
+        working-directory: integrations/surreal-memory-client
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          npm ci || npm install
+          npm run typecheck
+          npm run build
+          npm publish --access public || echo "Version already published — skipping"
+
+  # ── Publish to ClawHub ─────────────────────────────────────────
+  publish-clawhub:
+    name: Publish to ClawHub
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install ClawHub CLI
+        run: npm install -g clawdhub undici 2>/dev/null || pip install clawdhub 2>/dev/null || true
+
+      - name: Publish to ClawHub
+        env:
+          CLAWHUB_TOKEN: ${{ secrets.CLAWHUB_TOKEN }}
+        run: |
+          VERSION="${GITHUB_REF#refs/tags/v}"
+          clawdhub login --token "$CLAWHUB_TOKEN" --no-browser
+          clawdhub publish .claude-plugin --slug surreal-memory --version "$VERSION" \
+            || echo "::warning::ClawHub publish failed — update manually"
+
+  # ── Publish VS Code Extension ──────────────────────────────────
+  publish-vscode:
+    name: Publish VS Code Extension
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Build and publish extension
+        working-directory: vscode-extension
+        env:
+          VSCE_PAT: ${{ secrets.VSCE_PAT }}
+          OVSX_PAT: ${{ secrets.OVSX_PAT }}
+        run: |
+          npm ci || npm install
+          npm run compile 2>/dev/null || npm run build 2>/dev/null || true
+
+          # VS Code Marketplace
+          if [ -n "$VSCE_PAT" ]; then
+            npx @vscode/vsce publish --pat "$VSCE_PAT" \
+              || echo "::warning::VS Code Marketplace publish failed"
+          else
+            echo "::warning::VSCE_PAT not set — skipping VS Code Marketplace"
+          fi
+
+          # Open VSX Registry
+          if [ -n "$OVSX_PAT" ]; then
+            npx ovsx publish --pat "$OVSX_PAT" \
+              || echo "::warning::Open VSX publish failed"
+          else
+            echo "::warning::OVSX_PAT not set — skipping Open VSX"
+          fi
