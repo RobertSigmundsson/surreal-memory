@@ -527,11 +527,20 @@ class TestGeminiEmbedding:
         assert provider.dimension == 3072
 
     def test_dimension_text_embedding_004(self) -> None:
-        """Should return 768 for text-embedding-004."""
-        from surreal_memory.engine.embedding.gemini_embedding import GeminiEmbedding
+        """text-embedding-004 is decommissioned and intentionally unmapped.
 
+        Its 768-dim entry was removed (it now 404s and was a dimension-mismatch
+        landmine vs the 3072-dim default), so an unknown model falls back to the
+        3072 default rather than the stale 768 value.
+        """
+        from surreal_memory.engine.embedding.gemini_embedding import (
+            _MODEL_DIMENSIONS,
+            GeminiEmbedding,
+        )
+
+        assert "text-embedding-004" not in _MODEL_DIMENSIONS
         provider = GeminiEmbedding(api_key="test-key", model="text-embedding-004")
-        assert provider.dimension == 768
+        assert provider.dimension == 3072
 
     def test_dimension_unknown_model_defaults_to_3072(self) -> None:
         """Should fallback to 3072 for unknown models."""

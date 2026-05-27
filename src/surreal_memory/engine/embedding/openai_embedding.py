@@ -6,6 +6,7 @@ import os
 from typing import Any
 
 from surreal_memory.engine.embedding.provider import EmbeddingProvider
+from surreal_memory.engine.embedding.retry import call_with_retry
 
 # Known dimensions per model
 _MODEL_DIMENSIONS: dict[str, int] = {
@@ -65,9 +66,9 @@ class OpenAIEmbedding(EmbeddingProvider):
     async def embed(self, text: str) -> list[float]:
         """Embed a single text via the OpenAI API."""
         client = self._ensure_client()
-        response = await client.embeddings.create(
-            input=[text],
-            model=self._model,
+        response = await call_with_retry(
+            lambda: client.embeddings.create(input=[text], model=self._model),
+            provider=self._provider_label,
         )
         return list(response.data[0].embedding)
 
@@ -81,9 +82,9 @@ class OpenAIEmbedding(EmbeddingProvider):
             return []
 
         client = self._ensure_client()
-        response = await client.embeddings.create(
-            input=texts,
-            model=self._model,
+        response = await call_with_retry(
+            lambda: client.embeddings.create(input=texts, model=self._model),
+            provider=self._provider_label,
         )
         # The API returns embeddings in the same order as the input
         sorted_data = sorted(response.data, key=lambda d: d.index)

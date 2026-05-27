@@ -51,10 +51,12 @@ services:
       - SURREALDB_NS=surreal_memory
       - SURREALDB_DB=default
 
-      # Embedding (Gemini 2.0)
+      # Embedding (Gemini)
       - SURREAL_MEMORY_EMBEDDING_ENABLED=true
       - SURREAL_MEMORY_EMBEDDING_PROVIDER=gemini
-      - SURREAL_MEMORY_EMBEDDING_MODEL=${SURREAL_MEMORY_EMBEDDING_MODEL:-gemini-embedding-exp-03-07}
+      # gemini-embedding-001 is the current 3072-dim default. The old
+      # gemini-embedding-exp-03-07 is experimental/deprecated — do not use.
+      - SURREAL_MEMORY_EMBEDDING_MODEL=${SURREAL_MEMORY_EMBEDDING_MODEL:-gemini-embedding-001}
       - GEMINI_API_KEY=${GEMINI_API_KEY}
 
       # Cloud Sync

@@ -263,6 +263,15 @@ class StatsHandler:
             "roadmap": self._build_health_roadmap(report),
         }
 
+        # Embedding capability: surface whether the configured provider is usable
+        # (missing package, disabled, or ready) so problems are visible, not silent.
+        try:
+            from surreal_memory.engine.embedding.capability import probe_embedding_capability
+
+            result["embedding"] = probe_embedding_capability(brain.config)
+        except Exception:
+            logger.debug("Embedding capability probe failed", exc_info=True)
+
         # Deep analysis: Gromov delta-hyperbolicity (expensive, opt-in, cached 1h)
         if args.get("deep", False):
             try:
