@@ -236,3 +236,6 @@ integrations/surrealmemory/coverage/
 
 # Task Master AI — local dev planning (never commit)
 .taskmaster/
+
+# Local hook event log — may capture secrets from tool output
+tool_events.jsonl
