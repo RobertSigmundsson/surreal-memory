@@ -570,6 +570,17 @@ async def run_mcp_server() -> None:
     except Exception:
         logger.debug("Version check startup failed (non-critical)", exc_info=True)
 
+    # Surface embedding capability at startup: if embeddings are configured but
+    # the provider package is missing, log a loud, actionable warning instead of
+    # silently degrading to keyword mode (and crashing later on embedding paths).
+    try:
+        from surreal_memory.engine.embedding.capability import warn_if_embedding_unavailable
+        from surreal_memory.unified_config import get_config
+
+        warn_if_embedding_unavailable(get_config())
+    except Exception:
+        logger.debug("Embedding capability check skipped (non-critical)", exc_info=True)
+
     try:
         while True:
             try:

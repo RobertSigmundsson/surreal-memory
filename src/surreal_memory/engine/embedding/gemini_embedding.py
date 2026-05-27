@@ -7,6 +7,7 @@ import os
 from typing import Any
 
 from surreal_memory.engine.embedding.provider import EmbeddingProvider
+from surreal_memory.engine.embedding.retry import call_with_retry
 
 logger = logging.getLogger(__name__)
 
@@ -14,7 +15,8 @@ logger = logging.getLogger(__name__)
 _MODEL_DIMENSIONS: dict[str, int] = {
     "gemini-embedding-001": 3072,
     "gemini-embedding-exp-03-07": 3072,
-    "text-embedding-004": 768,
+    # text-embedding-004 (768-dim) is decommissioned (404s) — removed to avoid a
+    # dimension-mismatch landmine against the 3072-dim default.
 }
 
 _DEFAULT_MODEL = "gemini-embedding-001"
@@ -65,10 +67,13 @@ class GeminiEmbedding(EmbeddingProvider):
     async def embed(self, text: str) -> list[float]:
         """Embed a single text via the Gemini API."""
         client = self._ensure_client()
-        response = await client.aio.models.embed_content(
-            model=self._model,
-            contents=text,
-            config={"task_type": self._task_type},
+        response = await call_with_retry(
+            lambda: client.aio.models.embed_content(
+                model=self._model,
+                contents=text,
+                config={"task_type": self._task_type},
+            ),
+            provider="gemini",
         )
         return list(response.embeddings[0].values)
 
@@ -88,10 +93,14 @@ class GeminiEmbedding(EmbeddingProvider):
         batch_size = 100
         for i in range(0, len(texts), batch_size):
             chunk = texts[i : i + batch_size]
-            response = await client.aio.models.embed_content(
-                model=self._model,
-                contents=chunk,
-                config={"task_type": self._task_type},
+            response = await call_with_retry(
+                # default-arg capture binds this chunk to its own closure
+                lambda chunk=chunk: client.aio.models.embed_content(
+                    model=self._model,
+                    contents=chunk,
+                    config={"task_type": self._task_type},
+                ),
+                provider="gemini",
             )
             all_embeddings.extend(list(emb.values) for emb in response.embeddings)
 

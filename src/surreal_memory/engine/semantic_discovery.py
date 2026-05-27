@@ -101,7 +101,12 @@ def _auto_detect_provider() -> tuple[str, str]:
     import os
 
     if os.environ.get("GOOGLE_API_KEY") or os.environ.get("GEMINI_API_KEY"):
-        return ("gemini", "models/text-embedding-004")
+        # Use the live default model, never a hardcoded literal that can drift to a
+        # decommissioned model (text-embedding-004 now 404s and was 768-dim, a
+        # dimension-mismatch landmine vs the 3072-dim gemini-embedding-001 default).
+        from surreal_memory.engine.embedding.gemini_embedding import _DEFAULT_MODEL
+
+        return ("gemini", _DEFAULT_MODEL)
 
     # 4. Check OpenAI API key (paid)
     if os.environ.get("OPENAI_API_KEY"):
