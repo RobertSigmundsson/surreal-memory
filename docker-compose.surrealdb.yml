@@ -11,7 +11,12 @@
 services:
   surrealdb:
     image: surrealdb/surrealdb:latest
-    command: start --user root --pass ${SURREALDB_PASS:-surrealmemory} --bind 0.0.0.0:8001
+    # surrealkv:///surrealdb/data/db makes storage PERSISTENT. Without a datastore
+    # path `surreal start` defaults to in-memory and ALL data is lost on restart.
+    # `user: root` is required because a fresh named volume is root-owned and the
+    # image's default `nonroot` user cannot create the datastore directory in it.
+    command: start --user root --pass ${SURREALDB_PASS:-surrealmemory} --bind 0.0.0.0:8001 surrealkv:///surrealdb/data/db
+    user: root
     ports:
       - "8001:8001"
     volumes:
@@ -55,7 +60,8 @@ services:
       # Cloud Sync
       - SURREAL_MEMORY_SYNC_ENABLED=true
       - SURREAL_MEMORY_SYNC_AUTO=true
-      - SURREAL_MEMORY_HUB_URL=https://surreal-memory-sync-hub.toni-nowak84.workers.dev
+      # Set SURREAL_MEMORY_HUB_URL in your .env — personal hub URL, not committed here.
+      - SURREAL_MEMORY_HUB_URL=${SURREAL_MEMORY_HUB_URL:-}
       # Set SURREAL_MEMORY_API_KEY in your .env — never hardcode it in this committed file.
       - SURREAL_MEMORY_API_KEY=${SURREAL_MEMORY_API_KEY:-}
 
