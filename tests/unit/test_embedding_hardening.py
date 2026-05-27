@@ -138,9 +138,7 @@ def test_auto_detect_never_returns_decommissioned_model(
 
 
 def test_capability_disabled_reports_unavailable() -> None:
-    cfg = SimpleNamespace(
-        embedding_enabled=False, embedding_provider="gemini", embedding_model="m"
-    )
+    cfg = SimpleNamespace(embedding_enabled=False, embedding_provider="gemini", embedding_model="m")
     info = probe_embedding_capability(cfg)
     assert info["enabled"] is False
     assert info["available"] is False
@@ -163,9 +161,7 @@ def test_capability_missing_package_has_install_hint(
 def test_capability_available_reports_dimension(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(
-        capability_mod.importlib.util, "find_spec", lambda _name: object()
-    )
+    monkeypatch.setattr(capability_mod.importlib.util, "find_spec", lambda _name: object())
     cfg = SimpleNamespace(
         embedding_enabled=True,
         embedding_provider="gemini",
@@ -179,13 +175,9 @@ def test_capability_available_reports_dimension(
 def test_capability_accepts_nested_unified_config(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(
-        capability_mod.importlib.util, "find_spec", lambda _name: object()
-    )
+    monkeypatch.setattr(capability_mod.importlib.util, "find_spec", lambda _name: object())
     cfg = SimpleNamespace(
-        embedding=SimpleNamespace(
-            enabled=True, provider="gemini", model="gemini-embedding-001"
-        )
+        embedding=SimpleNamespace(enabled=True, provider="gemini", model="gemini-embedding-001")
     )
     info = probe_embedding_capability(cfg)
     assert info["enabled"] is True

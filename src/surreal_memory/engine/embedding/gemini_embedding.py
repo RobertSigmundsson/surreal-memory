@@ -93,9 +93,10 @@ class GeminiEmbedding(EmbeddingProvider):
         batch_size = 100
         for i in range(0, len(texts), batch_size):
             chunk = texts[i : i + batch_size]
+            # chunk is awaited immediately below, so a plain closure is safe
+            # (no late-binding across loop iterations) and types cleanly.
             response = await call_with_retry(
-                # default-arg capture binds this chunk to its own closure
-                lambda chunk=chunk: client.aio.models.embed_content(
+                lambda: client.aio.models.embed_content(
                     model=self._model,
                     contents=chunk,
                     config={"task_type": self._task_type},
