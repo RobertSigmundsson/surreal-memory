@@ -16,7 +16,7 @@
  *   - Uses `number` instead of `integer` for Gemini compatibility
  */
 
-import type { Surreal-MemoryMcpClient, McpToolDefinition } from "./mcp-client.js";
+import type { SurrealMemoryMcpClient, McpToolDefinition } from "./mcp-client.js";
 
 // ── Types ──────────────────────────────────────────────────
 
@@ -130,7 +130,7 @@ function toSafeSchema(inputSchema?: Record<string, unknown>): JsonSchema {
 /**
  * Create a tool call helper that auto-reconnects to MCP.
  */
-function makeCallFn(mcp: Surreal-MemoryMcpClient) {
+function makeCallFn(mcp: SurrealMemoryMcpClient) {
   return async (
     toolName: string,
     args: Record<string, unknown>,
@@ -182,7 +182,7 @@ function mcpToolToOpenClaw(
  * Must be called after MCP connection is established.
  */
 export async function createToolsFromMcp(
-  mcp: Surreal-MemoryMcpClient,
+  mcp: SurrealMemoryMcpClient,
 ): Promise<ToolDefinition[]> {
   const mcpTools = await mcp.listTools();
   const call = makeCallFn(mcp);
@@ -194,7 +194,7 @@ export async function createToolsFromMcp(
  * Ensures the plugin still works even if the MCP server is an older version.
  */
 export function createFallbackTools(
-  mcp: Surreal-MemoryMcpClient,
+  mcp: SurrealMemoryMcpClient,
 ): ToolDefinition[] {
   const call = makeCallFn(mcp);
 
@@ -281,7 +281,7 @@ export function createFallbackTools(
  * memory-core tools but leaves the tools.profile allowList referencing them.
  */
 export function createCompatibilityTools(
-  mcp: Surreal-MemoryMcpClient,
+  mcp: SurrealMemoryMcpClient,
 ): ToolDefinition[] {
   const call = makeCallFn(mcp);
 
