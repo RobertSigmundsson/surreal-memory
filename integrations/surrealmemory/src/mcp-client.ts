@@ -74,7 +74,7 @@ export const ALLOWED_ENV_KEYS: ReadonlySet<string> = new Set([
 
 // ── Client ─────────────────────────────────────────────────
 
-export class Surreal-MemoryMcpClient {
+export class SurrealMemoryMcpClient {
   private proc: ChildProcess | null = null;
   private requestId = 0;
   private readonly pending = new Map<number, PendingRequest>();

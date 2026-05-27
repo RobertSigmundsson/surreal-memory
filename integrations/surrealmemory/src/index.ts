@@ -43,7 +43,7 @@ import type {
   CommandEvent,
   GatewayStartupEvent,
 } from "./types.js";
-import { Surreal-MemoryMcpClient } from "./mcp-client.js";
+import { SurrealMemoryMcpClient } from "./mcp-client.js";
 import type { PluginLogger } from "./types.js";
 import { createToolsFromMcp, createFallbackTools, createCompatibilityTools } from "./tools.js";
 import type { ToolDefinition } from "./tools.js";
@@ -289,12 +289,12 @@ export function resolveConfig(raw?: Record<string, unknown>): PluginConfig {
 // Multiple workspaces may call register() independently, but all
 // should share the same MCP process per (pythonPath, brain) combo.
 
-const mcpClients = new Map<string, Surreal-MemoryMcpClient>();
+const mcpClients = new Map<string, SurrealMemoryMcpClient>();
 
 function getOrCreateMcpClient(
   cfg: PluginConfig,
   logger: PluginLogger,
-): Surreal-MemoryMcpClient {
+): SurrealMemoryMcpClient {
   const key = `${cfg.pythonPath}::${cfg.brain}`;
 
   const existing = mcpClients.get(key);
@@ -303,7 +303,7 @@ function getOrCreateMcpClient(
     return existing;
   }
 
-  const mcp = new Surreal-MemoryMcpClient({
+  const mcp = new SurrealMemoryMcpClient({
     pythonPath: cfg.pythonPath,
     brain: cfg.brain,
     logger,
