@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.2.0] — 2026-05-28
+
+### Added
+- **Embedding env overrides** — the unified config now honors
+  `SURREAL_MEMORY_EMBEDDING_ENABLED` / `_PROVIDER` / `_MODEL` /
+  `_SIMILARITY_THRESHOLD` (precedence: env > `config.toml` > default), so the
+  MCP server and CLI follow the embedding provider set in their environment.
+- **`smem reindex`** — (re)embed a brain's neurons with the effective provider.
+  Flags: `--dry-run`, `--missing-only` (default) / `--all`, `--batch-size`;
+  idempotent and fail-soft per neuron.
+
+### Changed
+- **Effective config wins** — embedding `enabled`/`provider`/`model` now resolve
+  from the effective config (`config.toml` + env) instead of the stale stored
+  `brain.config`. Fixes embeddings silently staying disabled after a user edits
+  their config/env. `smem_health` now reports the effective embedding state.
+
+### Performance
+- The Stop hook no longer loads a local `sentence-transformers` model on every
+  session end (it was the dominant session-save latency). Semantic dedup uses a
+  local Ollama server when one is running, otherwise it is skipped.
+
 ## [2.1.0] — 2026-05-28
 
 ### Added
