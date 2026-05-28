@@ -354,3 +354,99 @@ class TestConfigLoadMigratesBrain:
 
         config = UnifiedConfig.load(config_path=tmp_data_dir / "config.toml")
         assert config.current_brain == "toml-brain"
+
+
+def _write_embedding_toml(
+    data_dir: Path,
+    *,
+    enabled: bool = False,
+    provider: str = "sentence_transformer",
+    model: str = "all-MiniLM-L6-v2",
+    threshold: float = 0.7,
+) -> Path:
+    """Write a config.toml with an [embedding] section and return its path."""
+    data_dir.mkdir(parents=True, exist_ok=True)
+    toml_path = data_dir / "config.toml"
+    toml_path.write_text(
+        'version = "1.0"\n'
+        'current_brain = "default"\n\n'
+        "[embedding]\n"
+        f"enabled = {str(enabled).lower()}\n"
+        f'provider = "{provider}"\n'
+        f'model = "{model}"\n'
+        f"similarity_threshold = {threshold}\n",
+        encoding="utf-8",
+    )
+    return toml_path
+
+
+class TestEmbeddingEnvOverrides:
+    """Tests for env vars overriding the config.toml [embedding] section."""
+
+    def test_toml_values_used_when_no_env(
+        self, tmp_data_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        for var in (
+            "SURREAL_MEMORY_EMBEDDING_ENABLED",
+            "SURREAL_MEMORY_EMBEDDING_PROVIDER",
+            "SURREAL_MEMORY_EMBEDDING_MODEL",
+            "SURREAL_MEMORY_EMBEDDING_SIMILARITY_THRESHOLD",
+        ):
+            monkeypatch.delenv(var, raising=False)
+
+        _write_embedding_toml(tmp_data_dir, enabled=False, provider="sentence_transformer")
+        config = UnifiedConfig.load(config_path=tmp_data_dir / "config.toml")
+
+        assert config.embedding.enabled is False
+        assert config.embedding.provider == "sentence_transformer"
+        assert config.embedding.model == "all-MiniLM-L6-v2"
+
+    def test_env_overrides_toml(self, tmp_data_dir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The stale-default bug: toml says sentence_transformer/disabled but the
+        env (set during MCP registration) says gemini/enabled — env must win.
+        """
+        _write_embedding_toml(tmp_data_dir, enabled=False, provider="sentence_transformer")
+        monkeypatch.setenv("SURREAL_MEMORY_EMBEDDING_ENABLED", "true")
+        monkeypatch.setenv("SURREAL_MEMORY_EMBEDDING_PROVIDER", "gemini")
+        monkeypatch.setenv("SURREAL_MEMORY_EMBEDDING_MODEL", "gemini-embedding-001")
+        monkeypatch.setenv("SURREAL_MEMORY_EMBEDDING_SIMILARITY_THRESHOLD", "0.55")
+
+        config = UnifiedConfig.load(config_path=tmp_data_dir / "config.toml")
+
+        assert config.embedding.enabled is True
+        assert config.embedding.provider == "gemini"
+        assert config.embedding.model == "gemini-embedding-001"
+        assert config.embedding.similarity_threshold == 0.55
+
+    def test_partial_env_keeps_other_toml_values(
+        self, tmp_data_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _write_embedding_toml(
+            tmp_data_dir, enabled=True, provider="openai", model="text-embedding-3-small"
+        )
+        for var in (
+            "SURREAL_MEMORY_EMBEDDING_ENABLED",
+            "SURREAL_MEMORY_EMBEDDING_MODEL",
+            "SURREAL_MEMORY_EMBEDDING_SIMILARITY_THRESHOLD",
+        ):
+            monkeypatch.delenv(var, raising=False)
+        monkeypatch.setenv("SURREAL_MEMORY_EMBEDDING_PROVIDER", "ollama")
+
+        config = UnifiedConfig.load(config_path=tmp_data_dir / "config.toml")
+
+        # Only provider overridden; enabled/model from toml stay.
+        assert config.embedding.enabled is True
+        assert config.embedding.provider == "ollama"
+        assert config.embedding.model == "text-embedding-3-small"
+
+    def test_empty_env_does_not_override(
+        self, tmp_data_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _write_embedding_toml(tmp_data_dir, enabled=True, provider="gemini")
+        monkeypatch.setenv("SURREAL_MEMORY_EMBEDDING_PROVIDER", "")
+        monkeypatch.delenv("SURREAL_MEMORY_EMBEDDING_ENABLED", raising=False)
+
+        config = UnifiedConfig.load(config_path=tmp_data_dir / "config.toml")
+
+        assert config.embedding.enabled is True
+        assert config.embedding.provider == "gemini"

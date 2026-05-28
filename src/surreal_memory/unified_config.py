@@ -155,6 +155,67 @@ class EmbeddingSettings:
         )
 
 
+def _env_truthy(value: str | None) -> bool | None:
+    """Parse a truthy env var. Returns None when the var is unset/empty.
+
+    Accepts ``1/true/yes/on`` (case-insensitive) as True; everything else as
+    False. Returning ``None`` lets callers distinguish "not set" from "false".
+    """
+    if value is None:
+        return None
+    normalized = value.strip().lower()
+    if normalized == "":
+        return None
+    return normalized in ("1", "true", "yes", "on")
+
+
+def _load_embedding_settings(data: dict[str, Any]) -> EmbeddingSettings:
+    """Build EmbeddingSettings from config.toml, letting env vars override.
+
+    Env precedence (env wins over config.toml, config.toml wins over defaults):
+        SURREAL_MEMORY_EMBEDDING_ENABLED              -> enabled (truthy parse)
+        SURREAL_MEMORY_EMBEDDING_PROVIDER             -> provider
+        SURREAL_MEMORY_EMBEDDING_MODEL                -> model
+        SURREAL_MEMORY_EMBEDDING_SIMILARITY_THRESHOLD -> similarity_threshold
+
+    Only env vars that are actually set (non-empty) override the file values.
+    """
+    base = EmbeddingSettings.from_dict(data)
+
+    enabled = base.enabled
+    env_enabled = _env_truthy(os.environ.get("SURREAL_MEMORY_EMBEDDING_ENABLED"))
+    if env_enabled is not None:
+        enabled = env_enabled
+
+    provider = base.provider
+    env_provider = os.environ.get("SURREAL_MEMORY_EMBEDDING_PROVIDER")
+    if env_provider is not None and env_provider.strip():
+        provider = env_provider.strip()
+
+    model = base.model
+    env_model = os.environ.get("SURREAL_MEMORY_EMBEDDING_MODEL")
+    if env_model is not None and env_model.strip():
+        model = env_model.strip()
+
+    similarity_threshold = base.similarity_threshold
+    env_threshold = os.environ.get("SURREAL_MEMORY_EMBEDDING_SIMILARITY_THRESHOLD")
+    if env_threshold is not None and env_threshold.strip():
+        try:
+            similarity_threshold = float(env_threshold)
+        except ValueError:
+            logging.getLogger(__name__).warning(
+                "Invalid SURREAL_MEMORY_EMBEDDING_SIMILARITY_THRESHOLD=%r — ignoring",
+                env_threshold,
+            )
+
+    return EmbeddingSettings(
+        enabled=enabled,
+        provider=provider,
+        model=model,
+        similarity_threshold=similarity_threshold,
+    )
+
+
 @dataclass
 class BrainSettings:
     """Settings for brain behavior."""
@@ -1256,7 +1317,7 @@ class UnifiedConfig:
                 or data.get("current_brain", get_default_brain())
             ),
             brain=BrainSettings.from_dict(data.get("brain", {})),
-            embedding=EmbeddingSettings.from_dict(data.get("embedding", {})),
+            embedding=_load_embedding_settings(data.get("embedding", {})),
             auto=AutoConfig.from_dict(data.get("auto", {})),
             eternal=EternalConfig.from_dict(data.get("eternal", {})),
             maintenance=MaintenanceConfig.from_dict(data.get("maintenance", {})),
