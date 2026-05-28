@@ -26,7 +26,7 @@ Before running any commands, ask the user for the following values. You will use
 
 | Value | Required | Description |
 |-------|----------|-------------|
-| `GEMINI_API_KEY` | **Yes** | Enables semantic search and embeddings. Free at https://aistudio.google.com/apikey |
+| `GEMINI_API_KEY` | **Recommended** | Enables semantic recall via Gemini embeddings (`gemini-embedding-001`). Free at https://aistudio.google.com/apikey. No key? Skip it and use the local offline embedder instead (see Step 3). |
 | `SURREALDB_PASS` | No | SurrealDB password. Default: `surrealmemory`. Change for production. |
 | `SURREAL_MEMORY_API_KEY` | No | Multi-device sync key. Leave empty to skip cloud sync. |
 
@@ -61,14 +61,14 @@ For Docker on macOS: install Docker Desktop from https://www.docker.com/products
 ### Step 2 — Clone the Repository
 
 ```bash
-git clone https://github.com/acidkill/surreal-memory-surrealdb-version.git \
-    ~/repos/surreal-memory-surrealdb-version
+git clone https://github.com/acidkill/surreal-memory.git \
+    ~/repos/surreal-memory
 ```
 
 If the directory already exists, skip the clone and verify it is up to date:
 
 ```bash
-cd ~/repos/surreal-memory-surrealdb-version && git pull
+cd ~/repos/surreal-memory && git pull
 ```
 
 ---
@@ -76,7 +76,7 @@ cd ~/repos/surreal-memory-surrealdb-version && git pull
 ### Step 3 — Configure Environment
 
 ```bash
-cd ~/repos/surreal-memory-surrealdb-version
+cd ~/repos/surreal-memory
 cp .env.example .env
 ```
 
@@ -90,6 +90,11 @@ SURREAL_MEMORY_EMBEDDING_ENABLED=true
 SURREAL_MEMORY_EMBEDDING_PROVIDER=gemini
 ```
 
+**No Gemini key?** Use the local, offline embedder instead — set
+`SURREAL_MEMORY_EMBEDDING_PROVIDER=sentence_transformer` (no API key; install the
+`[embeddings]` extra in Step 5 instead of `[embeddings-gemini]`). Or set
+`SURREAL_MEMORY_EMBEDDING_PROVIDER=auto` to auto-detect the best available provider.
+
 If the user provided `SURREAL_MEMORY_API_KEY`, also set:
 
 ```
@@ -102,7 +107,7 @@ SURREAL_MEMORY_API_KEY=<value from user>
 ### Step 4 — Start Services via Docker
 
 ```bash
-cd ~/repos/surreal-memory-surrealdb-version
+cd ~/repos/surreal-memory
 docker compose -f docker-compose.surrealdb.yml up -d --build
 ```
 
@@ -130,7 +135,7 @@ Install the local fork into an isolated pipx environment with all required extra
 
 ```bash
 pipx install \
-  "surreal-memory[surrealdb,embeddings-gemini,server] @ git+https://github.com/acidkill/surreal-memory-surrealdb-version.git"
+  "surreal-memory[surrealdb,embeddings-gemini,server] @ git+https://github.com/acidkill/surreal-memory.git"
 ```
 
 Verify the CLI is available:
@@ -146,7 +151,7 @@ If `smem` is not found after install, reload the shell:
 source ~/.bashrc   # or: exec $SHELL
 ```
 
-> **Note:** v2.0.0 is a clean break from upstream. The legacy `smem-*` commands were removed — only `smem-*` works. See `CHANGELOG.md` for the full v2.0.0 BREAKING change list.
+> **Note:** v2.0.0 is a clean break from upstream NeuralMemory. The CLI entry points are `smem`, `smem-mcp`, and the `smem-hook-*` hooks — there are no other binaries. For the local no-key embedder, swap `embeddings-gemini` for `embeddings` in the extras above. See `CHANGELOG.md` for the full v2.0.0 BREAKING change list.
 
 ---
 
@@ -291,7 +296,7 @@ a `## Recent Memories` block in the initial context.
 
 Confirm all of the following before reporting setup complete:
 
-- [ ] `docker compose -f ~/repos/surreal-memory-surrealdb-version/docker-compose.surrealdb.yml ps` shows both services `Up (healthy)`
+- [ ] `docker compose -f ~/repos/surreal-memory/docker-compose.surrealdb.yml ps` shows both services `Up (healthy)`
 - [ ] `smem --version` prints a version number
 - [ ] `smem doctor` shows all checks passing
 - [ ] `smem remember "test"` returns success with a fiber ID

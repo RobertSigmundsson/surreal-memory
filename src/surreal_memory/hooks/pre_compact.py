@@ -113,11 +113,13 @@ def _extract_text(entry: dict[str, Any]) -> str:
     return text if isinstance(text, str) else ""
 
 
-async def flush_text(text: str) -> dict[str, Any]:
+async def flush_text(text: str, project_name: str | None = None) -> dict[str, Any]:
     """Detect and save memorable content from text.
 
     Uses the same auto-capture pipeline as the MCP server's flush action,
-    but runs standalone without the MCP server.
+    but runs standalone without the MCP server. When ``project_name`` is
+    given, captured memories are scoped to that project (and tagged
+    ``project:<name>``) so recall can be filtered per project.
     """
     from surreal_memory.core.memory_types import MemoryType, Priority, TypedMemory
     from surreal_memory.engine.encoder import MemoryEncoder
@@ -139,6 +141,11 @@ async def flush_text(text: str) -> dict[str, Any]:
     storage = await get_shared_storage(config.current_brain)
 
     try:
+        # The repo name doubles as the project id (opaque scope label).
+        project_id = project_name
+        base_tags = {"emergency_flush", "pre_compact"}
+        if project_name:
+            base_tags.add(f"project:{project_name}")
         # Detect ALL memory types with emergency settings
         detected = analyze_text_for_memories(
             text,
@@ -189,8 +196,10 @@ async def flush_text(text: str) -> dict[str, Any]:
                 result = await encoder.encode(
                     content=redacted_content,
                     timestamp=utcnow(),
-                    tags={"emergency_flush", "pre_compact"},
+                    tags=set(base_tags),
                 )
+                # Persist readable text as the fiber summary for recall.
+                await storage.update_fiber(result.fiber.with_summary(redacted_content))
 
                 # Create typed memory metadata
                 mem_type_str = item.get("type", "fact")
@@ -204,7 +213,8 @@ async def flush_text(text: str) -> dict[str, Any]:
                     memory_type=mem_type,
                     priority=Priority.from_int(item.get("priority", 5)),
                     source="pre_compact_hook",
-                    tags={"emergency_flush", "pre_compact"},
+                    tags=set(base_tags),
+                    project_id=project_id,
                 )
                 await storage.add_typed_memory(typed_mem)
                 saved.append(redacted_content[:60])
@@ -224,7 +234,10 @@ async def flush_text(text: str) -> dict[str, Any]:
             else "No memories saved",
         }
     finally:
-        await storage.close()
+        try:
+            await storage.close()
+        except Exception:
+            logger.debug("storage.close() failed (non-fatal)", exc_info=True)
 
 
 def main() -> None:
@@ -256,7 +269,10 @@ def main() -> None:
     else:
         logging.basicConfig(level=logging.WARNING, stream=sys.stderr)
 
+    from surreal_memory.hooks.project_context import derive_project_name
+
     text = ""
+    project_name: str | None = None
 
     if args.text:
         # Direct text input
@@ -267,6 +283,7 @@ def main() -> None:
     else:
         # Read Claude Code hook input from stdin
         hook_input = read_hook_input()
+        project_name = derive_project_name(hook_input)
         transcript_path = hook_input.get("transcript_path", "")
         if transcript_path:
             # Validate stdin transcript path is within Claude data directory
@@ -287,8 +304,11 @@ def main() -> None:
         print("No substantial content to flush", file=sys.stderr)  # noqa: T201
         sys.exit(0)
 
+    if project_name is None:
+        project_name = derive_project_name(None)
+
     try:
-        result = asyncio.run(flush_text(text))
+        result = asyncio.run(flush_text(text, project_name))
         saved = result.get("saved", 0)
         if saved > 0:
             print(  # noqa: T201

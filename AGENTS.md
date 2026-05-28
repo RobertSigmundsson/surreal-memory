@@ -134,7 +134,7 @@ One paragraph: the problem this PR solves and why it solves it this way.
 
 - **Python**: 3.11+, ruff (project config), mypy strict-ish (`--ignore-missing-imports`). Type hints on every public function.
 - **TypeScript** (dashboard / vscode-extension / integrations): strict mode on, no `any` without justification.
-- **Branding**: package is **`surreal-memory`**, Python module **`surreal_memory`**, npm package **`surrealmemory`**, CLI binary **`smem`**. Never `surreal-memory` / `smem-*` — those were dropped in v2.0.0.
+- **Branding**: package is **`surreal-memory`**, Python module **`surreal_memory`**, npm package **`surrealmemory`**, CLI binary **`smem`**. These replaced the upstream `neural-memory` / `neural_memory` / `nm` names in the v2.0.0 rebrand — don't reintroduce the old ones (except where upstream attribution requires it).
 - **Upstream attribution**: the only places where `nhadaututtheky/neural-memory` URLs are allowed are `LICENSE`, `NOTICE`, and `README.md` § Acknowledgments. Don't introduce new ones elsewhere.
 
 ---

@@ -221,6 +221,8 @@ uv.lock
 
 # Local-only docs/plans
 docs/plans/
+# Cross-session handover notes (local review artifacts — never publish)
+HANDOVER*.md
 
 # Misc local files
 AUDIT-REPORT.md

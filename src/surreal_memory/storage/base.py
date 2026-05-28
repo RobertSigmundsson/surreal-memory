@@ -772,6 +772,28 @@ class NeuralStorage(ABC):
         """
         raise NotImplementedError
 
+    async def get_project_memories(
+        self,
+        project_id: str,
+        include_expired: bool = False,
+    ) -> list[TypedMemory]:
+        """Get typed memories scoped to a project.
+
+        Default implementation delegates to :meth:`find_typed_memories`;
+        backends may override with a more direct query.
+
+        Args:
+            project_id: The project scope to filter by.
+            include_expired: Include expired memories.
+
+        Returns:
+            List of typed memories for the project.
+        """
+        return await self.find_typed_memories(
+            project_id=project_id,
+            include_expired=include_expired,
+        )
+
     async def count_typed_memories(
         self,
         tier: str | None = None,

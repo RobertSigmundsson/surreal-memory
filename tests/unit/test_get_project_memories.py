@@ -110,10 +110,12 @@ async def sqlite_storage(tmp_path: Path) -> SQLiteStorage:
 async def surrealdb_storage():  # type: ignore[no-untyped-def]
     if not SURREALDB_URL:
         pytest.skip("SURREALDB_URL not set")
+    # The surrealdb SDK is an optional dependency; skip when it's absent.
+    pytest.importorskip("surrealdb")
     from surreal_memory.storage.surrealdb.store import SurrealDBStorage
 
     storage = SurrealDBStorage(url=SURREALDB_URL)
-    await storage.connect()
+    await storage.initialize()
     brain = Brain.create(name="parity-test-surreal")
     await storage.save_brain(brain)
     storage.set_brain(brain.id)
