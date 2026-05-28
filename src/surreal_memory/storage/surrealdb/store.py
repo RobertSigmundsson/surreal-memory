@@ -81,6 +81,11 @@ def _ensure_naive(dt: datetime) -> datetime:
 def _row_to_neuron(row: dict[str, Any]) -> Neuron:
     """Convert a SurrealDB neuron record to a Neuron."""
     meta = dict(row.get("metadata") or {})
+    # Surface the stored vector back into metadata so callers (e.g. reindex's
+    # --missing-only) can tell whether a neuron already has an embedding.
+    embedding_vec = row.get("embedding_vec")
+    if embedding_vec:
+        meta["_embedding"] = list(embedding_vec)
     rid = row["id"]
     neuron_id = f"{rid.table_name}:{rid.id}" if hasattr(rid, "table_name") else str(rid)
     # Strip table prefix and convert underscores back to dashes

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from typing import Any
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -44,6 +45,31 @@ async def storage(brain: Brain) -> InMemoryStorage:
     await store.save_brain(brain)
     store.set_brain(brain.id)
     return store
+
+
+@pytest.fixture(autouse=True)
+def _effective_from_brain_config() -> Any:
+    """Make _effective_embedding derive from the passed brain config.
+
+    "Effective config wins" resolves embedding settings from the unified config
+    (the real ~/.surrealmemory/config.toml), which would make these unit tests
+    depend on the developer's machine. Pin it to the brain config each test
+    constructs so the tests stay deterministic and assert their intended logic.
+    Individual tests may re-patch _effective_embedding to test precedence.
+    """
+
+    def _derive(config: BrainConfig) -> tuple[bool, str, str]:
+        return (
+            config.embedding_enabled,
+            config.embedding_provider,
+            config.embedding_model,
+        )
+
+    with patch(
+        "surreal_memory.engine.semantic_discovery._effective_embedding",
+        side_effect=_derive,
+    ):
+        yield
 
 
 class TestCosimeSimilarity:
@@ -321,9 +347,15 @@ class TestProviderCache:
             embedding_provider="sentence_transformer",
             embedding_model="test-model",
         )
-        with patch(
-            "surreal_memory.engine.embedding.sentence_transformer.SentenceTransformerEmbedding",
-        ) as mock_st:
+        with (
+            patch(
+                "surreal_memory.engine.semantic_discovery._effective_embedding",
+                return_value=(True, "sentence_transformer", "test-model"),
+            ),
+            patch(
+                "surreal_memory.engine.embedding.sentence_transformer.SentenceTransformerEmbedding",
+            ) as mock_st,
+        ):
             p1 = _create_provider(config)
             p2 = _create_provider(config)
             assert p1 is p2
@@ -347,13 +379,56 @@ class TestProviderCache:
             embedding_provider="sentence_transformer",
             embedding_model="model-b",
         )
-        with patch(
-            "surreal_memory.engine.embedding.sentence_transformer.SentenceTransformerEmbedding",
-            side_effect=lambda **kw: MagicMock(name=f"ST({kw})"),
-        ) as mock_st:
+
+        def _effective(cfg: BrainConfig) -> tuple[bool, str, str]:
+            return (True, cfg.embedding_provider, cfg.embedding_model)
+
+        with (
+            patch(
+                "surreal_memory.engine.semantic_discovery._effective_embedding",
+                side_effect=_effective,
+            ),
+            patch(
+                "surreal_memory.engine.embedding.sentence_transformer.SentenceTransformerEmbedding",
+                side_effect=lambda **kw: MagicMock(name=f"ST({kw})"),
+            ) as mock_st,
+        ):
             p1 = _create_provider(config_a)
             p2 = _create_provider(config_b)
             assert p1 is not p2
             assert mock_st.call_count == 2
+
+        _provider_cache.clear()
+
+    def test_effective_config_wins_over_stale_brain_config(self) -> None:
+        """When the stored brain config is stale, _create_provider must use the
+        effective (unified) provider/model, not the brain config's values.
+        """
+        from surreal_memory.engine.semantic_discovery import _create_provider
+
+        # Stale brain config: disabled + sentence_transformer default.
+        stale = BrainConfig(
+            embedding_enabled=False,
+            embedding_provider="sentence_transformer",
+            embedding_model="all-MiniLM-L6-v2",
+        )
+
+        # Effective (unified) config says gemini/enabled — overrides the autouse
+        # fixture for this test to assert the precedence directly.
+        with (
+            patch(
+                "surreal_memory.engine.semantic_discovery._effective_embedding",
+                return_value=(True, "gemini", "gemini-embedding-001"),
+            ),
+            patch(
+                "surreal_memory.engine.embedding.gemini_embedding.GeminiEmbedding",
+            ) as mock_gemini,
+            patch(
+                "surreal_memory.engine.embedding.sentence_transformer.SentenceTransformerEmbedding",
+            ) as mock_st,
+        ):
+            _create_provider(stale)
+            mock_gemini.assert_called_once()
+            mock_st.assert_not_called()
 
         _provider_cache.clear()

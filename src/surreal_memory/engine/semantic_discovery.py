@@ -130,6 +130,29 @@ def _auto_detect_provider() -> tuple[str, str]:
 _provider_cache: dict[tuple[str, str], Any] = {}
 
 
+def _effective_embedding(config: BrainConfig) -> tuple[bool, str, str]:
+    """Resolve the EFFECTIVE embedding (enabled, provider, model).
+
+    The stored ``brain.config`` is often stale (it keeps the defaults it was
+    created with and is never re-synced when the user edits config.toml/env).
+    "Effective config wins": prefer the unified embedding config
+    (config.toml + env overrides) and fall back to the flat brain config only
+    when the unified config cannot be loaded.
+    """
+    try:
+        from surreal_memory.unified_config import get_config
+
+        embedding = get_config().embedding
+        return (embedding.enabled, embedding.provider, embedding.model)
+    except Exception:
+        logger.debug("Could not load unified embedding config — using brain config", exc_info=True)
+        return (
+            config.embedding_enabled,
+            config.embedding_provider,
+            config.embedding_model,
+        )
+
+
 def _create_provider(config: BrainConfig, task_type: str = "RETRIEVAL_QUERY") -> Any:
     """Create or retrieve a cached embedding provider from BrainConfig.
 
@@ -142,8 +165,9 @@ def _create_provider(config: BrainConfig, task_type: str = "RETRIEVAL_QUERY") ->
 
     Raises ImportError if the required package is not installed.
     """
-    provider_name = config.embedding_provider
-    model_name = config.embedding_model
+    # "Effective config wins" — the stored brain config can be stale, so resolve
+    # the provider/model from the unified config (config.toml + env overrides).
+    _, provider_name, model_name = _effective_embedding(config)
 
     # Auto-detect best available provider
     if provider_name == "auto":
@@ -204,7 +228,8 @@ async def discover_semantic_synapses(
     Returns:
         SemanticDiscoveryResult with created synapses
     """
-    if not config.embedding_enabled:
+    effective_enabled, _, _ = _effective_embedding(config)
+    if not effective_enabled:
         logger.debug("Embedding disabled — skipping semantic discovery")
         return SemanticDiscoveryResult()
 

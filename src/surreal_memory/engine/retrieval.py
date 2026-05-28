@@ -123,8 +123,13 @@ class ReflexPipeline:
         self._parser = parser or QueryParser()
         self._use_reflex = use_reflex
 
-        # Auto-create embedding provider if enabled but not passed
-        if embedding_provider is None and config.embedding_enabled:
+        # Auto-create embedding provider if enabled but not passed.
+        # "Effective config wins": gate on the effective (unified) embedding
+        # config, not the potentially stale stored brain config.
+        from surreal_memory.engine.semantic_discovery import _effective_embedding
+
+        _effective_enabled, _, _ = _effective_embedding(config)
+        if embedding_provider is None and _effective_enabled:
             try:
                 from surreal_memory.engine.semantic_discovery import _create_provider
 
