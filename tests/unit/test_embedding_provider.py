@@ -960,14 +960,21 @@ class TestOllamaEmbedding:
 
     def test_factory_creates_ollama_provider(self) -> None:
         """_create_provider should create OllamaEmbedding for 'ollama' provider."""
+        from unittest.mock import patch
+
         from surreal_memory.core.brain import BrainConfig
         from surreal_memory.engine.embedding.ollama_embedding import OllamaEmbedding
-        from surreal_memory.engine.semantic_discovery import _create_provider
+        from surreal_memory.engine.semantic_discovery import _create_provider, _provider_cache
 
         config = BrainConfig(embedding_provider="ollama", embedding_model="bge-m3")
-        provider = _create_provider(config)
+        with patch(
+            "surreal_memory.engine.semantic_discovery._effective_embedding",
+            return_value=(True, "ollama", "bge-m3"),
+        ):
+            provider = _create_provider(config)
         assert isinstance(provider, OllamaEmbedding)
         assert provider._model == "bge-m3"
+        _provider_cache.clear()
 
 
 # ── OpenRouterEmbedding tests ────────────────────────────────────
@@ -1071,7 +1078,13 @@ class TestOpenRouterEmbedding:
         env = {k: v for k, v in os.environ.items() if k != "OPENROUTER_API_KEY"}
         env["OPENROUTER_API_KEY"] = "test-openrouter-key"
 
-        with unittest.mock.patch.dict(os.environ, env, clear=True):
+        with (
+            unittest.mock.patch.dict(os.environ, env, clear=True),
+            unittest.mock.patch(
+                "surreal_memory.engine.semantic_discovery._effective_embedding",
+                return_value=(True, "openrouter", "openai/text-embedding-3-small"),
+            ),
+        ):
             provider = _create_provider(config)
             assert isinstance(provider, OpenRouterEmbedding)
             assert provider._model == "openai/text-embedding-3-small"

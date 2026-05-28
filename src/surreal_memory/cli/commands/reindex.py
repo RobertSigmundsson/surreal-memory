@@ -1,0 +1,196 @@
+"""``smem reindex`` — (re)compute embedding vectors for the current brain.
+
+Embeddings can be silently off (or stale) because the stored ``brain.config``
+keeps the defaults it was created with. This command re-embeds neurons using
+the EFFECTIVE embedding provider (config.toml + env overrides), independent of
+whatever the stored brain config says.
+
+Design notes:
+    - Idempotent: ``--missing-only`` (default) only embeds neurons that lack a
+      vector; ``--all`` re-embeds everything.
+    - ``--dry-run`` (default off) reports how many neurons *would* be embedded
+      and writes nothing.
+    - Fail-soft per neuron: a single embedding/update failure never aborts the
+      run.
+"""
+
+from __future__ import annotations
+
+from typing import Annotated, Any
+
+import typer
+
+from surreal_memory.cli._helpers import get_config, get_storage, output_result, run_async
+
+_BATCH_SIZE_DEFAULT = 64
+
+
+def reindex(
+    brain: Annotated[
+        str,
+        typer.Option("--brain", "-b", help="Target brain name (default: current)"),
+    ] = "",
+    dry_run: Annotated[
+        bool,
+        typer.Option("--dry-run", help="Report how many would be embedded; write nothing"),
+    ] = False,
+    all_neurons: Annotated[
+        bool,
+        typer.Option("--all", help="Re-embed every neuron (default: only missing vectors)"),
+    ] = False,
+    batch_size: Annotated[
+        int,
+        typer.Option("--batch-size", help="Neurons per embedding batch"),
+    ] = _BATCH_SIZE_DEFAULT,
+    json_output: Annotated[
+        bool,
+        typer.Option("--json", "-j", help="Output as JSON"),
+    ] = False,
+) -> None:
+    """Re-embed neurons for the current brain using the effective provider."""
+    run_async(_reindex_async(brain, dry_run, all_neurons, batch_size, json_output))
+
+
+def _needs_embedding(neuron: Any, *, all_neurons: bool) -> bool:
+    """Return True when a neuron should be embedded for this run."""
+    if not neuron.content.strip():
+        return False
+    if all_neurons:
+        return True
+    return not neuron.metadata.get("_embedding")
+
+
+async def _reindex_async(
+    brain: str,
+    dry_run: bool,
+    all_neurons: bool,
+    batch_size: int,
+    json_output: bool,
+) -> None:
+    """Async implementation of the reindex command."""
+    if batch_size < 1:
+        typer.echo("Error: --batch-size must be >= 1", err=True)
+        raise typer.Exit(code=1)
+
+    config = get_config()
+    storage = await get_storage(config, brain_name=brain or None)
+
+    brain_data = await storage.get_brain(storage.brain_id or "")
+    if not brain_data:
+        typer.echo("Error: No brain configured", err=True)
+        raise typer.Exit(code=1)
+
+    # Provider resolution honors the effective embedding config (config.toml +
+    # env overrides), so a stale brain.config does not disable embeddings.
+    from surreal_memory.engine.semantic_discovery import _create_provider, _effective_embedding
+
+    enabled, provider_name, model_name = _effective_embedding(brain_data.config)
+    if not enabled:
+        typer.echo(
+            "Error: embeddings are disabled in the effective config — "
+            "enable them (config.toml [embedding] or SURREAL_MEMORY_EMBEDDING_ENABLED=true)",
+            err=True,
+        )
+        raise typer.Exit(code=1)
+
+    # Collect candidate neurons (paginate to avoid loading everything at once).
+    candidates: list[Any] = []
+    page = 5000
+    offset = 0
+    while True:
+        page_neurons = await storage.find_neurons(limit=page, offset=offset)
+        if not page_neurons:
+            break
+        candidates.extend(n for n in page_neurons if _needs_embedding(n, all_neurons=all_neurons))
+        offset += len(page_neurons)
+        if len(page_neurons) < page:
+            break
+
+    to_embed = len(candidates)
+
+    if dry_run:
+        _emit(
+            json_output,
+            {
+                "dry_run": True,
+                "provider": provider_name,
+                "model": model_name,
+                "mode": "all" if all_neurons else "missing-only",
+                "would_embed": to_embed,
+            },
+            human=(
+                f"[dry-run] provider={provider_name} model={model_name} "
+                f"mode={'all' if all_neurons else 'missing-only'} "
+                f"would embed {to_embed} neuron(s)"
+            ),
+        )
+        return
+
+    if to_embed == 0:
+        _emit(
+            json_output,
+            {
+                "dry_run": False,
+                "provider": provider_name,
+                "model": model_name,
+                "embedded": 0,
+                "failed": 0,
+            },
+            human="Nothing to embed — all neurons already have vectors.",
+        )
+        return
+
+    try:
+        provider = _create_provider(brain_data.config, task_type="RETRIEVAL_DOCUMENT")
+    except Exception as exc:  # pragma: no cover - depends on optional package
+        typer.echo(f"Error: embedding provider unavailable: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
+
+    embedded = 0
+    failed = 0
+    for start in range(0, to_embed, batch_size):
+        batch = candidates[start : start + batch_size]
+        texts = [n.content for n in batch]
+        try:
+            vectors = await provider.embed_batch(texts)
+        except Exception:
+            failed += len(batch)
+            if not json_output:
+                typer.echo(f"  batch {start}-{start + len(batch)} failed (skipped)", err=True)
+            continue
+
+        for neuron, vector in zip(batch, vectors, strict=True):
+            try:
+                await storage.update_neuron(neuron.with_metadata(_embedding=vector))
+                embedded += 1
+            except Exception:
+                failed += 1
+
+        if not json_output:
+            typer.echo(f"  embedded {min(start + batch_size, to_embed)}/{to_embed}")
+
+    _emit(
+        json_output,
+        {
+            "dry_run": False,
+            "provider": provider_name,
+            "model": model_name,
+            "mode": "all" if all_neurons else "missing-only",
+            "embedded": embedded,
+            "failed": failed,
+        },
+        human=f"Embedded {embedded} neuron(s), {failed} failed.",
+    )
+
+
+def _emit(json_output: bool, data: dict[str, Any], *, human: str) -> None:
+    """Print either JSON or a human-readable line."""
+    if json_output:
+        output_result(data, as_json=True)
+    else:
+        typer.echo(human)
+
+
+def register(app: typer.Typer) -> None:
+    """Register the reindex command with the CLI app."""
+    app.command(name="reindex")(reindex)

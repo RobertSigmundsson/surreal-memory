@@ -252,19 +252,18 @@ async def _embedding_dedup(
         from surreal_memory.engine.embedding.provider import EmbeddingProvider
 
         embed_provider: EmbeddingProvider
-        if provider_name == "sentence_transformer":
-            from surreal_memory.engine.embedding.sentence_transformer import (
-                SentenceTransformerEmbedding,
-            )
-
-            embed_provider = SentenceTransformerEmbedding(model_name=model_name)
-        elif provider_name == "ollama":
+        if provider_name == "ollama":
             from surreal_memory.engine.embedding.ollama_embedding import OllamaEmbedding
 
             embed_provider = OllamaEmbedding(model=model_name)
         else:
-            # Skip API-based providers in stop hook (rate limits, latency)
-            logger.debug("Skipping API-based embedding provider %s in stop hook", provider_name)
+            # Stop hook runs in a fresh, uncached process on every session save.
+            # Never load a heavy local model (sentence-transformers pulls in torch
+            # + a multi-hundred-MB model) here — it is the dominant hook latency.
+            # API providers are skipped too (rate limits, latency). Only a local
+            # Ollama server (already running) is cheap enough. Otherwise return
+            # items unchanged so simhash/upstream dedup still applies.
+            logger.debug("Skipping embedding provider %s in stop hook (kept fast)", provider_name)
             return items
 
         contents = [item["content"] for item in items]

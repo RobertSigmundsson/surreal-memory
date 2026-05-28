@@ -133,11 +133,21 @@ class TestEmbeddingFallback:
         assert pipeline._embedding_provider is mock_provider
 
     def test_pipeline_none_embedding_by_default(self, mock_storage, mock_config):
-        """ReflexPipeline defaults to None embedding provider."""
-        pipeline = ReflexPipeline(
-            storage=mock_storage,
-            config=mock_config,
-        )
+        """ReflexPipeline defaults to None embedding provider.
+
+        Pin the effective embedding config to the (disabled) mock_config so the
+        test does not depend on the developer's real ~/.surrealmemory config.
+        """
+        from unittest.mock import patch
+
+        with patch(
+            "surreal_memory.engine.semantic_discovery._effective_embedding",
+            return_value=(False, "sentence_transformer", "all-MiniLM-L6-v2"),
+        ):
+            pipeline = ReflexPipeline(
+                storage=mock_storage,
+                config=mock_config,
+            )
         assert pipeline._embedding_provider is None
 
     @pytest.mark.asyncio

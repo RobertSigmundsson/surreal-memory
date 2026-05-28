@@ -267,8 +267,12 @@ class StatsHandler:
         # (missing package, disabled, or ready) so problems are visible, not silent.
         try:
             from surreal_memory.engine.embedding.capability import probe_embedding_capability
+            from surreal_memory.unified_config import get_config
 
-            result["embedding"] = probe_embedding_capability(brain.config)
+            # "Effective config wins": probe the unified embedding config
+            # (config.toml + env overrides), not the potentially stale stored
+            # brain.config. probe_embedding_capability reads config.embedding.
+            result["embedding"] = probe_embedding_capability(get_config())
         except Exception:
             logger.debug("Embedding capability probe failed", exc_info=True)
 

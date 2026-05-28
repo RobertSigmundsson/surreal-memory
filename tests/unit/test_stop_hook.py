@@ -247,10 +247,10 @@ class TestEmbeddingDedup:
         with (
             patch(
                 "surreal_memory.engine.semantic_discovery._auto_detect_provider",
-                return_value=("sentence_transformer", "all-MiniLM-L6-v2"),
+                return_value=("ollama", "bge-m3"),
             ),
             patch(
-                "surreal_memory.engine.embedding.sentence_transformer.SentenceTransformerEmbedding",
+                "surreal_memory.engine.embedding.ollama_embedding.OllamaEmbedding",
                 return_value=mock_provider,
             ),
         ):
@@ -289,10 +289,10 @@ class TestEmbeddingDedup:
         with (
             patch(
                 "surreal_memory.engine.semantic_discovery._auto_detect_provider",
-                return_value=("sentence_transformer", "all-MiniLM-L6-v2"),
+                return_value=("ollama", "bge-m3"),
             ),
             patch(
-                "surreal_memory.engine.embedding.sentence_transformer.SentenceTransformerEmbedding",
+                "surreal_memory.engine.embedding.ollama_embedding.OllamaEmbedding",
                 return_value=mock_provider,
             ),
         ):
@@ -328,12 +328,40 @@ class TestEmbeddingDedup:
         with (
             patch(
                 "surreal_memory.engine.semantic_discovery._auto_detect_provider",
-                return_value=("sentence_transformer", "all-MiniLM-L6-v2"),
+                return_value=("ollama", "bge-m3"),
             ),
             patch(
-                "surreal_memory.engine.embedding.sentence_transformer.SentenceTransformerEmbedding",
+                "surreal_memory.engine.embedding.ollama_embedding.OllamaEmbedding",
                 return_value=mock_provider,
             ),
         ):
             result = await _embedding_dedup(items)
+        assert result == items
+
+    @pytest.mark.asyncio
+    async def test_does_not_load_sentence_transformer_model(self) -> None:
+        """The Stop hook must never instantiate the heavy sentence-transformers
+        model (torch + a multi-hundred-MB download) — it runs in a fresh,
+        uncached process on every session save and that is the dominant latency.
+
+        When auto-detect resolves to sentence_transformer, the hook returns the
+        items unchanged instead of loading the model.
+        """
+        items = [
+            {"content": "Item A", "confidence": 0.8, "type": "fact"},
+            {"content": "Item B", "confidence": 0.7, "type": "fact"},
+        ]
+
+        with (
+            patch(
+                "surreal_memory.engine.semantic_discovery._auto_detect_provider",
+                return_value=("sentence_transformer", "all-MiniLM-L6-v2"),
+            ),
+            patch(
+                "surreal_memory.engine.embedding.sentence_transformer.SentenceTransformerEmbedding"
+            ) as mock_st,
+        ):
+            result = await _embedding_dedup(items)
+
+        mock_st.assert_not_called()
         assert result == items

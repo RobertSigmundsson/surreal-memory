@@ -122,6 +122,7 @@ from surreal_memory.cli.commands import (  # noqa: E402
     info,
     listing,
     memory,
+    reindex,
     shortcuts,
     tools,
     train,
@@ -136,6 +137,7 @@ tools.register(app)
 shortcuts.register(app)
 codebase.register(app)
 train.register(app)
+reindex.register(app)
 update.register(app)
 watch.register(app)
 
