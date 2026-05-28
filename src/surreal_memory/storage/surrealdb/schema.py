@@ -7,7 +7,7 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 SCHEMA_SQL = """
 -- ============================================================
@@ -161,6 +161,14 @@ DEFINE FIELD updated_at    ON typed_memory TYPE datetime DEFAULT time::now();
 DEFINE INDEX idx_typed_brain ON typed_memory FIELDS brain_id;
 DEFINE INDEX idx_typed_type  ON typed_memory FIELDS brain_id, memory_type;
 DEFINE INDEX idx_typed_fiber ON typed_memory FIELDS brain_id, fiber_id UNIQUE;
+
+-- Projects (named scopes for grouping memories)
+DEFINE TABLE project SCHEMALESS;
+DEFINE FIELD brain_id    ON project TYPE string;
+DEFINE FIELD uid         ON project TYPE string;
+DEFINE FIELD name        ON project TYPE string;
+DEFINE INDEX idx_project_brain ON project FIELDS brain_id;
+DEFINE INDEX idx_project_uid   ON project FIELDS brain_id, uid UNIQUE;
 
 -- Sources (memory origin registry)
 DEFINE TABLE source SCHEMAFULL;

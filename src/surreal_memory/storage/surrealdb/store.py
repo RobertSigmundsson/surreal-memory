@@ -25,6 +25,7 @@ from surreal_memory.storage.surrealdb.cognitive import SurrealDBCognitiveMixin
 from surreal_memory.storage.surrealdb.compression import SurrealDBCompressionMixin
 from surreal_memory.storage.surrealdb.depth_priors import SurrealDBDepthPriorsMixin
 from surreal_memory.storage.surrealdb.keyword_entity import SurrealDBKeywordEntityMixin
+from surreal_memory.storage.surrealdb.projects import SurrealDBProjectsMixin
 from surreal_memory.storage.surrealdb.review_schedules import SurrealDBReviewSchedulesMixin
 from surreal_memory.storage.surrealdb.schema import ensure_schema
 from surreal_memory.storage.surrealdb.sources import SurrealDBSourcesMixin
@@ -176,6 +177,7 @@ def _row_to_fiber(row: dict[str, Any]) -> Fiber:
 
 class SurrealDBStorage(
     SurrealDBTypedMemoryMixin,
+    SurrealDBProjectsMixin,
     SurrealDBSourcesMixin,
     SurrealDBAlertsMixin,
     SurrealDBCognitiveMixin,
@@ -234,9 +236,23 @@ class SurrealDBStorage(
         )
 
     async def close(self) -> None:
-        """Close SurrealDB connection."""
-        if self._conn is not None:
+        """Close the SurrealDB connection.
+
+        Some SDK transports (notably the HTTP connection) do not implement
+        ``close()`` — it raises because there is no persistent socket to tear
+        down. Treat any close failure as a no-op so callers don't each need
+        their own error handling; always drop the connection reference.
+        """
+        if self._conn is None:
+            return
+        try:
             await self._conn.close()
+        except Exception:
+            logger.debug(
+                "Connection transport does not support close(); ignoring",
+                exc_info=True,
+            )
+        finally:
             self._conn = None
 
     @property

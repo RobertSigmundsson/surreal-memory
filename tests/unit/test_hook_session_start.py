@@ -12,10 +12,9 @@ from surreal_memory.hooks.session_start import get_recent_memories, main, read_h
 
 
 @pytest.mark.asyncio
-async def test_get_recent_memories_empty_brain() -> None:
-    """Empty brain returns empty string — no context injected."""
+async def test_get_recent_memories_no_project_name() -> None:
+    """No resolved project returns empty string — no context injected."""
     mock_storage = AsyncMock()
-    mock_storage.get_fibers = AsyncMock(return_value=[])
     mock_storage.close = AsyncMock()
 
     mock_config = MagicMock()
@@ -26,14 +25,34 @@ async def test_get_recent_memories_empty_brain() -> None:
             "surreal_memory.unified_config.get_shared_storage",
             return_value=mock_storage,
         ):
-            result = await get_recent_memories()
+            result = await get_recent_memories(None)
+
+    assert result == ""
+
+
+@pytest.mark.asyncio
+async def test_get_recent_memories_no_project_memories() -> None:
+    """Project with no memories returns empty string."""
+    mock_storage = AsyncMock()
+    mock_storage.get_project_memories = AsyncMock(return_value=[])
+    mock_storage.close = AsyncMock()
+
+    mock_config = MagicMock()
+    mock_config.current_brain = "test"
+
+    with patch("surreal_memory.unified_config.get_config", return_value=mock_config):
+        with patch(
+            "surreal_memory.unified_config.get_shared_storage",
+            return_value=mock_storage,
+        ):
+            result = await get_recent_memories("myproject")
 
     assert result == ""
 
 
 @pytest.mark.asyncio
 async def test_get_recent_memories_returns_formatted_bullets() -> None:
-    """Fibers with summary/essence are formatted as a bullet list."""
+    """Project memories' fibers (summary/essence) are formatted as bullets."""
     fiber_with_summary = MagicMock()
     fiber_with_summary.summary = "Fixed auth bug in login.py"
     fiber_with_summary.essence = None
@@ -46,10 +65,18 @@ async def test_get_recent_memories_returns_formatted_bullets() -> None:
     fiber_empty.summary = None
     fiber_empty.essence = None
 
+    tm1 = MagicMock()
+    tm1.fiber_id = "f1"
+    tm2 = MagicMock()
+    tm2.fiber_id = "f2"
+    tm3 = MagicMock()
+    tm3.fiber_id = "f3"
+
+    fibers_by_id = {"f1": fiber_with_summary, "f2": fiber_with_essence_only, "f3": fiber_empty}
+
     mock_storage = AsyncMock()
-    mock_storage.get_fibers = AsyncMock(
-        return_value=[fiber_with_summary, fiber_with_essence_only, fiber_empty]
-    )
+    mock_storage.get_project_memories = AsyncMock(return_value=[tm1, tm2, tm3])
+    mock_storage.get_fiber = AsyncMock(side_effect=lambda fid: fibers_by_id.get(fid))
     mock_storage.close = AsyncMock()
 
     mock_config = MagicMock()
@@ -60,7 +87,7 @@ async def test_get_recent_memories_returns_formatted_bullets() -> None:
             "surreal_memory.unified_config.get_shared_storage",
             return_value=mock_storage,
         ):
-            result = await get_recent_memories()
+            result = await get_recent_memories("myproject")
 
     lines = result.splitlines()
     assert len(lines) == 2
