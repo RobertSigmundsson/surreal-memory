@@ -205,7 +205,7 @@ en_core_web_lg/
 # Node (root-level tooling — dashboard has its own entry above)
 node_modules/
 package-lock.json
-package.json
+/package.json
 
 # Pay-hub (Cloudflare Worker — closed source, separate repo)
 pay-hub/
