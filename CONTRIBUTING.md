@@ -51,7 +51,7 @@ Please be respectful and constructive in all interactions. We're building someth
    ```bash
    smem doctor --dev
    pytest tests/ -v
-   mypy src/
+   mypy src/ --ignore-missing-imports
    ruff check src/ tests/
    ```
 
@@ -90,7 +90,7 @@ ruff check src/ tests/
 ruff format src/ tests/
 
 # Type check
-mypy src/
+mypy src/ --ignore-missing-imports
 
 # Tests
 pytest tests/ -v --cov=surreal_memory
@@ -303,7 +303,7 @@ Include:
 
 ## Questions?
 
-- Open a [Discussion](https://github.com/surreal-memory/surreal-memory/discussions)
-- Check existing [Issues](https://github.com/surreal-memory/surreal-memory/issues)
+- Open a [Discussion](https://github.com/acidkill/surreal-memory/discussions)
+- Check existing [Issues](https://github.com/acidkill/surreal-memory/issues)
 
 Thank you for contributing!

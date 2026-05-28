@@ -36,7 +36,7 @@ outage ← CAUSED_BY ← JWT expiry ← SUGGESTED_BY ← Alice's review
 |--|---------------------|----------------|
 | Backend | Pinecone / Chroma | **SurrealDB** (doc + graph + vector) |
 | Retrieval | Similarity score | Graph traversal + vector search |
-| Relationships | None | 24 explicit synapse types |
+| Relationships | None | 41 explicit synapse types |
 | LLM required | Yes (embeddings) | No — works fully offline |
 | Multi-hop reasoning | Multiple queries | One traversal |
 | Memory lifecycle | Static | Decay, reinforcement, consolidation |
@@ -44,11 +44,11 @@ outage ← CAUSED_BY ← JWT expiry ← SUGGESTED_BY ← Alice's review
 
 ---
 
-## What's Different From Surreal-Memory?
+## What's Different From NeuralMemory?
 
-Surreal-Memory builds on the neural graph memory architecture but replaces the SQLite + paid-Pro model with **SurrealDB + free community plugin**:
+Surreal-Memory builds on [NeuralMemory](https://github.com/nhadaututtheky/neural-memory)'s graph memory architecture but replaces the SQLite + paid-Pro model with **SurrealDB + free community plugin**:
 
-| | Surreal-Memory | Surreal-Memory |
+| | NeuralMemory (upstream) | Surreal-Memory |
 |--|---------------|----------------|
 | Storage engine | SQLite (limited) | **SurrealDB** (all features free) |
 | Vector search | Paid Pro feature | **Built-in** via SurrealDB HNSW |
@@ -143,7 +143,7 @@ Everything else — sessions, context loading, habit tracking, maintenance — w
 
 - **Brain** — top-level container with configuration
 - **Neuron** — atomic knowledge node (entity, concept, time, action, intent, state)
-- **Synapse** — typed, directed edge between neurons (24 types: `CAUSED_BY`, `LEADS_TO`, etc.)
+- **Synapse** — typed, directed edge between neurons (41 types: `CAUSED_BY`, `LEADS_TO`, etc.)
 - **Fiber** — a memory record: typed content with metadata, priority, tags, lifecycle stage
 
 ### Engine
@@ -188,7 +188,7 @@ Sync uses **Merkle delta** — only diffs travel, not the full brain.
 ## Features
 
 #### Memory & Recall
-- **14 memory types** — fact, decision, error, insight, preference, workflow, instruction, and more
+- **15 memory types** — fact, decision, error, insight, preference, workflow, instruction, and more
 - **Spreading activation** — memories surface by association, not keyword match
 - **Vector search** — SurrealDB HNSW for semantic similarity (when embeddings are configured)
 - **Cognitive reasoning** — hypothesize, submit evidence, make predictions, verify with Bayesian confidence
@@ -208,6 +208,44 @@ Sync uses **Merkle delta** — only diffs travel, not the full brain.
 - **VS Code extension** — memory tree, graph explorer, CodeLens, WebSocket sync
 - **Safety** — Fernet encryption, sensitive content auto-detection, input firewall
 - **Plugin system** — extend with custom retrieval strategies, compression, and storage backends
+
+---
+
+## Embeddings
+
+The keyword + graph core works with **no embedding API at all**. Embeddings are
+optional — they add semantic recall (vector search via SurrealDB HNSW) so memories
+surface even when the wording differs. Configure interactively with `smem setup embeddings`
+or via `SURREAL_MEMORY_EMBEDDING_*` env vars.
+
+**Recommended — Google Gemini** (`gemini-embedding-001`, 3072-dim, multilingual, free tier):
+
+```bash
+pip install "surreal-memory[surrealdb,embeddings-gemini]"
+export GEMINI_API_KEY=...        # free key: https://aistudio.google.com/apikey
+```
+
+**No API key? Run it locally** — the same on-device model class ChromaDB/MemPalace use,
+via `sentence-transformers` (offline, no key):
+
+```bash
+pip install "surreal-memory[surrealdb,embeddings]"
+smem setup embeddings            # choose "Sentence Transformers"
+```
+
+| Provider | Default model | Key | Notes |
+|----------|---------------|-----|-------|
+| **Gemini** (recommended) | `gemini-embedding-001` | `GEMINI_API_KEY` | 3072-dim, multilingual, free tier |
+| Local (sentence-transformers) | `all-MiniLM-L6-v2` · `paraphrase-multilingual-MiniLM-L12-v2` | — | offline, no key, ~440MB download |
+| Ollama | `nomic-embed-text` · `bge-m3` | — | local server (`ollama serve`) |
+| OpenAI | `text-embedding-3-small` | `OPENAI_API_KEY` | paid |
+| OpenRouter | `openai/text-embedding-3-small` | `OPENROUTER_API_KEY` | OpenAI-compatible |
+
+Set the provider to `auto` to pick the best available option at runtime
+(order: Ollama → local sentence-transformers → Gemini → OpenAI → OpenRouter).
+
+> Embeddings use **one** model per brain — switching models changes vector
+> dimensions and invalidates existing vectors. Pick a provider before ingesting at scale.
 
 ---
 
@@ -326,7 +364,7 @@ asyncio.run(main())
 git clone https://github.com/acidkill/surreal-memory
 cd surreal-memory && pip install -e ".[dev]"
 smem doctor --dev        # Verify contributor setup
-pytest tests/ -v          # 7100+ tests
+pytest tests/ -v          # 5500+ tests
 ruff check src/ tests/    # Lint
 make verify               # Full CI gate
 ```
@@ -349,9 +387,9 @@ Items here are explicitly **not** in the current release. Community PRs welcome 
 
 ### Deferred (external action required)
 
-- **ClawHub slug migration** — currently registered upstream as `surreal-memory` on the ClawHub platform. Needs a coordinated rename to `surreal-memory` on their side. Workflow already targets `--slug surreal-memory`; just waiting on the registry.
+- **ClawHub listing** — the OpenClaw plugin still needs its ClawHub registry entry aligned to the `surreal-memory` slug. The publish workflow already targets `--slug surreal-memory`; waiting on the registry side.
 - **VS Code Marketplace publisher** — `vscode-extension/package.json` now uses publisher `ai-flow-nowak`. The publisher account needs to be created / verified before the next release can push to Marketplace.
-- **PyPI `surreal-memory` deprecation note** — if a `surreal-memory` package exists on PyPI under any account we control, flag it `Development Status :: 7 - Inactive` with a README pointing at `surreal-memory`.
+- **PyPI canonical name** — `surreal-memory` is the only published package. If any earlier-named package remains on PyPI under an account we control, flag it `Development Status :: 7 - Inactive` with a README pointing at `surreal-memory`.
 
 ### Nice-to-haves (community contributions welcome)
 
@@ -366,7 +404,7 @@ Items here are explicitly **not** in the current release. Community PRs welcome 
 - **Two-way Telegram bot** — `notify-telegram.yml` is one-way (release notes). Extend with `smem remember` via bot commands.
 - **Public benchmarks dashboard** — `benchmarks/` already has stress scripts; publish results as a static dashboard.
 - **Brain templates / starter packs** — pre-seeded brains for common workflows (Python dev, K8s admin, research notes).
-- **Auto-upgrade path for `~/.surrealmemory/` → `~/.surrealmemory/`** — one-shot migration command for users coming from v1.x.
+- **Auto-upgrade path for `~/.neuralmemory/` → `~/.surrealmemory/`** — one-shot migration command for users coming from upstream NeuralMemory.
 
 ## License
 
