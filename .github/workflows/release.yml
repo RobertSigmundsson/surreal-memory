@@ -184,9 +184,14 @@ jobs:
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
+          if [ -z "$NODE_AUTH_TOKEN" ]; then
+            echo "::notice::NPM_TOKEN not set — skipping npm publish."
+            exit 0
+          fi
           npm ci || npm install
           npm run build
-          npm publish --access public || echo "Version already published — skipping"
+          npm publish --access public \
+            || echo "::warning::npm publish failed (already published or name/permissions) — skipping"
 
   # ── Publish TypeScript SDK ─────────────────────────────────────
   publish-sdk:
@@ -207,10 +212,15 @@ jobs:
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
+          if [ -z "$NODE_AUTH_TOKEN" ]; then
+            echo "::notice::NPM_TOKEN not set — skipping SDK publish."
+            exit 0
+          fi
           npm ci || npm install
           npm run typecheck
           npm run build
-          npm publish --access public || echo "Version already published — skipping"
+          npm publish --access public \
+            || echo "::warning::SDK publish failed (already published or name/permissions) — skipping"
 
   # ── Publish to ClawHub ─────────────────────────────────────────
   publish-clawhub:
@@ -227,8 +237,13 @@ jobs:
         env:
           CLAWHUB_TOKEN: ${{ secrets.CLAWHUB_TOKEN }}
         run: |
+          if [ -z "$CLAWHUB_TOKEN" ]; then
+            echo "::notice::CLAWHUB_TOKEN not set — skipping ClawHub publish."
+            exit 0
+          fi
           VERSION="${GITHUB_REF#refs/tags/v}"
-          clawdhub login --token "$CLAWHUB_TOKEN" --no-browser
+          clawdhub login --token "$CLAWHUB_TOKEN" --no-browser \
+            || { echo "::warning::ClawHub login failed — skipping"; exit 0; }
           clawdhub publish .claude-plugin --slug surreal-memory --version "$VERSION" \
             || echo "::warning::ClawHub publish failed — update manually"
 

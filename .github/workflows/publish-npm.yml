@@ -42,4 +42,10 @@ jobs:
         working-directory: integrations/surrealmemory
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-        run: npm publish --tag next --access public
+        run: |
+          if [ -z "$NODE_AUTH_TOKEN" ]; then
+            echo "::notice::NPM_TOKEN not set — skipping npm prerelease publish."
+            exit 0
+          fi
+          npm publish --tag next --access public \
+            || echo "::warning::npm prerelease publish failed (name/permissions) — skipping"
