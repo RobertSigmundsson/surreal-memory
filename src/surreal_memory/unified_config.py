@@ -20,7 +20,6 @@ import re
 import shutil
 import tomllib
 from dataclasses import dataclass, field
-from datetime import UTC
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar
 
@@ -1843,7 +1842,10 @@ async def list_available_brains() -> list[str]:
     if config.storage_backend == "surrealdb":
         try:
             storage = await get_shared_storage()
-            names = await storage.list_brain_names()
+            # list_brain_names is defined on the SurrealDB backend; the base
+            # NeuralStorage interface doesn't declare it (only the SurrealDB
+            # path reaches here, guarded by storage_backend == "surrealdb").
+            names: list[str] = await storage.list_brain_names()  # type: ignore[attr-defined]
             if names:
                 return names
         except Exception:
