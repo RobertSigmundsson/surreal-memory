@@ -29,6 +29,7 @@ from surreal_memory.storage.surrealdb.projects import SurrealDBProjectsMixin
 from surreal_memory.storage.surrealdb.review_schedules import SurrealDBReviewSchedulesMixin
 from surreal_memory.storage.surrealdb.schema import ensure_schema
 from surreal_memory.storage.surrealdb.sources import SurrealDBSourcesMixin
+from surreal_memory.storage.surrealdb.tool_events import SurrealDBToolEventsMixin
 from surreal_memory.storage.surrealdb.typed_memory import SurrealDBTypedMemoryMixin
 from surreal_memory.storage.surrealdb.versions import SurrealDBVersionsMixin
 from surreal_memory.utils.timeutils import utcnow
@@ -192,6 +193,7 @@ class SurrealDBStorage(
     SurrealDBCompressionMixin,
     SurrealDBActivityMixin,
     SurrealDBDepthPriorsMixin,
+    SurrealDBToolEventsMixin,
     NeuralStorage,
 ):
     """SurrealDB-backed storage for Surreal-Memory.
@@ -928,9 +930,19 @@ class SurrealDBStorage(
             if rows and len(rows) > 0:
                 for r in rows:
                     rid = r["id"]
+                    name = str(r.get("name") or "")
                     # Compare record ID string
                     rid_str = str(rid) if not hasattr(rid, "id") else f"brain:{rid.id}"
-                    if brain_id in rid_str or rid_str.endswith(f":{brain_id}"):
+                    # Brains are addressed by name; match the name field first,
+                    # then fall back to a record-id match for id-based lookups.
+                    # Without the name match, get_brain(name) never resolves a
+                    # brain whose record id is a random UUID, so the bootstrap
+                    # re-creates a fresh brain on every start (orphan-row leak).
+                    if (
+                        name == brain_id
+                        or brain_id in rid_str
+                        or rid_str.endswith(f":{brain_id}")
+                    ):
                         bid_str = (
                             str(rid.id).replace("_", "-")
                             if hasattr(rid, "id")
@@ -938,7 +950,7 @@ class SurrealDBStorage(
                         )
                         return Brain(
                             id=bid_str,
-                            name=str(r["name"]),
+                            name=name,
                             metadata=dict(r.get("metadata") or {}),
                             created_at=_parse_datetime(r.get("created_at")) or utcnow(),
                             updated_at=_parse_datetime(r.get("updated_at")) or utcnow(),
@@ -1642,6 +1654,16 @@ class SurrealDBStorage(
             created_at=_parse_datetime(r.get("created_at")) or utcnow(),
             updated_at=_parse_datetime(r.get("updated_at")) or utcnow(),
         )
+
+    async def list_brain_names(self) -> list[str]:
+        """List distinct brain names from the SurrealDB brain table.
+
+        The dashboard's default enumeration globs local sqlite fixture files,
+        which do not exist on the SurrealDB backend; this lets it list the
+        brains that actually hold data. GROUP BY collapses duplicate rows.
+        """
+        rows = await self._query("SELECT name FROM brain GROUP BY name")
+        return sorted({str(r.get("name")) for r in rows if r.get("name")})
 
     async def get_all_neuron_states(self) -> list[NeuronState]:
         brain_id = self._get_brain_id()

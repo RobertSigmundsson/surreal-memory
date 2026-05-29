@@ -120,10 +120,10 @@ nav:
   - FAQ: FAQ.md
   - Contributing: contributing.md
   - Changelog: changelog.md
-  - Pro:
-    - Why Pro: landing/pro.md
-    - Pro Quickstart: guides/pro-quickstart.md
-    - Pricing: landing/pricing.md
+  - Features:
+    - All Features (Free): landing/pro.md
+    - Advanced Features Quickstart: guides/pro-quickstart.md
+    - Pricing (Free): landing/pricing.md
   - Blog:
     - Why I Built Surreal-Memory: blog/why-i-built-surrealmemory.md
     - Honest Comparison 2026: blog/honest-comparison-2026.md

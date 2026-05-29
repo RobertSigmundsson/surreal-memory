@@ -56,9 +56,11 @@ class TestLicenseConfig:
 
 
 class TestIsPro:
-    def test_free_is_not_pro(self) -> None:
+    """Surreal-Memory is fully free: is_pro() is always True regardless of tier."""
+
+    def test_free_is_pro(self) -> None:
         cfg = UnifiedConfig(license=LicenseConfig(tier="free"))
-        assert cfg.is_pro() is False
+        assert cfg.is_pro() is True
 
     def test_pro_is_pro(self) -> None:
         cfg = UnifiedConfig(license=LicenseConfig(tier="pro"))
@@ -68,9 +70,9 @@ class TestIsPro:
         cfg = UnifiedConfig(license=LicenseConfig(tier="team"))
         assert cfg.is_pro() is True
 
-    def test_default_is_not_pro(self) -> None:
+    def test_default_is_pro(self) -> None:
         cfg = UnifiedConfig()
-        assert cfg.is_pro() is False
+        assert cfg.is_pro() is True
 
 
 # ── TOML save/load roundtrip ────────────────────────────────────
@@ -127,7 +129,8 @@ class TestLicenseTomlRoundtrip:
 
         loaded = UnifiedConfig.load(toml_path)
         assert loaded.license.tier == "free"
-        assert loaded.is_pro() is False
+        # Tier label is still "free", but everything is unlocked (fully free product).
+        assert loaded.is_pro() is True
 
 
 # ── is_pro() expiry checks ──────────────────────────────────────
@@ -143,10 +146,11 @@ class TestIsProExpiry:
         cfg = UnifiedConfig(license=LicenseConfig(tier="pro", expires_at=future))
         assert cfg.is_pro() is True
 
-    def test_past_expiry_is_not_pro(self) -> None:
+    def test_past_expiry_still_pro(self) -> None:
+        # Everything is free now — expiry no longer locks features.
         past = (datetime.now(UTC) - timedelta(days=1)).isoformat()
         cfg = UnifiedConfig(license=LicenseConfig(tier="pro", expires_at=past))
-        assert cfg.is_pro() is False
+        assert cfg.is_pro() is True
 
     def test_malformed_expiry_treated_as_perpetual(self) -> None:
         cfg = UnifiedConfig(license=LicenseConfig(tier="pro", expires_at="not-a-date"))
