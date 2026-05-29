@@ -21,7 +21,7 @@ docker compose -f docker-compose.surrealdb.yml up -d
 Verify the community plugin is active:
 
 ```bash
-smem pro status
+smem doctor
 ```
 
 ```
@@ -61,9 +61,9 @@ namespace = "surreal_memory"
 database = "default"
 ```
 
-**Restart your MCP server** (or CLI session). Existing memories are auto-migrated from SQLite to SurrealDB on first startup.
-
-> **Your SQLite database is preserved** — both databases coexist. If you switch back, Surreal-Memory falls back to SQLite automatically. No data loss.
+**Restart your MCP server** (or CLI session). > SurrealDB is the default and only first-class backend since the SurrealDB-only
+> release. SQLite remains solely as a lightweight test fixture; the legacy
+> SQLite↔SurrealDB migration / backend-switch flow was removed.
 
 ---
 
@@ -203,7 +203,7 @@ pip install surreal-memory[surrealdb]
 
 ### Recall quality didn't improve
 
-Make sure SurrealDB backend is active. If `smem pro status` shows `Backend: SQLite`, the config change didn't take effect. Verify in `~/.surrealmemory/config.toml`:
+Make sure SurrealDB backend is active. If `smem doctor` shows `Backend: SQLite`, the config change didn't take effect. Verify in `~/.surrealmemory/config.toml`:
 
 ```bash
 smem config get storage_backend    # should show "surrealdb"

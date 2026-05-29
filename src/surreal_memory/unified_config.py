@@ -20,7 +20,6 @@ import re
 import shutil
 import tomllib
 from dataclasses import dataclass, field
-from datetime import UTC
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar
 
@@ -1254,21 +1253,14 @@ class UnifiedConfig:
     version: str = "1.0"
 
     def is_pro(self) -> bool:
-        """Return True if the current license tier is 'pro' or 'team' and not expired."""
-        if self.license.tier not in ("pro", "team"):
-            return False
-        expires = self.license.expires_at
-        if not expires:
-            return True  # Perpetual license (no expiry set)
-        from datetime import datetime
+        """Always True — Surreal-Memory is fully free.
 
-        try:
-            exp_dt = datetime.fromisoformat(expires.replace("Z", "+00:00"))
-            if exp_dt.tzinfo is None:
-                exp_dt = exp_dt.replace(tzinfo=UTC)
-            return datetime.now(UTC) <= exp_dt
-        except (ValueError, TypeError):
-            return True  # Malformed expiry → treat as perpetual
+        The paid InfinityDB/Pro chain was removed in the SurrealDB-only switch
+        (commit #28), so every feature is unlocked for everyone. Kept as a
+        method (rather than deleted) because callers and the dashboard still
+        gate optional UI on it.
+        """
+        return True  # Malformed expiry → treat as perpetual
 
     @classmethod
     def load(cls, config_path: Path | None = None) -> UnifiedConfig:
@@ -1288,6 +1280,12 @@ class UnifiedConfig:
                 data_dir=data_dir,
                 current_brain=legacy_brain or get_default_brain(),
                 device_id=_get_device_id(data_dir),
+                # Honor SURREAL_MEMORY_STORAGE even before a config.toml exists,
+                # so a fresh process does not silently cache a sqlite singleton
+                # while env says surrealdb (active brain would then read empty).
+                storage_backend=_validate_storage_backend(
+                    os.environ.get("SURREAL_MEMORY_STORAGE") or "sqlite"
+                ),
             )
             config.save()
             if legacy_brain:
@@ -1830,6 +1828,31 @@ async def get_shared_storage(brain_name: str | None = None) -> NeuralStorage:
     # Default: SQLite — internal test fixture only. Production must set
     # storage_backend = "surrealdb" explicitly.
     return await _get_sqlite_storage(config, name, brain_name)
+
+
+async def list_available_brains() -> list[str]:
+    """List brain names from the active storage backend.
+
+    UnifiedConfig.list_brains only inspects local sqlite fixture files, so on
+    the SurrealDB backend it returns nothing and the dashboard shows zero
+    brains even when the store holds data. Enumerate the SurrealDB brain table
+    in that case, falling back to the sqlite-file listing otherwise.
+    """
+    config = get_config()
+    if config.storage_backend == "surrealdb":
+        try:
+            storage = await get_shared_storage()
+            # list_brain_names is defined on the SurrealDB backend; the base
+            # NeuralStorage interface doesn't declare it (only the SurrealDB
+            # path reaches here, guarded by storage_backend == "surrealdb").
+            names: list[str] = await storage.list_brain_names()  # type: ignore[attr-defined]
+            if names:
+                return names
+        except Exception:
+            logging.getLogger(__name__).warning(
+                "Failed to enumerate brains from SurrealDB", exc_info=True
+            )
+    return config.list_brains()
 
 
 async def _get_sqlite_storage(

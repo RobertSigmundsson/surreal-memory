@@ -7,6 +7,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.3.0] — 2026-05-29
+
+### Added
+- **SurrealDB tool-event storage** — new `tool_events` table (schema v6) brings the
+  SurrealDB backend to parity with SQLite. Powers the dashboard **Tool Stats** page
+  and consolidation's tool-usage pattern mining on the SurrealDB backend (previously
+  raised `AttributeError`).
+
+### Fixed
+- **Dashboard is fully free** — removed leftover Pro-tier gating that survived the
+  SurrealDB-only switch. **Evolution** and **Visualize** no longer show a "PRO FEATURE"
+  overlay, the **Embedding Provider** settings are editable (no 403), and **Settings →
+  General** reports a `FULL` license with no upgrade prompt.
+- **Storage page** — rebuilt for the SurrealDB-only model. It now shows the active
+  SurrealDB backend, neuron/synapse/fiber counts, and tier distribution from the live
+  `/stats` + `/tier-stats` endpoints, instead of calling the removed `/storage/status`
+  endpoint that left the page blank.
+- **Brain lookup by name** — `SurrealDBStorage.get_brain` now matches the `name` field,
+  fixing an orphan-row leak where the bootstrap re-created a fresh brain on every start
+  (active brain reported 0 neurons even when the store held data).
+- **Dashboard brain enumeration** — `/api/dashboard/stats` and `/api/dashboard/brains`
+  now list brains from the active SurrealDB store (`list_available_brains`) instead of
+  only local SQLite fixture files, so the dashboard no longer shows zero brains.
+
+### Changed
+- `UnifiedConfig.is_pro()` always returns `True` and `/api/dashboard/license` reports the
+  `full` tier — Surreal-Memory is fully free; every feature is unlocked for everyone.
+- A fresh process now honors `SURREAL_MEMORY_STORAGE` before a `config.toml` exists, so it
+  no longer caches a SQLite singleton while the environment asks for SurrealDB.
+
 ## [2.2.0] — 2026-05-28
 
 ### Added

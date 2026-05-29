@@ -248,6 +248,7 @@ export function useLicense() {
 }
 
 export function useIsPro(): boolean {
-  const { data } = useLicense()
-  return data?.is_pro ?? false
+  // Surreal-Memory is fully free since the SurrealDB-only switch — every
+  // feature is unlocked, so the Pro gate is always open.
+  return true
 }

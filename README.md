@@ -204,7 +204,7 @@ Sync uses **Merkle delta** — only diffs travel, not the full brain.
 - **Brain versioning** — snapshot, rollback, diff, transplant memories between brains
 
 #### Ecosystem
-- **Web dashboard** — 7-page React UI with graph visualization, health radar, timeline
+- **Web dashboard** — multi-page React UI at `/ui` (overview, health radar, graph, timeline, evolution, storage, tool-stats, visualize, settings) — every page free, no Pro gate
 - **VS Code extension** — memory tree, graph explorer, CodeLens, WebSocket sync
 - **Safety** — Fernet encryption, sensitive content auto-detection, input firewall
 - **Plugin system** — extend with custom retrieval strategies, compression, and storage backends

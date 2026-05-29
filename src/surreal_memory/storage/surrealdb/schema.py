@@ -7,7 +7,7 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 SCHEMA_SQL = """
 -- ============================================================
@@ -366,6 +366,25 @@ DEFINE FIELD created_at    ON depth_priors TYPE datetime DEFAULT time::now();
 DEFINE INDEX idx_dprior_unique ON depth_priors FIELDS brain_id, entity_text, depth_level UNIQUE;
 DEFINE INDEX idx_dprior_brain  ON depth_priors FIELDS brain_id;
 DEFINE INDEX idx_dprior_stale  ON depth_priors FIELDS brain_id, last_updated;
+
+-- Tool events (staging buffer for tool-usage pattern mining / consolidation)
+DEFINE TABLE tool_events SCHEMAFULL;
+DEFINE FIELD id           ON tool_events TYPE string;
+DEFINE FIELD event_id     ON tool_events TYPE string;
+DEFINE FIELD brain_id     ON tool_events TYPE string;
+DEFINE FIELD tool_name    ON tool_events TYPE string DEFAULT '';
+DEFINE FIELD server_name  ON tool_events TYPE string DEFAULT '';
+DEFINE FIELD args_summary ON tool_events TYPE string DEFAULT '';
+DEFINE FIELD success      ON tool_events TYPE bool DEFAULT true;
+DEFINE FIELD duration_ms  ON tool_events TYPE int DEFAULT 0;
+DEFINE FIELD session_id   ON tool_events TYPE string DEFAULT '';
+DEFINE FIELD task_context ON tool_events TYPE string DEFAULT '';
+DEFINE FIELD processed    ON tool_events TYPE bool DEFAULT false;
+DEFINE FIELD created_at   ON tool_events TYPE datetime DEFAULT time::now();
+DEFINE INDEX idx_tevt_brain   ON tool_events FIELDS brain_id;
+DEFINE INDEX idx_tevt_unproc  ON tool_events FIELDS brain_id, processed;
+DEFINE INDEX idx_tevt_eventid ON tool_events FIELDS brain_id, event_id;
+DEFINE INDEX idx_tevt_time    ON tool_events FIELDS brain_id, created_at;
 """
 
 

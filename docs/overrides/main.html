@@ -1,12 +1,5 @@
 {% extends "base.html" %}
 
-{% block extrahead %}
-<script>
-if (
-  window.location.hostname === 'surrealmemory.theio.vn' &&
-  (window.location.pathname === '/' || window.location.pathname === '/index.html')
-) {
-  window.location.replace('/landing/pro-landing.html');
-}
-</script>
-{% endblock %}
+{# The homepage previously redirected to a paid "Pro" landing page.
+   Surreal-Memory is fully free (MIT, SurrealDB-only), so there is no paywall
+   redirect — the docs home renders normally. #}

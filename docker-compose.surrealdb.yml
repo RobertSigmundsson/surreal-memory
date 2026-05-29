@@ -42,6 +42,12 @@ services:
       - SURREAL_MEMORY_BRAIN=${SURREAL_MEMORY_BRAIN:-default}
       - SURREAL_MEMORY_HOST=0.0.0.0
       - SURREAL_MEMORY_PORT=8000
+      # Dashboard access gate (require_local_request): /api/dashboard answers
+      # only localhost or these CIDRs. Inside Docker the browser's request
+      # reaches the container from the bridge gateway (172.18.0.x), not
+      # 127.0.0.1, so the bridge subnet must be trusted or every dashboard
+      # API call returns 403. Override in .env to narrow/extend.
+      - SURREAL_MEMORY_TRUSTED_NETWORKS=${SURREAL_MEMORY_TRUSTED_NETWORKS:-172.18.0.0/16}
 
       # SurrealDB
       - SURREAL_MEMORY_STORAGE=surrealdb

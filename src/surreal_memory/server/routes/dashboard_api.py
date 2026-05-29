@@ -81,10 +81,14 @@ class SwitchBrainRequest(BaseModel):
 )
 async def get_stats() -> DashboardStats:
     """Get overall dashboard statistics across all brains."""
-    from surreal_memory.unified_config import get_config, get_shared_storage
+    from surreal_memory.unified_config import (
+        get_config,
+        get_shared_storage,
+        list_available_brains,
+    )
 
     cfg = get_config()
-    brain_names = cfg.list_brains()
+    brain_names = await list_available_brains()
     active_name = cfg.current_brain
 
     async def _analyze_brain(name: str) -> BrainSummary:
@@ -119,7 +123,11 @@ async def get_stats() -> DashboardStats:
                 is_active=name == active_name,
             )
         except Exception:
-            logger.debug("Brain analysis failed for %s", name, exc_info=True)
+            # Surface at WARNING (not debug): swallowing this silently made the
+            # active brain report 0/F even when the store held data, masking a
+            # storage/config misconfiguration. Keep returning a placeholder so
+            # one bad brain does not break the whole dashboard.
+            logger.warning("Brain analysis failed for %s", name, exc_info=True)
             return BrainSummary(id=name, name=name, is_active=name == active_name)
 
     brains = list(await asyncio.gather(*[_analyze_brain(name) for name in brain_names]))
@@ -185,10 +193,14 @@ async def get_tier_stats(
 )
 async def list_brains_api() -> list[BrainSummary]:
     """List all available brains with summary stats."""
-    from surreal_memory.unified_config import get_config, get_shared_storage
+    from surreal_memory.unified_config import (
+        get_config,
+        get_shared_storage,
+        list_available_brains,
+    )
 
     cfg = get_config()
-    brain_names = cfg.list_brains()
+    brain_names = await list_available_brains()
     active_name = cfg.current_brain
     results: list[BrainSummary] = []
 
@@ -998,11 +1010,6 @@ async def update_config(body: ConfigUpdateRequest) -> dict[str, Any]:
     new_embedding = config.embedding
 
     if body.embedding is not None:
-        if not config.is_pro():
-            raise HTTPException(
-                status_code=403,
-                detail="Embedding configuration requires a Pro license. Activate via smem_sync_config(action='activate').",
-            )
         update = body.embedding
 
         if update.enabled is not None:
@@ -1487,21 +1494,16 @@ async def visualize_memory(
 
 @router.get("/license", tags=["dashboard"], summary="Current license tier")
 async def get_license() -> dict[str, Any]:
-    """Return the current license tier and expiry."""
+    """Surreal-Memory is fully free: always report a FULL, unlocked license."""
     from surreal_memory.unified_config import get_config
 
     cfg = get_config(reload=True)
-    result: dict[str, Any] = {
-        "tier": cfg.license.tier,
-        "is_pro": cfg.is_pro(),
+    return {
+        "tier": "full",
+        "is_pro": True,
         "activated_at": cfg.license.activated_at,
         "expires_at": cfg.license.expires_at,
     }
-    if not cfg.is_pro():
-        from surreal_memory.mcp.sync_handler import PRO_LANDING_URL
-
-        result["upgrade_url"] = PRO_LANDING_URL
-    return result
 
 
 class ActivateLicenseRequest(BaseModel):
