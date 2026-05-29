@@ -121,8 +121,7 @@ class SurrealDBToolEventsMixin:
         if not event_ids:
             return
         await self._query(
-            "UPDATE tool_events SET processed = true"
-            " WHERE brain_id = $bid AND event_id IN $ids",
+            "UPDATE tool_events SET processed = true WHERE brain_id = $bid AND event_id IN $ids",
             bid=brain_id,
             ids=[str(e) for e in event_ids],
         )

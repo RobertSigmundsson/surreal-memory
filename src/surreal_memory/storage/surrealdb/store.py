@@ -938,11 +938,7 @@ class SurrealDBStorage(
                     # Without the name match, get_brain(name) never resolves a
                     # brain whose record id is a random UUID, so the bootstrap
                     # re-creates a fresh brain on every start (orphan-row leak).
-                    if (
-                        name == brain_id
-                        or brain_id in rid_str
-                        or rid_str.endswith(f":{brain_id}")
-                    ):
+                    if name == brain_id or brain_id in rid_str or rid_str.endswith(f":{brain_id}"):
                         bid_str = (
                             str(rid.id).replace("_", "-")
                             if hasattr(rid, "id")
