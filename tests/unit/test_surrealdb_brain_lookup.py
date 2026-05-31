@@ -11,7 +11,42 @@ from __future__ import annotations
 
 from typing import Any
 
+import surreal_memory.storage.surrealdb as _surrealdb_pkg
+from surreal_memory import unified_config
+from surreal_memory.core.brain import Brain
 from surreal_memory.storage.surrealdb.store import SurrealDBStorage
+
+
+def _make_fake_store(*, existing: Brain | None, found_by_name: Brain | None) -> type:
+    """Build a SurrealDBStorage stand-in with scripted brain lookups."""
+
+    class _FakeStore:
+        def __init__(self, **_kwargs: Any) -> None:
+            self.saved: list[Brain] = []
+            self.brain_context: str | None = None
+
+        async def initialize(self) -> None:
+            return None
+
+        async def get_brain(self, _name: str) -> Brain | None:
+            return existing
+
+        async def find_brain_by_name(self, _name: str) -> Brain | None:
+            return found_by_name
+
+        async def save_brain(self, brain: Brain) -> None:
+            self.saved.append(brain)
+
+        def set_brain(self, name: str) -> None:
+            self.brain_context = name
+
+    return _FakeStore
+
+
+def _fake_config() -> Any:
+    from types import SimpleNamespace
+
+    return SimpleNamespace(embedding=SimpleNamespace(enabled=False, model=None))
 
 
 class _BrainLookupStore(SurrealDBStorage):
@@ -89,3 +124,33 @@ async def test_list_brain_names_ignores_blank_names() -> None:
     rows = [{"name": "default"}, {"name": ""}, {"name": None}]
     store = _BrainLookupStore(rows)
     assert await store.list_brain_names() == ["default"]
+
+
+async def test_surrealdb_bootstrap_reuses_brain_found_by_name(monkeypatch: Any) -> None:
+    # get_brain misses (legacy UUID rows), but find_brain_by_name resolves it:
+    # the bootstrap must reuse the existing brain and never insert a new row.
+    existing = Brain.create("my-brain.v2", brain_id="my-brain.v2")
+    fake = _make_fake_store(existing=None, found_by_name=existing)
+    monkeypatch.setattr(_surrealdb_pkg, "SurrealDBStorage", fake)
+    monkeypatch.setattr(unified_config, "_surrealdb_storage", None)
+
+    storage = await unified_config._get_surrealdb_storage(_fake_config(), "my-brain.v2")
+
+    assert storage.saved == []  # no duplicate brain row created
+    assert storage.brain_context == "my-brain.v2"
+
+
+async def test_surrealdb_bootstrap_creates_brain_with_deterministic_id(
+    monkeypatch: Any,
+) -> None:
+    # No brain exists at all: the bootstrap must create it with a deterministic
+    # brain_id == name (not a random UUID), so a re-run cannot leak duplicates.
+    fake = _make_fake_store(existing=None, found_by_name=None)
+    monkeypatch.setattr(_surrealdb_pkg, "SurrealDBStorage", fake)
+    monkeypatch.setattr(unified_config, "_surrealdb_storage", None)
+
+    storage = await unified_config._get_surrealdb_storage(_fake_config(), "my-brain.v2")
+
+    assert len(storage.saved) == 1
+    assert storage.saved[0].id == "my-brain.v2"  # deterministic, not a UUID
+    assert storage.brain_context == "my-brain.v2"

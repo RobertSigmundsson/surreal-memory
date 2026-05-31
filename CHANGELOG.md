@@ -7,6 +7,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.3.1] — 2026-05-31
+
+### Fixed
+- **Dashboard ⇄ CLI metric parity** — `SurrealDBStorage.get_enhanced_stats` now
+  returns a `synapse_stats` block (per-type counts), so `DiagnosticsEngine`
+  computes `diversity` and `recall_confidence` on the SurrealDB backend exactly
+  as it does on SQLite. Previously both were `0` on SurrealDB, so the dashboard
+  and the `smem` CLI reported different health grades (e.g. F vs D) for the same
+  brain.
+- **Consistent brain grade across endpoints** — `/api/dashboard/brains` now runs
+  diagnostics like `/api/dashboard/stats`, so the Brains table and the stats
+  cards report the same grade. Per-brain analysis runs sequentially to avoid
+  racing the shared SurrealDB storage singleton.
+- **Resilient SurrealDB connection** — `SurrealDBStorage._query` re-authenticates
+  and retries once on an expired/closed connection (HTTP 401), so long-lived MCP
+  and CLI processes survive SurrealDB restarts and root-token expiry instead of
+  failing every subsequent call.
+- **Accurate orphan rate** — `DiagnosticsEngine.analyze` pins the storage brain
+  context before its reads, preventing a false high orphan rate when multiple
+  brains are analyzed concurrently.
+
+### Added
+- **SQLite misconfiguration guard** — emit a loud, one-time warning when the
+  active storage backend resolves to SQLite, with a targeted message when
+  SurrealDB connection vars are set. surreal-memory targets SurrealDB; this
+  surfaces the "memories silently written to a local SQLite brain that diverges
+  from the SurrealDB the dashboard reads" footgun instead of failing silently.
+
+### Changed
+- Pin the `surrealdb` Docker image to `v3.1.1` in `docker-compose.surrealdb.yml`.
+
 ## [2.3.0] — 2026-05-29
 
 ### Added

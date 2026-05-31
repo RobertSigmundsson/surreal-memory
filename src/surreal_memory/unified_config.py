@@ -1780,6 +1780,41 @@ def _migrate_legacy_db(config: UnifiedConfig, brain_name: str | None) -> None:
         )
 
 
+_sqlite_backend_warned = False
+
+
+def _warn_sqlite_backend() -> None:
+    """Emit a one-time warning when the active backend resolves to SQLite.
+
+    surreal-memory targets SurrealDB; SQLite is only an internal test fixture.
+    A common misconfiguration is leaving ``storage_backend = "sqlite"`` (the
+    default) while SurrealDB connection vars are set, which silently splits a
+    user's memories between a local SQLite brain and the SurrealDB the
+    dashboard reads — producing the "two brains" / dashboard-vs-CLI divergence.
+    Surface that loudly instead of failing silently.
+    """
+    global _sqlite_backend_warned
+    if _sqlite_backend_warned:
+        return
+    _sqlite_backend_warned = True
+    logger = logging.getLogger(__name__)
+    has_surreal_env = bool(os.environ.get("SURREALDB_URL") or os.environ.get("SURREALDB_PASS"))
+    if has_surreal_env:
+        logger.warning(
+            "storage_backend is 'sqlite' but SurrealDB connection env "
+            "(SURREALDB_URL/SURREALDB_PASS) is set. Memories will be written to a "
+            "LOCAL SQLite brain, NOT SurrealDB — this splits your data across two "
+            "stores (the dashboard reads SurrealDB). Set "
+            'SURREAL_MEMORY_STORAGE=surrealdb (or storage_backend = "surrealdb" '
+            "in config.toml) to use SurrealDB."
+        )
+    else:
+        logger.warning(
+            "Using the SQLite storage backend (internal test fixture). For real "
+            "use set SURREAL_MEMORY_STORAGE=surrealdb."
+        )
+
+
 async def get_shared_storage(brain_name: str | None = None) -> NeuralStorage:
     """Get storage for shared brain access.
 
@@ -1826,7 +1861,10 @@ async def get_shared_storage(brain_name: str | None = None) -> NeuralStorage:
         return await _get_surrealdb_storage(config, name)
 
     # Default: SQLite — internal test fixture only. Production must set
-    # storage_backend = "surrealdb" explicitly.
+    # storage_backend = "surrealdb" explicitly. Warn loudly so a misconfigured
+    # install does not silently route memories into a local SQLite brain that
+    # then diverges from the SurrealDB the dashboard reads.
+    _warn_sqlite_backend()
     return await _get_sqlite_storage(config, name, brain_name)
 
 
@@ -1950,12 +1988,23 @@ async def _get_surrealdb_storage(config: UnifiedConfig, name: str) -> NeuralStor
     )
     await storage.initialize()
 
-    # Ensure brain exists
+    # Ensure brain exists (idempotent).
+    # Try by id first (normal case: brain_id == name), then fall back to a
+    # name lookup (handles brains with UUID ids from older versions). Only
+    # create when neither resolves, and create with a deterministic
+    # brain_id == name so a re-run cannot insert a fresh UUID row. Without
+    # both the name fallback and the explicit brain_id, every process start
+    # minted a new brain:<uuid> row, leaking hundreds of duplicates.
     brain = await storage.get_brain(name)
     if brain is None:
-        brain = Brain.create(name)
+        brain = await storage.find_brain_by_name(name)
+    if brain is None:
+        brain = Brain.create(name, brain_id=name)
         await storage.save_brain(brain)
 
+    # Brains are addressed by name in this store (neurons carry brain_id as a
+    # plain string), so the brain context stays the name — never brain.id,
+    # which for legacy rows is a UUID and would orphan existing neurons.
     storage.set_brain(name)
     _surrealdb_storage = storage
     logger.info("SurrealDB storage initialized for brain '%s'", name)

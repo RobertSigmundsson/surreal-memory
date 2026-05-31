@@ -299,6 +299,16 @@ class DiagnosticsEngine:
         Returns:
             BrainHealthReport with scores, warnings, and recommendations
         """
+        # Pin storage to the analyzed brain before any brain-scoped reads.
+        # The SurrealDB backend uses a single shared storage singleton with a
+        # mutable current-brain pointer; without this, a concurrent multi-brain
+        # dashboard call (e.g. /stats analyzing both brains) leaves the pointer
+        # on a different brain, and get_all_synapses()/get_fibers() then return
+        # the WRONG brain's data — producing a false orphan rate. Harmless on
+        # backends that scope storage per brain (e.g. SQLite per-file).
+        if hasattr(self._storage, "set_brain"):
+            self._storage.set_brain(brain_id)
+
         # Gather base data
         enhanced = await self._storage.get_enhanced_stats(brain_id)
         neuron_count: int = enhanced.get("neuron_count", 0)
