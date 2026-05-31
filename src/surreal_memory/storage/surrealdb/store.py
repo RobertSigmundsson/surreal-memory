@@ -7,6 +7,7 @@ sync engine, change log, Merkle hashes, and typed memories.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 from datetime import datetime
@@ -35,6 +36,19 @@ from surreal_memory.storage.surrealdb.versions import SurrealDBVersionsMixin
 from surreal_memory.utils.timeutils import utcnow
 
 logger = logging.getLogger(__name__)
+
+
+def _is_auth_error(exc: Exception) -> bool:
+    """True if an exception is a SurrealDB auth / expired-token failure (HTTP 401).
+
+    The SurrealDB Python SDK surfaces an expired root token as an
+    ``aiohttp.ClientResponseError`` with ``status == 401``. Match on the status
+    attribute first, then fall back to the message text for wrapped errors.
+    """
+    if getattr(exc, "status", None) == 401:
+        return True
+    msg = str(exc).lower()
+    return "401" in msg or "unauthorized" in msg
 
 
 def _to_surreal_id(record_id: str) -> str:
@@ -226,6 +240,9 @@ class SurrealDBStorage(
         self._conn: Any = None
         self._current_brain_id: str | None = None
         self._change_seq: int = 0
+        # Serializes token re-auth so concurrent queries that all hit an
+        # expired-token 401 trigger a single reconnect, not a storm.
+        self._reauth_lock = asyncio.Lock()
 
     async def initialize(self) -> None:
         """Connect to SurrealDB and apply schema."""
@@ -293,12 +310,41 @@ class SurrealDBStorage(
     # ================================================================
 
     async def _query(self, sql: str, **params: Any) -> list[dict[str, Any]]:
-        """Execute a SurrealQL query and return result rows."""
-        conn = self._ensure_conn()
-        result = await conn.query(sql, params)
+        """Execute a SurrealQL query and return result rows.
+
+        Retries once after re-authenticating if the cached connection's token
+        has expired. SurrealDB issues root tokens with a ~1h TTL and the SDK's
+        HTTP connection never refreshes them, so a long-lived server connection
+        starts returning 401 after an hour — which silently broke the dashboard
+        until the container was restarted. Reconnecting on 401 keeps the cached
+        connection alive without a restart.
+        """
+        try:
+            result = await self._ensure_conn().query(sql, params)
+        except Exception as exc:
+            if not _is_auth_error(exc):
+                raise
+            async with self._reauth_lock:
+                await self._reconnect()
+            result = await self._ensure_conn().query(sql, params)
         if result and isinstance(result, list) and len(result) > 0:
             return result[0] if isinstance(result[0], list) else result
         return []
+
+    async def _reconnect(self) -> None:
+        """Re-establish the SurrealDB connection after a token expiry / 401.
+
+        Re-signin + re-select the namespace/database on a fresh connection so
+        the cached singleton keeps working. Schema is already applied, so it is
+        not re-run here.
+        """
+        from surrealdb import AsyncSurreal
+
+        conn = AsyncSurreal(self._url)
+        await conn.signin({"username": self._user, "password": self._password})
+        await conn.use(self._namespace, self._database)
+        self._conn = conn
+        logger.info("SurrealDB reconnected after token expiry: %s", self._url)
 
     # ================================================================
     # Neuron Operations
@@ -1103,16 +1149,53 @@ class SurrealDBStorage(
     async def get_enhanced_stats(self, brain_id: str) -> dict[str, Any]:
         stats = await self.get_stats(brain_id)
 
-        # Type breakdown
+        # Neuron type breakdown
         type_rows = await self._query(
             "SELECT type, count() AS c FROM neuron WHERE brain_id = $bid GROUP BY type",
             bid=brain_id,
         )
         type_counts = {str(r.get("type", "unknown")): int(r.get("c", 0)) for r in type_rows}
 
+        # Synapse stats by type — required by DiagnosticsEngine for diversity
+        # (Shannon entropy over by_type counts) and recall_confidence (avg_weight).
+        # Without this block the dashboard reported diversity=0 / "0 of 8 types
+        # used" even though the brain uses many synapse types. Brain-explicit
+        # ($bid) query, so it is race-free across the shared storage singleton.
+        synapse_stats: dict[str, Any] = {
+            "avg_weight": 0.0,
+            "total_reinforcements": 0,
+            "by_type": {},
+        }
+        syn_rows = await self._query(
+            "SELECT type, count() AS cnt, math::mean(weight) AS avg_w, "
+            "math::sum(reinforced_count) AS total_r "
+            "FROM synapse WHERE brain_id = $bid GROUP BY type",
+            bid=brain_id,
+        )
+        total_weight = 0.0
+        total_count = 0
+        total_reinforcements = 0
+        for row in syn_rows:
+            stype = str(row.get("type", "unknown"))
+            cnt = int(row.get("cnt", 0))
+            avg_w = float(row.get("avg_w") or 0.0)
+            total_r = int(row.get("total_r") or 0)
+            synapse_stats["by_type"][stype] = {
+                "count": cnt,
+                "avg_weight": round(avg_w, 4),
+                "total_reinforcements": total_r,
+            }
+            total_weight += avg_w * cnt
+            total_count += cnt
+            total_reinforcements += total_r
+        if total_count > 0:
+            synapse_stats["avg_weight"] = round(total_weight / total_count, 4)
+        synapse_stats["total_reinforcements"] = total_reinforcements
+
         return {
             **stats,
             "neuron_types": type_counts,
+            "synapse_stats": synapse_stats,
         }
 
     # ================================================================

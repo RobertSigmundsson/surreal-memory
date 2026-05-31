@@ -10,7 +10,7 @@
 
 services:
   surrealdb:
-    image: surrealdb/surrealdb:latest
+    image: surrealdb/surrealdb:v3.1.1
     # surrealkv:///surrealdb/data/db makes storage PERSISTENT. Without a datastore
     # path `surreal start` defaults to in-memory and ALL data is lost on restart.
     # `user: root` is required because a fresh named volume is root-owned and the

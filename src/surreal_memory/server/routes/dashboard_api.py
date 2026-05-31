@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import logging
 from pathlib import Path
 from typing import Annotated, Any
@@ -130,7 +129,12 @@ async def get_stats() -> DashboardStats:
             logger.warning("Brain analysis failed for %s", name, exc_info=True)
             return BrainSummary(id=name, name=name, is_active=name == active_name)
 
-    brains = list(await asyncio.gather(*[_analyze_brain(name) for name in brain_names]))
+    # Analyze brains sequentially, NOT via asyncio.gather: the SurrealDB backend
+    # shares one storage singleton with a mutable current-brain pointer, so
+    # concurrent per-brain analysis races and corrupts orphan/synapse reads
+    # (each _analyze_brain repins the shared pointer). Sequential keeps each
+    # brain's reads consistent. Brain count is tiny, so latency is negligible.
+    brains = [await _analyze_brain(name) for name in brain_names]
 
     total_n = sum(b.neuron_count for b in brains)
     total_s = sum(b.synapse_count for b in brains)
@@ -192,7 +196,15 @@ async def get_tier_stats(
     summary="List all brains",
 )
 async def list_brains_api() -> list[BrainSummary]:
-    """List all available brains with summary stats."""
+    """List all available brains with summary stats, including health grade.
+
+    Previously this endpoint left grade/purity at their model defaults (F / 0.0)
+    because it never ran diagnostics, so the dashboard's Brains table showed
+    every brain as grade F while the stats cards (which DO run diagnostics)
+    showed the real grade — the F-vs-D mismatch. Run diagnostics per brain here
+    too, sequentially (the SurrealDB backend shares one storage singleton with a
+    mutable brain pointer, so concurrent analysis would race).
+    """
     from surreal_memory.unified_config import (
         get_config,
         get_shared_storage,
@@ -208,6 +220,16 @@ async def list_brains_api() -> list[BrainSummary]:
         try:
             brain_storage = await get_shared_storage(brain_name=name)
             stats = await brain_storage.get_stats(name)
+            grade = "F"
+            purity = 0.0
+            try:
+                from surreal_memory.engine.diagnostics import DiagnosticsEngine
+
+                report = await DiagnosticsEngine(brain_storage).analyze(name)
+                grade = report.grade
+                purity = report.purity_score
+            except Exception:
+                logger.debug("Diagnostics failed for brain %s", name, exc_info=True)
             results.append(
                 BrainSummary(
                     id=name,
@@ -215,11 +237,13 @@ async def list_brains_api() -> list[BrainSummary]:
                     neuron_count=stats.get("neuron_count", 0),
                     synapse_count=stats.get("synapse_count", 0),
                     fiber_count=stats.get("fiber_count", 0),
+                    grade=grade,
+                    purity_score=purity,
                     is_active=name == active_name,
                 )
             )
         except Exception:
-            logger.debug("Failed to get stats for brain %s", name, exc_info=True)
+            logger.warning("Brain summary failed for %s", name, exc_info=True)
             results.append(BrainSummary(id=name, name=name, is_active=name == active_name))
 
     return results
