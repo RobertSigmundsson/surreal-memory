@@ -460,9 +460,7 @@ class TestSqliteBackendWarning:
     SurrealDB the dashboard reads.
     """
 
-    def test_warns_about_data_split_when_surreal_env_present(
-        self, monkeypatch, caplog
-    ):
+    def test_warns_about_data_split_when_surreal_env_present(self, monkeypatch, caplog):
         import surreal_memory.unified_config as uc
 
         monkeypatch.setattr(uc, "_sqlite_backend_warned", False)
@@ -480,7 +478,5 @@ class TestSqliteBackendWarning:
         with caplog.at_level("WARNING"):
             uc._warn_sqlite_backend()
             uc._warn_sqlite_backend()
-        sqlite_warnings = [
-            r for r in caplog.records if "sqlite" in r.message.lower()
-        ]
+        sqlite_warnings = [r for r in caplog.records if "sqlite" in r.message.lower()]
         assert len(sqlite_warnings) == 1

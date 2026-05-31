@@ -1798,16 +1798,14 @@ def _warn_sqlite_backend() -> None:
         return
     _sqlite_backend_warned = True
     logger = logging.getLogger(__name__)
-    has_surreal_env = bool(
-        os.environ.get("SURREALDB_URL") or os.environ.get("SURREALDB_PASS")
-    )
+    has_surreal_env = bool(os.environ.get("SURREALDB_URL") or os.environ.get("SURREALDB_PASS"))
     if has_surreal_env:
         logger.warning(
             "storage_backend is 'sqlite' but SurrealDB connection env "
             "(SURREALDB_URL/SURREALDB_PASS) is set. Memories will be written to a "
             "LOCAL SQLite brain, NOT SurrealDB — this splits your data across two "
             "stores (the dashboard reads SurrealDB). Set "
-            "SURREAL_MEMORY_STORAGE=surrealdb (or storage_backend = \"surrealdb\" "
+            'SURREAL_MEMORY_STORAGE=surrealdb (or storage_backend = "surrealdb" '
             "in config.toml) to use SurrealDB."
         )
     else:
