@@ -90,8 +90,8 @@ make verify
 | `SURREAL_MEMORY_PORT` | No | `8000` | REST server port |
 | `SURREAL_MEMORY_TRUSTED_NETWORKS` | No | — | Trusted CIDR ranges (comma-separated) |
 | `SURREALDB_URL` | SurrealDB only | `http://localhost:8001` | SurrealDB endpoint |
-| `SURREALDB_USER` | SurrealDB only | — | SurrealDB username |
-| `SURREALDB_PASS` | SurrealDB only | — | SurrealDB password |
+| `SURREALDB_USER` | SurrealDB only | `root` | SurrealDB username |
+| `SURREALDB_PASS` | SurrealDB only | `surrealmemory` | SurrealDB password |
 | `SURREALDB_NS` | No | `surreal_memory` | SurrealDB namespace |
 | `SURREALDB_DB` | No | `default` | SurrealDB database name |
 | `SURREAL_MEMORY_ENCRYPTION_ENABLED` | No | `false` | Enable memory encryption at rest |

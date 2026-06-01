@@ -97,7 +97,7 @@ Set these before starting `smem-mcp` (add to `~/.bashrc` or `~/.zshrc`):
 | `SURREAL_MEMORY_STORAGE` | `sqlite` | Set to `surrealdb` |
 | `SURREALDB_URL` | — | `http://localhost:8001` |
 | `SURREALDB_USER` | — | `root` |
-| `SURREALDB_PASS` | — | Your SurrealDB password |
+| `SURREALDB_PASS` | — | Your SurrealDB password. Default: `surrealmemory` |
 | `SURREALDB_NS` | — | `surreal_memory` |
 | `SURREALDB_DB` | — | `default` |
 | `GEMINI_API_KEY` | — | Your Gemini API key |

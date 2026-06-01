@@ -16,6 +16,7 @@ from surreal_memory.cli.setup import (
     setup_config,
     setup_hooks_claude,
     setup_mcp_claude,
+    setup_mcp_claude_desktop,
     setup_mcp_cursor,
     setup_skills,
 )
@@ -90,6 +91,9 @@ def run_wizard(*, force: bool = False) -> None:
 
     cursor_status = setup_mcp_cursor()
     _format_mcp_result(results, "Cursor", cursor_status)
+
+    desktop_status = setup_mcp_claude_desktop()
+    _format_mcp_result(results, "Claude Desktop", desktop_status)
 
     # Step 5: Hooks
     hook_status = setup_hooks_claude()

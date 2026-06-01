@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import os
 from datetime import datetime
 from hashlib import sha256
 from typing import Any, Literal
@@ -225,17 +224,20 @@ class SurrealDBStorage(
     def __init__(
         self,
         url: str = "",
-        namespace: str = "surreal_memory",
-        database: str = "default",
-        user: str = "root",
-        password: str = "root",
+        namespace: str = "",
+        database: str = "",
+        user: str = "",
+        password: str = "",
         embedding_dim: int = 3072,
     ) -> None:
-        self._url = url or os.getenv("SURREALDB_URL", "http://localhost:8001")
-        self._namespace = namespace or os.getenv("SURREALDB_NS", "surreal_memory")
-        self._database = database or os.getenv("SURREALDB_DB", "default")
-        self._user = user or os.getenv("SURREALDB_USER", "root")
-        self._password = password or os.getenv("SURREALDB_PASS", "root")
+        from surreal_memory.storage.surrealdb.connection import SurrealSettings
+
+        settings = SurrealSettings.from_env()
+        self._url = url or settings.url
+        self._namespace = namespace or settings.namespace
+        self._database = database or settings.database
+        self._user = user or settings.user
+        self._password = password or settings.password
         self._embedding_dim = embedding_dim
         self._conn: Any = None
         self._current_brain_id: str | None = None
@@ -248,8 +250,22 @@ class SurrealDBStorage(
         """Connect to SurrealDB and apply schema."""
         from surrealdb import AsyncSurreal
 
+        from surreal_memory.storage.surrealdb.connection import (
+            AUTH_HINT,
+            StorageAuthError,
+            is_credential_error,
+        )
+
         self._conn = AsyncSurreal(self._url)
-        await self._conn.signin({"username": self._user, "password": self._password})
+        try:
+            await self._conn.signin({"username": self._user, "password": self._password})
+        except Exception as exc:
+            if is_credential_error(exc):
+                raise StorageAuthError(
+                    f"SurrealDB authentication failed for user '{self._user}' at {self._url}.",
+                    hint=AUTH_HINT,
+                ) from exc
+            raise
         await self._conn.use(self._namespace, self._database)
         await ensure_schema(self._conn)
         logger.info(
@@ -340,8 +356,22 @@ class SurrealDBStorage(
         """
         from surrealdb import AsyncSurreal
 
+        from surreal_memory.storage.surrealdb.connection import (
+            AUTH_HINT,
+            StorageAuthError,
+            is_credential_error,
+        )
+
         conn = AsyncSurreal(self._url)
-        await conn.signin({"username": self._user, "password": self._password})
+        try:
+            await conn.signin({"username": self._user, "password": self._password})
+        except Exception as exc:
+            if is_credential_error(exc):
+                raise StorageAuthError(
+                    f"SurrealDB authentication failed for user '{self._user}' at {self._url}.",
+                    hint=AUTH_HINT,
+                ) from exc
+            raise
         await conn.use(self._namespace, self._database)
         self._conn = conn
         logger.info("SurrealDB reconnected after token expiry: %s", self._url)

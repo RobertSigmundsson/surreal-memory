@@ -55,6 +55,7 @@ from surreal_memory.mcp.train_handler import TrainHandler
 from surreal_memory.mcp.version_check_handler import VersionCheckHandler
 from surreal_memory.mcp.visualize_handler import VisualizeHandler
 from surreal_memory.mcp.watch_handler import WatchHandler
+from surreal_memory.storage.surrealdb.connection import StorageAuthError
 from surreal_memory.unified_config import get_config, get_shared_storage
 
 if TYPE_CHECKING:
@@ -491,6 +492,17 @@ async def handle_message(server: MCPServer, message: dict[str, Any]) -> dict[str
                     "code": -32000,
                     "message": f"Tool '{tool_name}' timed out after {_TOOL_CALL_TIMEOUT}s",
                 },
+            }
+        except StorageAuthError as exc:
+            logger.error("Tool '%s' failed: SurrealDB auth error", tool_name)
+            try:
+                await _record_tool_event(server, tool_name, tool_args, t0, success=False)
+            except Exception:
+                logger.debug("Tool event recording failed", exc_info=True)
+            return {
+                "jsonrpc": "2.0",
+                "id": msg_id,
+                "error": {"code": -32001, "message": str(exc)},
             }
         except Exception:
             logger.error("Tool '%s' raised an exception", tool_name, exc_info=True)

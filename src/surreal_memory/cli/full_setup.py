@@ -306,6 +306,7 @@ def run_full_setup(
         setup_config,
         setup_hooks_claude,
         setup_mcp_claude,
+        setup_mcp_claude_desktop,
         setup_mcp_cursor,
         setup_skills,
     )
@@ -346,6 +347,15 @@ def run_full_setup(
             "failed": "failed",
         }
         results["Cursor"] = cursor_labels.get(cursor_status, cursor_status)
+
+        desktop_status = setup_mcp_claude_desktop()
+        desktop_labels = {
+            "added": "MCP server configured",
+            "exists": "already configured",
+            "not_found": "not detected",
+            "failed": "failed",
+        }
+        results["Claude Desktop"] = desktop_labels.get(desktop_status, desktop_status)
 
     # 4. Hooks
     if not skip_mcp:

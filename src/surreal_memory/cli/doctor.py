@@ -40,7 +40,9 @@ _CHECK_TIERS: dict[str, str] = {
     "Dependencies": TIER_CORE,
     "Schema version": TIER_CORE,
     "CLI tools": TIER_CORE,
+    "SurrealDB connection": TIER_CORE,
     "Embedding provider": TIER_RECOMMENDED,
+    "MCP env completeness": TIER_RECOMMENDED,
     "MCP configuration": TIER_RECOMMENDED,
     "MCP server": TIER_RECOMMENDED,
     "Hooks": TIER_RECOMMENDED,
@@ -86,6 +88,8 @@ def run_doctor(
     checks.append(_check_surface())
     checks.append(_check_config_freshness())
     checks.append(_check_cli_tools())
+    checks.append(_check_surrealdb_connection())
+    checks.append(_check_mcp_env_completeness())
     checks.append(_check_pro_plugin())
     if dev:
         checks.extend(_check_dev_environment())
@@ -328,6 +332,12 @@ def _check_brain() -> dict[str, Any]:
 
         config = get_config(reload=True)
         brain_name = config.current_brain
+        if config.storage_backend == "surrealdb":
+            return {
+                "name": "Brain database",
+                "status": SKIP,
+                "detail": "surrealdb backend — brain lives in SurrealDB, not a local .db file",
+            }
     except Exception:
         brain_name = "default"
 
@@ -441,6 +451,12 @@ def _check_schema_version() -> dict[str, Any]:
         from surreal_memory.unified_config import get_config, get_surrealmemory_dir
 
         config = get_config(reload=True)
+        if config.storage_backend == "surrealdb":
+            return {
+                "name": "Schema version",
+                "status": SKIP,
+                "detail": "surrealdb backend — schema managed by SurrealDB, not SQLite",
+            }
         brain_name = config.current_brain
         db_path = get_surrealmemory_dir() / "brains" / f"{brain_name}.db"
 
@@ -865,6 +881,8 @@ _FIX_HANDLERS: dict[str, Any] = {
     "Dedup": lambda: _fix_dedup(),
     "Embedding provider": lambda: _fix_embedding(),
     "Config freshness": lambda: _fix_config_freshness(),
+    "MCP env completeness": lambda: _fix_mcp_env(),
+    "SurrealDB connection": lambda: _fix_mcp_env(),
 }
 
 
@@ -955,6 +973,174 @@ def _fix_config_freshness() -> dict[str, Any]:
         "name": "Config freshness",
         "status": WARN,
         "detail": "auto-fix failed",
+    }
+
+
+# ---------------------------------------------------------------------------
+# SurrealDB-specific checks
+# ---------------------------------------------------------------------------
+
+
+def _run_surrealdb_ping() -> None:
+    """Attempt a real SurrealDB connection with a short timeout.
+
+    Raises StorageAuthError on bad credentials, any other exception on
+    connectivity issues.  Returns None on success.
+    """
+    import asyncio
+
+    from surreal_memory.storage.surrealdb.connection import SurrealSettings
+    from surreal_memory.storage.surrealdb.store import SurrealDBStorage
+
+    async def _ping() -> None:
+        settings = SurrealSettings.from_env()
+        storage = SurrealDBStorage(
+            url=settings.url,
+            user=settings.user,
+            password=settings.password,
+            namespace=settings.namespace,
+            database=settings.database,
+        )
+        try:
+            await asyncio.wait_for(storage.initialize(), timeout=5)
+        finally:
+            await storage.close()
+
+    run_async(_ping())
+
+
+def _check_surrealdb_connection() -> dict[str, Any]:
+    """Check that the SurrealDB connection works (TIER_CORE for surrealdb backend).
+
+    Returns SKIP when storage backend is not surrealdb.
+    Returns FAIL with actionable hint when authentication fails.
+    Returns WARN when SurrealDB is unreachable (not running, wrong URL, etc.).
+    Returns OK on success.
+    """
+    import os
+
+    from surreal_memory.storage.surrealdb.connection import StorageAuthError
+
+    if os.environ.get("SURREAL_MEMORY_STORAGE") != "surrealdb":
+        try:
+            from surreal_memory.unified_config import get_config
+
+            config = get_config(reload=True)
+            if config.storage_backend != "surrealdb":
+                return {
+                    "name": "SurrealDB connection",
+                    "status": SKIP,
+                    "detail": "surrealdb backend not active",
+                }
+        except Exception as cfg_exc:
+            return {
+                "name": "SurrealDB connection",
+                "status": WARN,
+                "detail": f"could not load config to determine backend: {type(cfg_exc).__name__}",
+                "fix": "Check config.toml is valid; run: smem init",
+            }
+
+    try:
+        _run_surrealdb_ping()
+        return {
+            "name": "SurrealDB connection",
+            "status": OK,
+            "detail": "authenticated and connected",
+        }
+    except StorageAuthError:
+        return {
+            "name": "SurrealDB connection",
+            "status": FAIL,
+            "detail": "authentication failed (wrong password or user)",
+            "fix": "Set SURREALDB_PASS in your MCP client env or run: smem doctor --fix",
+            "fixable": True,
+        }
+    except Exception as exc:
+        return {
+            "name": "SurrealDB connection",
+            "status": WARN,
+            "detail": f"could not reach SurrealDB: {type(exc).__name__}",
+            "fix": "Ensure SurrealDB is running and SURREALDB_URL is correct",
+        }
+
+
+def _check_mcp_env_completeness() -> dict[str, Any]:
+    """Check that MCP entries contain the required env block (TIER_RECOMMENDED).
+
+    Reads ~/.claude.json (Claude Code) and claude_desktop_config.json to verify
+    that the surreal-memory entry has SURREALDB_PASS in its env block.
+    """
+    configs_to_check: list[tuple[str, Path]] = [
+        ("Claude Code (~/.claude.json)", Path.home() / ".claude.json"),
+    ]
+
+    # Also check Claude Desktop config
+    try:
+        from surreal_memory.cli.setup import _claude_desktop_config_path
+
+        desktop_path = _claude_desktop_config_path()
+        if desktop_path is not None:
+            configs_to_check.append(("Claude Desktop", desktop_path))
+    except Exception:
+        pass
+
+    missing_env: list[str] = []
+
+    for label, config_path in configs_to_check:
+        if not config_path.exists():
+            continue
+        try:
+            data = json.loads(config_path.read_text(encoding="utf-8"))
+            entry = data.get("mcpServers", {}).get("surreal-memory")
+            if entry is None:
+                continue
+            if not entry.get("env", {}).get("SURREALDB_PASS"):
+                missing_env.append(label)
+        except (json.JSONDecodeError, OSError):
+            continue
+
+    if not any(p.exists() for _, p in configs_to_check):
+        return {
+            "name": "MCP env completeness",
+            "status": SKIP,
+            "detail": "no MCP client config files found",
+        }
+
+    if missing_env:
+        return {
+            "name": "MCP env completeness",
+            "status": WARN,
+            "detail": f"surreal-memory entry missing env in: {', '.join(missing_env)}",
+            "fix": "Run: smem doctor --fix",
+            "fixable": True,
+        }
+
+    return {
+        "name": "MCP env completeness",
+        "status": OK,
+        "detail": "env block with SURREALDB_PASS present",
+    }
+
+
+def _fix_mcp_env() -> dict[str, Any]:
+    """Auto-fix: backfill env into MCP client configs."""
+    from surreal_memory.cli.setup import setup_mcp_claude, setup_mcp_claude_desktop
+
+    try:
+        setup_mcp_claude()
+        setup_mcp_claude_desktop()
+        return {
+            "name": "MCP env completeness",
+            "status": OK,
+            "detail": "auto-fixed: env backfilled in MCP client configs",
+        }
+    except Exception:
+        pass
+    return {
+        "name": "MCP env completeness",
+        "status": WARN,
+        "detail": "auto-fix failed",
+        "fix": "Run: smem init",
     }
 
 
