@@ -78,8 +78,18 @@ class TestSetupMcpClaude:
     def test_already_exists(self, tmp_path: Path) -> None:
         (tmp_path / ".claude").mkdir()
         claude_json = tmp_path / ".claude.json"
+        # Entry with env.SURREALDB_PASS → considered complete, returns "exists"
         claude_json.write_text(
-            json.dumps({"mcpServers": {"surreal-memory": {"command": "smem-mcp"}}})
+            json.dumps(
+                {
+                    "mcpServers": {
+                        "surreal-memory": {
+                            "command": "smem-mcp",
+                            "env": {"SURREALDB_PASS": "surrealmemory"},
+                        }
+                    }
+                }
+            )
         )
         with patch("surreal_memory.cli.setup.Path.home", return_value=tmp_path):
             assert setup_mcp_claude() == "exists"
@@ -118,3 +128,167 @@ class TestSetupMcpClaude:
         ):
             result = setup_mcp_claude()
         assert result == "added"
+
+
+class TestFindSmemCommandEnv:
+    """find_smem_command() must include an 'env' key with SurrealDB config."""
+
+    def test_returns_env_key(self, monkeypatch):
+        from surreal_memory.cli.setup import find_smem_command
+
+        monkeypatch.delenv("SURREALDB_PASS", raising=False)
+        result = find_smem_command()
+        assert "env" in result, "find_smem_command must return an 'env' key"
+
+    def test_env_contains_surrealdb_pass(self, monkeypatch):
+        from surreal_memory.cli.setup import find_smem_command
+
+        monkeypatch.delenv("SURREALDB_PASS", raising=False)
+        result = find_smem_command()
+        assert "SURREALDB_PASS" in result["env"]
+
+    def test_env_contains_storage_type(self, monkeypatch):
+        from surreal_memory.cli.setup import find_smem_command
+
+        result = find_smem_command()
+        assert result["env"].get("SURREAL_MEMORY_STORAGE") == "surrealdb"
+
+    def test_env_default_password_is_surrealmemory(self, monkeypatch):
+        from surreal_memory.cli.setup import find_smem_command
+
+        monkeypatch.delenv("SURREALDB_PASS", raising=False)
+        result = find_smem_command()
+        assert result["env"]["SURREALDB_PASS"] == "surrealmemory"  # noqa: S105
+
+    def test_env_respects_surrealdb_pass_override(self, monkeypatch):
+        from surreal_memory.cli.setup import find_smem_command
+
+        monkeypatch.setenv("SURREALDB_PASS", "custompass")
+        result = find_smem_command()
+        assert result["env"]["SURREALDB_PASS"] == "custompass"  # noqa: S105
+
+
+class TestAddViaClaudeJsonWithEnv:
+    """_add_via_claude_json writes env into the MCP entry."""
+
+    def test_writes_env_field(self, tmp_path: Path) -> None:
+        f = tmp_path / ".claude.json"
+        entry = {"command": "smem-mcp", "env": {"SURREALDB_PASS": "surrealmemory"}}
+        assert _add_via_claude_json(f, entry) is True
+        data = json.loads(f.read_text())
+        server = data["mcpServers"]["surreal-memory"]
+        assert server["env"]["SURREALDB_PASS"] == "surrealmemory"  # noqa: S105
+
+
+class TestSetupMcpClaudeDesktop:
+    """setup_mcp_claude_desktop() — new function for Claude Desktop support."""
+
+    def test_not_found_when_no_desktop_config_dir(self, tmp_path: Path) -> None:
+        from surreal_memory.cli.setup import setup_mcp_claude_desktop
+
+        with patch("surreal_memory.cli.setup.Path.home", return_value=tmp_path):
+            result = setup_mcp_claude_desktop()
+        assert result == "not_found"
+
+    def test_adds_entry_with_env(self, tmp_path: Path) -> None:
+        import sys
+
+        from surreal_memory.cli.setup import setup_mcp_claude_desktop
+
+        if sys.platform == "darwin":
+            config_dir = tmp_path / "Library" / "Application Support" / "Claude"
+        else:
+            config_dir = tmp_path / ".config" / "Claude"
+        config_dir.mkdir(parents=True)
+
+        with (
+            patch("surreal_memory.cli.setup.Path.home", return_value=tmp_path),
+            patch("surreal_memory.cli.setup.shutil.which", return_value=None),
+        ):
+            result = setup_mcp_claude_desktop()
+
+        assert result == "added"
+        config_file = config_dir / "claude_desktop_config.json"
+        assert config_file.exists()
+        data = json.loads(config_file.read_text())
+        assert "surreal-memory" in data["mcpServers"]
+        assert "env" in data["mcpServers"]["surreal-memory"]
+        assert "SURREALDB_PASS" in data["mcpServers"]["surreal-memory"]["env"]
+
+    def test_idempotent_returns_exists(self, tmp_path: Path) -> None:
+        import sys
+
+        from surreal_memory.cli.setup import setup_mcp_claude_desktop
+
+        if sys.platform == "darwin":
+            config_dir = tmp_path / "Library" / "Application Support" / "Claude"
+        else:
+            config_dir = tmp_path / ".config" / "Claude"
+        config_dir.mkdir(parents=True)
+        config_file = config_dir / "claude_desktop_config.json"
+        config_file.write_text(
+            json.dumps(
+                {
+                    "mcpServers": {
+                        "surreal-memory": {"command": "smem-mcp", "env": {"SURREALDB_PASS": "x"}}
+                    }
+                }
+            )
+        )
+
+        with (
+            patch("surreal_memory.cli.setup.Path.home", return_value=tmp_path),
+            patch("surreal_memory.cli.setup.shutil.which", return_value=None),
+        ):
+            result = setup_mcp_claude_desktop()
+
+        assert result == "exists"
+
+    def test_backfills_env_when_missing(self, tmp_path: Path) -> None:
+        """Entry exists but lacks env → should update env (returns 'added')."""
+        import sys
+
+        from surreal_memory.cli.setup import setup_mcp_claude_desktop
+
+        if sys.platform == "darwin":
+            config_dir = tmp_path / "Library" / "Application Support" / "Claude"
+        else:
+            config_dir = tmp_path / ".config" / "Claude"
+        config_dir.mkdir(parents=True)
+        config_file = config_dir / "claude_desktop_config.json"
+        # Entry without env
+        config_file.write_text(
+            json.dumps({"mcpServers": {"surreal-memory": {"command": "smem-mcp"}}})
+        )
+
+        with (
+            patch("surreal_memory.cli.setup.Path.home", return_value=tmp_path),
+            patch("surreal_memory.cli.setup.shutil.which", return_value=None),
+        ):
+            result = setup_mcp_claude_desktop()
+
+        assert result == "added"
+        data = json.loads(config_file.read_text())
+        assert "env" in data["mcpServers"]["surreal-memory"]
+
+    def test_creates_backup_of_existing_file(self, tmp_path: Path) -> None:
+        import sys
+
+        from surreal_memory.cli.setup import setup_mcp_claude_desktop
+
+        if sys.platform == "darwin":
+            config_dir = tmp_path / "Library" / "Application Support" / "Claude"
+        else:
+            config_dir = tmp_path / ".config" / "Claude"
+        config_dir.mkdir(parents=True)
+        config_file = config_dir / "claude_desktop_config.json"
+        config_file.write_text(json.dumps({"mcpServers": {}}))
+
+        with (
+            patch("surreal_memory.cli.setup.Path.home", return_value=tmp_path),
+            patch("surreal_memory.cli.setup.shutil.which", return_value=None),
+        ):
+            setup_mcp_claude_desktop()
+
+        backup = config_dir / "claude_desktop_config.json.bak"
+        assert backup.exists()

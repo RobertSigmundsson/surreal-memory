@@ -254,6 +254,8 @@ class TestRunDoctorIntegration:
     @patch("surreal_memory.cli.doctor._check_dedup")
     @patch("surreal_memory.cli.doctor._check_hooks")
     @patch("surreal_memory.cli.doctor._check_cli_tools")
+    @patch("surreal_memory.cli.doctor._check_mcp_env_completeness")
+    @patch("surreal_memory.cli.doctor._check_surrealdb_connection")
     @patch("surreal_memory.cli.doctor._check_mcp_connection")
     @patch("surreal_memory.cli.doctor._check_mcp_config")
     @patch("surreal_memory.cli.doctor._check_schema_version")
@@ -267,8 +269,122 @@ class TestRunDoctorIntegration:
             mock.return_value = {"name": "test", "status": OK, "detail": "ok"}
 
         result = run_doctor(json_output=True)
-        assert result["total"] == 14
-        assert result["passed"] == 14
+        assert result["total"] == 16  # 14 original + SurrealDB connection + MCP env completeness
+        assert result["passed"] == 16
 
     def test_quickstart_url_defined(self) -> None:
         assert "quickstart" in QUICKSTART_URL
+
+
+class TestCheckSurrealdbConnection:
+    """_check_surrealdb_connection() — new TIER_CORE check for auth-fail detection."""
+
+    def test_skip_when_storage_is_not_surrealdb(self, monkeypatch):
+        from surreal_memory.cli.doctor import _check_surrealdb_connection
+
+        monkeypatch.setenv("SURREAL_MEMORY_STORAGE", "sqlite")
+        result = _check_surrealdb_connection()
+        assert result["status"] == "skip"
+
+    def test_fail_when_storage_auth_error(self, monkeypatch):
+        from surreal_memory.cli.doctor import _check_surrealdb_connection
+        from surreal_memory.storage.surrealdb.connection import StorageAuthError
+
+        monkeypatch.setenv("SURREAL_MEMORY_STORAGE", "surrealdb")
+
+        with patch(
+            "surreal_memory.cli.doctor._run_surrealdb_ping",
+            side_effect=StorageAuthError("auth failed", hint="Set SURREALDB_PASS"),
+        ):
+            result = _check_surrealdb_connection()
+
+        assert result["status"] == "fail"
+        assert "SURREALDB_PASS" in result.get("fix", "")
+
+    def test_ok_when_connection_succeeds(self, monkeypatch):
+        from surreal_memory.cli.doctor import _check_surrealdb_connection
+
+        monkeypatch.setenv("SURREAL_MEMORY_STORAGE", "surrealdb")
+
+        with patch("surreal_memory.cli.doctor._run_surrealdb_ping", return_value=None):
+            result = _check_surrealdb_connection()
+
+        assert result["status"] == "ok"
+
+    def test_warn_on_generic_exception(self, monkeypatch):
+        from surreal_memory.cli.doctor import _check_surrealdb_connection
+
+        monkeypatch.setenv("SURREAL_MEMORY_STORAGE", "surrealdb")
+
+        with patch(
+            "surreal_memory.cli.doctor._run_surrealdb_ping",
+            side_effect=ConnectionRefusedError("refused"),
+        ):
+            result = _check_surrealdb_connection()
+
+        assert result["status"] == "warn"
+
+
+class TestCheckMcpEnvCompleteness:
+    """_check_mcp_env_completeness() — TIER_RECOMMENDED check for missing env."""
+
+    def test_warn_when_entry_lacks_env(self, tmp_path):
+        from surreal_memory.cli.doctor import _check_mcp_env_completeness
+
+        claude_json = tmp_path / ".claude.json"
+        claude_json.write_text(
+            json.dumps({"mcpServers": {"surreal-memory": {"command": "smem-mcp"}}})
+        )
+        with patch("surreal_memory.cli.doctor.Path.home", return_value=tmp_path):
+            result = _check_mcp_env_completeness()
+
+        assert result["status"] == "warn"
+        assert result.get("fixable") is True
+
+    def test_ok_when_env_is_complete(self, tmp_path):
+        from surreal_memory.cli.doctor import _check_mcp_env_completeness
+
+        claude_json = tmp_path / ".claude.json"
+        claude_json.write_text(
+            json.dumps(
+                {
+                    "mcpServers": {
+                        "surreal-memory": {
+                            "command": "smem-mcp",
+                            "env": {"SURREALDB_PASS": "surrealmemory"},
+                        }
+                    }
+                }
+            )
+        )
+        with patch("surreal_memory.cli.doctor.Path.home", return_value=tmp_path):
+            result = _check_mcp_env_completeness()
+
+        assert result["status"] == "ok"
+
+    def test_skip_when_no_claude_json(self, tmp_path):
+        from surreal_memory.cli.doctor import _check_mcp_env_completeness
+
+        with patch("surreal_memory.cli.doctor.Path.home", return_value=tmp_path):
+            result = _check_mcp_env_completeness()
+
+        assert result["status"] in ("skip", "warn")
+
+
+class TestFixMcpEnv:
+    """_fix_mcp_env() auto-fix handler — calls setup to backfill env."""
+
+    def test_fix_handler_calls_setup_functions(self):
+        from surreal_memory.cli.doctor import _fix_mcp_env
+
+        with (
+            patch("surreal_memory.cli.setup.setup_mcp_claude", return_value="added") as mock_claude,
+            patch(
+                "surreal_memory.cli.setup.setup_mcp_claude_desktop", return_value="added"
+            ) as mock_desktop,
+        ):
+            result = _fix_mcp_env()
+
+        assert mock_claude.called
+        assert mock_desktop.called
+        assert result["status"] == "ok"

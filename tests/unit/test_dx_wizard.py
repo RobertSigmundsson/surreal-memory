@@ -191,13 +191,15 @@ class TestDoctor:
             patch("surreal_memory.cli.doctor._check_surface") as m11,
             patch("surreal_memory.cli.doctor._check_config_freshness") as m12,
             patch("surreal_memory.cli.doctor._check_pro_plugin") as m13,
+            patch("surreal_memory.cli.doctor._check_surrealdb_connection") as m14,
+            patch("surreal_memory.cli.doctor._check_mcp_env_completeness") as m15,
         ):
-            for m in [m1, m2, m3, m4, m5, m6, m7, m7b, m8, m9, m10, m11, m12, m13]:
+            for m in [m1, m2, m3, m4, m5, m6, m7, m7b, m8, m9, m10, m11, m12, m13, m14, m15]:
                 m.return_value = {"name": "test", "status": "ok", "detail": "ok"}
 
             result = run_doctor(json_output=True)
-            assert result["passed"] == 14
-            assert result["total"] == 14
+            assert result["passed"] == 16
+            assert result["total"] == 16
             assert result["failed"] == 0
 
     def test_run_doctor_with_failures(self) -> None:
@@ -246,9 +248,11 @@ class TestDoctor:
             patch("surreal_memory.cli.doctor._check_surface") as m11,
             patch("surreal_memory.cli.doctor._check_config_freshness") as m12,
             patch("surreal_memory.cli.doctor._check_pro_plugin") as m13,
+            patch("surreal_memory.cli.doctor._check_surrealdb_connection") as m14,
+            patch("surreal_memory.cli.doctor._check_mcp_env_completeness") as m16,
             patch("surreal_memory.cli.doctor._check_dev_environment") as m15,
         ):
-            for m in [m1, m2, m3, m4, m5, m6, m7, m7b, m8, m9, m10, m11, m12, m13]:
+            for m in [m1, m2, m3, m4, m5, m6, m7, m7b, m8, m9, m10, m11, m12, m13, m14, m16]:
                 m.return_value = {"name": "test", "status": "ok", "detail": "ok"}
             m15.return_value = [
                 {"name": "Source checkout", "status": "ok", "detail": "ok"},
@@ -257,8 +261,8 @@ class TestDoctor:
 
             result = run_doctor(json_output=True, dev=True)
 
-        assert result["passed"] == 16
-        assert result["total"] == 16
+        assert result["passed"] == 18
+        assert result["total"] == 18
         assert any(c["tier"] == "dev" for c in result["checks"])
 
 

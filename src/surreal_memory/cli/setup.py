@@ -22,16 +22,27 @@ def find_smem_command() -> dict[str, Any]:
     1. smem-mcp entry point (cleanest)
     2. smem CLI with mcp subcommand
     3. python -m fallback (uses absolute path, normalized for Windows)
+
+    Always includes an ``env`` block so MCP clients receive the full
+    SurrealDB connection config and do not start with an empty environment.
     """
+    from surreal_memory.storage.surrealdb.connection import build_mcp_env
+
+    env = build_mcp_env()
+
     smem_mcp = shutil.which("smem-mcp")
     if smem_mcp:
-        return {"command": "smem-mcp"}
+        return {"command": "smem-mcp", "env": env}
 
     smem = shutil.which("smem")
     if smem:
-        return {"command": "smem", "args": ["mcp"]}
+        return {"command": "smem", "args": ["mcp"], "env": env}
 
-    return {"command": _normalize_path(sys.executable), "args": ["-m", "surreal_memory.mcp"]}
+    return {
+        "command": _normalize_path(sys.executable),
+        "args": ["-m", "surreal_memory.mcp"],
+        "env": env,
+    }
 
 
 def setup_config(data_dir: Path, *, force: bool = False) -> bool:
@@ -149,9 +160,13 @@ def setup_mcp_claude() -> str:
     """Auto-configure MCP in Claude Code.
 
     Strategy:
-    1. Use ``claude mcp add --scope user`` CLI if available (official method).
-    2. Fallback: write directly to ``~/.claude.json`` > ``mcpServers``.
-    3. Clean up deprecated ``~/.claude/mcp_servers.json`` (Claude Code ignores it).
+    Always use direct JSON write (``~/.claude.json``) rather than the
+    ``claude mcp add`` CLI path, because the CLI does not support the ``env``
+    block required for SurrealDB credential injection. The JSON write is
+    idempotent and includes the full ``env`` dict.
+
+    If an entry already exists but lacks ``env``, the env block is backfilled
+    so upgraded installations receive the credential config.
 
     Returns status string: "added", "exists", "failed", or "not_found".
     """
@@ -160,23 +175,35 @@ def setup_mcp_claude() -> str:
         return "not_found"
 
     claude_json = claude_dir.parent / ".claude.json"
-
-    # Already registered?
-    if _claude_json_has_server(claude_json, "surreal-memory"):
-        _cleanup_stale_mcp_servers_json()
-        return "exists"
-
-    # Build the command to register
     mcp_entry = find_smem_command()
-    command_args: list[str] = [mcp_entry["command"]]
-    command_args.extend(mcp_entry.get("args", []))
 
-    # Try official CLI first
-    if _add_via_claude_cli("user", command_args):
-        _cleanup_stale_mcp_servers_json()
-        return "added"
+    # Check for existing entry
+    if claude_json.exists():
+        try:
+            raw = claude_json.read_text(encoding="utf-8").strip()
+            if raw:
+                data: dict[str, Any] = json.loads(raw)
+                servers = data.get("mcpServers", {})
+                if "surreal-memory" in servers:
+                    existing = servers["surreal-memory"]
+                    # If env already present and populated → exists
+                    if existing.get("env", {}).get("SURREALDB_PASS"):
+                        _cleanup_stale_mcp_servers_json()
+                        return "exists"
+                    # Backfill env for upgraded installations — backup first
+                    try:
+                        backup = claude_json.with_suffix(".json.bak")
+                        backup.write_bytes(claude_json.read_bytes())
+                    except OSError:
+                        pass
+                    existing["env"] = mcp_entry.get("env", {})
+                    claude_json.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+                    _cleanup_stale_mcp_servers_json()
+                    return "added"
+        except (json.JSONDecodeError, OSError):
+            pass
 
-    # Fallback: direct JSON write
+    # Write full entry (includes env)
     if _add_via_claude_json(claude_json, mcp_entry):
         _cleanup_stale_mcp_servers_json()
         return "added"
@@ -216,6 +243,80 @@ def setup_mcp_cursor() -> str:
             json.dumps(existing, indent=2) + "\n",
             encoding="utf-8",
         )
+        return "added"
+    except OSError:
+        return "failed"
+
+
+def _claude_desktop_config_path() -> Path | None:
+    """Return the Claude Desktop config file path for the current OS.
+
+    Returns None when the parent directory does not exist (Desktop not installed).
+    """
+    import os
+
+    if sys.platform == "darwin":
+        config_dir = Path.home() / "Library" / "Application Support" / "Claude"
+    elif sys.platform == "win32":
+        appdata = os.environ.get("APPDATA", "")
+        if not appdata:
+            return None
+        config_dir = Path(appdata) / "Claude"
+    else:
+        config_dir = Path.home() / ".config" / "Claude"
+
+    if not config_dir.exists():
+        return None
+    return config_dir / "claude_desktop_config.json"
+
+
+def setup_mcp_claude_desktop() -> str:
+    """Auto-configure MCP in Claude Desktop.
+
+    Writes or updates ``claude_desktop_config.json`` with a ``surreal-memory``
+    entry including the full ``env`` block so the Desktop app never starts the
+    MCP server with an empty environment.
+
+    Idempotent: if the entry already exists and has ``env.SURREALDB_PASS``,
+    returns ``"exists"``.  If the entry exists without ``env``, backfills it
+    and returns ``"added"``.  Creates a ``.bak`` backup before any write.
+
+    Returns status string: ``"added"``, ``"exists"``, ``"failed"``,
+    or ``"not_found"`` (Desktop not installed).
+    """
+    config_path = _claude_desktop_config_path()
+    if config_path is None:
+        return "not_found"
+
+    mcp_entry = find_smem_command()
+
+    existing: dict[str, Any] = {}
+    if config_path.exists():
+        try:
+            raw = config_path.read_text(encoding="utf-8").strip()
+            if raw:
+                existing = json.loads(raw)
+        except (json.JSONDecodeError, OSError):
+            existing = {}
+
+        servers = existing.get("mcpServers", {})
+        if "surreal-memory" in servers:
+            current = servers["surreal-memory"]
+            if current.get("env", {}).get("SURREALDB_PASS"):
+                return "exists"
+            # Backfill env for upgraded installations — fall through to write
+
+        # Backup before modifying
+        try:
+            backup = config_path.with_suffix(".json.bak")
+            backup.write_bytes(config_path.read_bytes())
+        except OSError:
+            pass
+
+    try:
+        servers = existing.setdefault("mcpServers", {})
+        servers["surreal-memory"] = mcp_entry
+        config_path.write_text(json.dumps(existing, indent=2) + "\n", encoding="utf-8")
         return "added"
     except OSError:
         return "failed"

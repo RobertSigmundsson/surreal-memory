@@ -241,6 +241,7 @@ def init(
         setup_config,
         setup_hooks_claude,
         setup_mcp_claude,
+        setup_mcp_claude_desktop,
         setup_mcp_cursor,
         setup_skills,
     )
@@ -279,6 +280,15 @@ def init(
             "failed": "failed to write config",
         }
         results["Cursor"] = cursor_labels.get(cursor_status, cursor_status)
+
+        desktop_status = setup_mcp_claude_desktop()
+        desktop_labels = {
+            "added": "claude_desktop_config.json (added MCP server)",
+            "exists": "claude_desktop_config.json (already configured)",
+            "not_found": "not detected (Claude Desktop not installed)",
+            "failed": "failed to write config",
+        }
+        results["Claude Desktop"] = desktop_labels.get(desktop_status, desktop_status)
 
     # 4. Hooks (Claude Code only)
     if not skip_mcp:

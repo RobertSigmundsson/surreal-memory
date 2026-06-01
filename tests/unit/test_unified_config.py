@@ -480,3 +480,50 @@ class TestSqliteBackendWarning:
             uc._warn_sqlite_backend()
         sqlite_warnings = [r for r in caplog.records if "sqlite" in r.message.lower()]
         assert len(sqlite_warnings) == 1
+
+
+class TestWarnMissingSurrealPass:
+    def test_warns_when_storage_surrealdb_and_no_pass(self, monkeypatch, caplog):
+        import surreal_memory.unified_config as uc
+
+        monkeypatch.setattr(uc, "_missing_surreal_pass_warned", False)
+        monkeypatch.setenv("SURREAL_MEMORY_STORAGE", "surrealdb")
+        monkeypatch.delenv("SURREALDB_PASS", raising=False)
+        with caplog.at_level("WARNING"):
+            uc._warn_missing_surreal_pass()
+        warnings = [r for r in caplog.records if "SURREALDB_PASS" in r.message]
+        assert len(warnings) == 1
+
+    def test_no_warning_when_pass_set(self, monkeypatch, caplog):
+        import surreal_memory.unified_config as uc
+
+        monkeypatch.setattr(uc, "_missing_surreal_pass_warned", False)
+        monkeypatch.setenv("SURREAL_MEMORY_STORAGE", "surrealdb")
+        monkeypatch.setenv("SURREALDB_PASS", "mypassword")
+        with caplog.at_level("WARNING"):
+            uc._warn_missing_surreal_pass()
+        warnings = [r for r in caplog.records if "SURREALDB_PASS" in r.message]
+        assert len(warnings) == 0
+
+    def test_no_warning_when_not_surrealdb_backend(self, monkeypatch, caplog):
+        import surreal_memory.unified_config as uc
+
+        monkeypatch.setattr(uc, "_missing_surreal_pass_warned", False)
+        monkeypatch.setenv("SURREAL_MEMORY_STORAGE", "sqlite")
+        monkeypatch.delenv("SURREALDB_PASS", raising=False)
+        with caplog.at_level("WARNING"):
+            uc._warn_missing_surreal_pass()
+        warnings = [r for r in caplog.records if "SURREALDB_PASS" in r.message]
+        assert len(warnings) == 0
+
+    def test_emits_only_once(self, monkeypatch, caplog):
+        import surreal_memory.unified_config as uc
+
+        monkeypatch.setattr(uc, "_missing_surreal_pass_warned", False)
+        monkeypatch.setenv("SURREAL_MEMORY_STORAGE", "surrealdb")
+        monkeypatch.delenv("SURREALDB_PASS", raising=False)
+        with caplog.at_level("WARNING"):
+            uc._warn_missing_surreal_pass()
+            uc._warn_missing_surreal_pass()
+        warnings = [r for r in caplog.records if "SURREALDB_PASS" in r.message]
+        assert len(warnings) == 1

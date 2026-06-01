@@ -1815,6 +1815,33 @@ def _warn_sqlite_backend() -> None:
         )
 
 
+_missing_surreal_pass_warned = False
+
+
+def _warn_missing_surreal_pass() -> None:
+    """Emit a one-time warning when storage=surrealdb and SURREALDB_PASS is unset.
+
+    A missing password means the server will attempt to authenticate with the
+    built-in default, which will fail if the DB was started with a different
+    password. Surface this before the connection attempt so the error is
+    actionable.
+    """
+    global _missing_surreal_pass_warned
+    if _missing_surreal_pass_warned:
+        return
+    if os.environ.get("SURREAL_MEMORY_STORAGE") != "surrealdb":
+        return
+    if os.environ.get("SURREALDB_PASS"):
+        return
+    _missing_surreal_pass_warned = True
+    logging.getLogger(__name__).warning(
+        "SURREALDB_PASS is not set and storage=surrealdb is active. "
+        "The server will use the default password ('surrealmemory'). "
+        "If your SurrealDB uses a different password, set SURREALDB_PASS "
+        "in your MCP client config or run `smem doctor --fix`."
+    )
+
+
 async def get_shared_storage(brain_name: str | None = None) -> NeuralStorage:
     """Get storage for shared brain access.
 
@@ -1967,6 +1994,7 @@ async def _get_surrealdb_storage(config: UnifiedConfig, name: str) -> NeuralStor
 
     from surreal_memory.core.brain import Brain
     from surreal_memory.storage.surrealdb import SurrealDBStorage
+    from surreal_memory.storage.surrealdb.connection import SurrealSettings
 
     if _surrealdb_storage is not None:
         _surrealdb_storage.set_brain(name)
@@ -1978,12 +2006,18 @@ async def _get_surrealdb_storage(config: UnifiedConfig, name: str) -> NeuralStor
 
         emb_dim = _MODEL_DIMENSIONS.get(config.embedding.model, 3072)
 
+    _warn_missing_surreal_pass()
+
+    # Use SurrealSettings.from_env() as single source of truth — no duplicate
+    # defaults here. SurrealDBStorage.__init__ also calls from_env() as fallback,
+    # but we pass values explicitly so the caller's env is captured at this point.
+    settings = SurrealSettings.from_env()
     storage = SurrealDBStorage(
-        url=os.getenv("SURREALDB_URL", "http://localhost:8001"),
-        namespace=os.getenv("SURREALDB_NS", "surreal_memory"),
-        database=os.getenv("SURREALDB_DB", "default"),
-        user=os.getenv("SURREALDB_USER", "root"),
-        password=os.getenv("SURREALDB_PASS", "root"),
+        url=settings.url,
+        namespace=settings.namespace,
+        database=settings.database,
+        user=settings.user,
+        password=settings.password,
         embedding_dim=emb_dim,
     )
     await storage.initialize()
