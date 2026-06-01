@@ -7,6 +7,48 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.3.2] — 2026-06-01
+
+### Fixed
+- **SurrealDB auth fail-fast** — `SurrealDBStorage.initialize()` and `_reconnect()` now
+  raise `StorageAuthError` (actionable) instead of propagating the raw SDK
+  `NotAllowedError`. The MCP server surfaces this as JSON-RPC code `-32001` with a
+  hint pointing to `SURREALDB_PASS` and `smem doctor --fix`, replacing the opaque
+  `-32000 "failed unexpectedly"` that made bad-credential failures invisible.
+- **Default password unified** — the silent default `SURREALDB_PASS=root` (which never
+  matched the Docker default `surrealmemory`) is replaced by a single source of truth
+  in `storage/surrealdb/connection.py`. Both `store.py` and `unified_config.py` now
+  derive the default from this module, eliminating the drift that caused clean-install
+  auth failures.
+
+### Added
+- **`storage/surrealdb/connection.py`** (new module) — `SurrealSettings.from_env()`,
+  `StorageAuthError`, `is_credential_error()`, `build_mcp_env()`; single source of
+  truth for all SurrealDB connection defaults.
+- **Claude Desktop MCP support** — `smem init` and `smem setup mcp` now write the
+  `surreal-memory` entry (including the full `env` block with `SURREALDB_PASS`) to
+  `claude_desktop_config.json` on Linux, macOS, and Windows. Existing entries without
+  `env` are backfilled automatically.
+- **`env` block in all MCP configs** — `find_smem_command()` always returns an `env`
+  dict so newly written Claude Code and Cursor configs include SurrealDB connection
+  variables, preventing the "empty env" bug on clean installs.
+- **`smem doctor` SurrealDB checks** — two new diagnostic checks:
+  - `SurrealDB connection` (TIER_CORE): live auth test with 5-second timeout; FAIL
+    with actionable fix on `StorageAuthError`.
+  - `MCP env completeness` (TIER_RECOMMENDED): verifies `SURREALDB_PASS` is present
+    in the `env` block of each MCP client config.
+  - `smem doctor --fix` backfills missing env in all detected client configs.
+- **`_warn_missing_surreal_pass()`** — one-time warning when `storage=surrealdb` is
+  active but `SURREALDB_PASS` is unset.
+
+### Changed
+- `_check_brain` and `_check_schema_version` in `smem doctor` now return `SKIP`
+  (not `FAIL`) when the SurrealDB backend is active — those checks are SQLite-only.
+- `setup_mcp_claude()` uses JSON write path exclusively (the `claude mcp add` CLI
+  does not support the `env` block). Behaviour from the user perspective is identical.
+- `SURREALDB_PASS` default (`surrealmemory`) documented in installation and
+  contributing guides.
+
 ## [2.3.1] — 2026-05-31
 
 ### Fixed
