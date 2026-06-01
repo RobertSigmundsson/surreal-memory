@@ -2,9 +2,18 @@
 
 from __future__ import annotations
 
-from unittest.mock import AsyncMock, patch
+import sys
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+
+# surrealdb is an optional dependency not installed in the base test environment.
+# Inject a stub so that the lazy `from surrealdb import AsyncSurreal` inside
+# store.py succeeds and the mock can override it.
+if "surrealdb" not in sys.modules:
+    _fake_surrealdb = MagicMock()
+    sys.modules["surrealdb"] = _fake_surrealdb
+    sys.modules["surrealdb.errors"] = MagicMock()
 
 
 class TestInitializeAuthFailFast:
@@ -25,7 +34,7 @@ class TestInitializeAuthFailFast:
 
         storage = SurrealDBStorage(url="http://localhost:8001", password="wrongpass")  # noqa: S106
 
-        with patch("surrealdb.AsyncSurreal", return_value=mock_conn):
+        with patch("surrealdb.AsyncSurreal", return_value=mock_conn, create=True):
             with pytest.raises(StorageAuthError) as exc_info:
                 await storage.initialize()
 
@@ -47,7 +56,7 @@ class TestInitializeAuthFailFast:
 
         storage = SurrealDBStorage(url="http://myhost:8001", user="myuser", password="bad")  # noqa: S106
 
-        with patch("surrealdb.AsyncSurreal", return_value=mock_conn):
+        with patch("surrealdb.AsyncSurreal", return_value=mock_conn, create=True):
             with pytest.raises(StorageAuthError) as exc_info:
                 await storage.initialize()
 
@@ -64,7 +73,7 @@ class TestInitializeAuthFailFast:
 
         storage = SurrealDBStorage()
 
-        with patch("surrealdb.AsyncSurreal", return_value=mock_conn):
+        with patch("surrealdb.AsyncSurreal", return_value=mock_conn, create=True):
             with pytest.raises(ConnectionRefusedError):
                 await storage.initialize()
 
@@ -79,7 +88,7 @@ class TestInitializeAuthFailFast:
         storage = SurrealDBStorage()
 
         with (
-            patch("surrealdb.AsyncSurreal", return_value=mock_conn),
+            patch("surrealdb.AsyncSurreal", return_value=mock_conn, create=True),
             patch("surreal_memory.storage.surrealdb.store.ensure_schema", new_callable=AsyncMock),
         ):
             await storage.initialize()  # must not raise
@@ -101,7 +110,7 @@ class TestReconnectAuthFailFast:
 
         storage = SurrealDBStorage()
 
-        with patch("surrealdb.AsyncSurreal", return_value=mock_conn):
+        with patch("surrealdb.AsyncSurreal", return_value=mock_conn, create=True):
             with pytest.raises(StorageAuthError):
                 await storage._reconnect()
 
