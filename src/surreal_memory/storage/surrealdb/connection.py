@@ -76,13 +76,13 @@ def is_credential_error(exc: Exception) -> bool:
     Returns False for 401 token-expiry errors so the reconnect loop is not
     triggered on a bad password.
     """
-    # Try real isinstance first
+    # Try real isinstance first — guard against MagicMock stubs in tests.
     try:
         from surrealdb.errors import NotAllowedError  # type: ignore[import-untyped,unused-ignore]
 
-        if isinstance(exc, NotAllowedError):
+        if isinstance(NotAllowedError, type) and isinstance(exc, NotAllowedError):
             return True
-    except (ImportError, ModuleNotFoundError):
+    except (ImportError, ModuleNotFoundError, TypeError):
         pass
 
     # Class-name fallback (SDK installed but import path changed)
