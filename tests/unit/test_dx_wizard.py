@@ -220,15 +220,17 @@ class TestDoctor:
             patch("surreal_memory.cli.doctor._check_surface") as m11,
             patch("surreal_memory.cli.doctor._check_config_freshness") as m12,
             patch("surreal_memory.cli.doctor._check_pro_plugin") as m13,
+            patch("surreal_memory.cli.doctor._check_surrealdb_connection") as m14,
+            patch("surreal_memory.cli.doctor._check_mcp_env_completeness") as m15,
         ):
             m1.return_value = {"name": "Python", "status": "ok", "detail": "ok"}
             m2.return_value = {"name": "Config", "status": "fail", "detail": "missing"}
-            for m in [m3, m4, m5, m6, m7, m7b, m8, m9, m10, m11, m12, m13]:
+            for m in [m3, m4, m5, m6, m7, m7b, m8, m9, m10, m11, m12, m13, m14, m15]:
                 m.return_value = {"name": "test", "status": "ok", "detail": "ok"}
 
             result = run_doctor(json_output=True)
             assert result["failed"] == 1
-            assert result["passed"] == 13
+            assert result["passed"] == 15
 
     def test_run_doctor_dev_adds_dev_checks(self) -> None:
         from surreal_memory.cli.doctor import run_doctor
