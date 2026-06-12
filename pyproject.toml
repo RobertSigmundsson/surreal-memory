@@ -52,7 +52,7 @@ server = [
     "httpx>=0.24",
 ]
 surrealdb = [
-    "surrealdb>=0.4.0",
+    "surrealdb>=2.0.0,<3.0.0",
 ]
 encryption = [
     "cryptography>=46.0.5",
