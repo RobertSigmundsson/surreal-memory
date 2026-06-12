@@ -56,7 +56,7 @@ DEFINE INDEX idx_state_neuron  ON neuron_state FIELDS brain_id, neuron_id UNIQUE
 -- Synapses (graph edges between neurons)
 DEFINE TABLE synapse SCHEMAFULL;
 DEFINE FIELD id           ON synapse TYPE string;
-DEFINE FIELD brain_id     ON synapse TYPE string;
+DEFINE FIELD brain_id     ON synapse TYPE string DEFAULT 'default';
 DEFINE FIELD type         ON synapse TYPE string;
 DEFINE FIELD weight       ON synapse TYPE float DEFAULT 1.0;
 DEFINE FIELD direction    ON synapse TYPE string DEFAULT 'forward';
