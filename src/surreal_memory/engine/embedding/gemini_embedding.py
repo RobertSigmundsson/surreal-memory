@@ -104,17 +104,25 @@ class GeminiEmbedding(EmbeddingProvider):
         client = self._ensure_client()
         all_embeddings: list[list[float]] = []
 
+        from google.genai import types as genai_types
+
         # Gemini API allows at most 100 texts per batch request
         batch_size = 100
         for i in range(0, len(texts), batch_size):
             chunk = texts[i : i + batch_size]
-            # functools.partial binds `chunk` at creation (satisfies ruff B023,
-            # no loop-var late binding) and types cleanly for mypy.
+            # google-genai >= 2.0 folds a plain list[str] into ONE multi-part
+            # content (N texts -> 1 embedding); wrap each text in its own
+            # Content so the API returns one embedding per text.
+            chunk_contents = [
+                genai_types.Content(parts=[genai_types.Part(text=t)]) for t in chunk
+            ]
+            # functools.partial binds the chunk at creation (satisfies ruff
+            # B023, no loop-var late binding) and types cleanly for mypy.
             response = await call_with_retry(
                 partial(
                     client.aio.models.embed_content,
                     model=self._model,
-                    contents=chunk,
+                    contents=chunk_contents,
                     config={"task_type": self._task_type},
                 ),
                 provider="gemini",
