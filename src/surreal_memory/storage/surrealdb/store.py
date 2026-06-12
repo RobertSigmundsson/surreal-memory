@@ -27,6 +27,7 @@ from surreal_memory.storage.surrealdb.depth_priors import SurrealDBDepthPriorsMi
 from surreal_memory.storage.surrealdb.keyword_entity import SurrealDBKeywordEntityMixin
 from surreal_memory.storage.surrealdb.projects import SurrealDBProjectsMixin
 from surreal_memory.storage.surrealdb.review_schedules import SurrealDBReviewSchedulesMixin
+from surreal_memory.storage.surrealdb.ruflo_crypto import decrypt_content
 from surreal_memory.storage.surrealdb.schema import ensure_schema
 from surreal_memory.storage.surrealdb.sources import SurrealDBSourcesMixin
 from surreal_memory.storage.surrealdb.tool_events import SurrealDBToolEventsMixin
@@ -115,7 +116,7 @@ def _row_to_neuron(row: dict[str, Any]) -> Neuron:
     return Neuron(
         id=neuron_id,
         type=NeuronType(row["type"]),
-        content=str(row["content"]),
+        content=decrypt_content(str(row["content"])),
         metadata=meta,
         content_hash=int(row.get("content_hash", 0)),
         created_at=_parse_datetime(row.get("created_at")) or utcnow(),
