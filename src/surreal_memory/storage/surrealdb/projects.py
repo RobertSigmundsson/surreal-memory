@@ -22,6 +22,8 @@ logger = logging.getLogger(__name__)
 
 
 def _to_surreal_id(record_id: str) -> str:
+    if ":" in record_id:
+        record_id = record_id.rsplit(":", 1)[1]
     return record_id.replace("-", "_")
 
 

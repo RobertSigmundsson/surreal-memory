@@ -51,7 +51,13 @@ def _is_auth_error(exc: Exception) -> bool:
 
 
 def _to_surreal_id(record_id: str) -> str:
-    """Convert a UUID to a valid SurrealDB record name (alphanumeric + _-)."""
+    """Convert a record ID to a valid SurrealDB record name (alphanumeric + _-).
+
+    Strips any existing table prefix (e.g. 'neuron:abc-123' -> 'abc_123')
+    to prevent doubling when the caller later prepends 'neuron:'.
+    """
+    if ":" in record_id:
+        record_id = record_id.rsplit(":", 1)[1]
     return record_id.replace("-", "_")
 
 
@@ -680,6 +686,7 @@ class SurrealDBStorage(
         target_id: str | None = None,
         type: SynapseType | None = None,
         min_weight: float | None = None,
+        limit: int | None = None,
     ) -> list[Synapse]:
         brain_id = self._get_brain_id()
         conditions = ["brain_id = $brain_id"]
@@ -699,7 +706,10 @@ class SurrealDBStorage(
             params["min_weight"] = min_weight
 
         where = " AND ".join(conditions)
-        rows = await self._query(f"SELECT * FROM synapse WHERE {where}", **params)
+        query_str = f"SELECT * FROM synapse WHERE {where}"
+        if limit is not None:
+            query_str += f" LIMIT {limit}"
+        rows = await self._query(query_str, **params)
         return [_row_to_synapse(r) for r in rows]
 
     async def update_synapse(self, synapse: Synapse) -> None:
