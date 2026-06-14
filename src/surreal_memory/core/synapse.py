@@ -94,6 +94,8 @@ class Direction(StrEnum):
 
     UNIDIRECTIONAL = "uni"  # One-way: source -> target
     BIDIRECTIONAL = "bi"  # Two-way: source <-> target
+    FORWARD = "forward"  # legacy rows; also _row_to_synapse default in surrealdb store
+    BACKWARD = "backward"  # legacy rows: target -> source
 
 
 # Synapse types that are typically bidirectional
