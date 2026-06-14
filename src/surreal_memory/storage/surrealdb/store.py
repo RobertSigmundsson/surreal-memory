@@ -92,6 +92,24 @@ def _ensure_naive(dt: datetime) -> datetime:
     return dt
 
 
+def _parse_neuron_type(value: Any) -> NeuronType:
+    """Parse a stored neuron type tolerantly.
+
+    External writers (e.g. an integration plugin) may store enum NAMES in
+    uppercase ('CONCEPT'); the engine stores enum VALUES ('concept'). Unknown
+    values fall back to CONCEPT instead of raising ValueError, so one foreign
+    row cannot break recall over the whole brain.
+    """
+    try:
+        return NeuronType(value)
+    except ValueError:
+        try:
+            return NeuronType(str(value).lower())
+        except ValueError:
+            logger.warning("Unknown neuron type %r — falling back to 'concept'", value)
+            return NeuronType.CONCEPT
+
+
 def _row_to_neuron(row: dict[str, Any]) -> Neuron:
     """Convert a SurrealDB neuron record to a Neuron."""
     meta = dict(row.get("metadata") or {})
@@ -108,7 +126,7 @@ def _row_to_neuron(row: dict[str, Any]) -> Neuron:
     neuron_id = neuron_id.replace("_", "-")
     return Neuron(
         id=neuron_id,
-        type=NeuronType(row["type"]),
+        type=_parse_neuron_type(row["type"]),
         content=str(row["content"]),
         metadata=meta,
         content_hash=int(row.get("content_hash", 0)),
@@ -1105,7 +1123,7 @@ class SurrealDBStorage(
             try:
                 neuron = Neuron(
                     id=str(nd.get("id", "")),
-                    type=NeuronType(nd["type"]),
+                    type=_parse_neuron_type(nd["type"]),
                     content=str(nd["content"]),
                     metadata=dict(nd.get("metadata") or {}),
                     created_at=_parse_datetime(nd.get("created_at")) or utcnow(),
