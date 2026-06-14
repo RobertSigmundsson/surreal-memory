@@ -316,6 +316,7 @@ class SharedStorage(SharedFiberBrainMixin, NeuralStorage):
         target_id: str | None = None,
         type: SynapseType | None = None,
         min_weight: float | None = None,
+        limit: int | None = None,
     ) -> list[Synapse]:
         """Find synapses matching criteria."""
         params: dict[str, Any] = {}
@@ -327,9 +328,14 @@ class SharedStorage(SharedFiberBrainMixin, NeuralStorage):
             params["type"] = type.value
         if min_weight is not None:
             params["min_weight"] = min_weight
+        if limit is not None:
+            params["limit"] = limit
 
         result = await self._request("GET", "/memory/synapses", params=params)
-        return [dict_to_synapse(s) for s in result.get("synapses", [])]
+        synapses = [dict_to_synapse(s) for s in result.get("synapses", [])]
+        if limit is not None:
+            return synapses[:limit]
+        return synapses
 
     async def update_synapse(self, synapse: Synapse) -> None:
         """Update an existing synapse."""
