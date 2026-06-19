@@ -598,24 +598,32 @@ class ConsolidationEngine:
             states = await self._storage.get_neuron_states_batch(batch_ids)
 
             for neuron in batch:
-                is_orphan = (
-                    neuron.id not in connected_neuron_ids and neuron.id not in fiber_neuron_ids
-                )
-                if is_orphan:
-                    report.neurons_pruned += 1
-                    orphan_ids.append(neuron.id)
-                    continue
-
-                # Dead neuron: has connections but never accessed, old enough, not pinned
+                # Never auto-prune pinned neurons, whether isolated (orphan) or dead.
                 if neuron.id in pinned_neuron_ids:
                     continue
+
+                # Access-frequency and age guards apply to BOTH isolated (orphan)
+                # and dead neurons. An isolated neuron is NOT inherently worthless:
+                # a single observation is isolated by nature and has not yet had
+                # time to form connections. Without these guards the orphan path
+                # permanently deletes freshly-created or recently-accessed
+                # persistent neurons (data loss). Give isolated neurons the same
+                # age grace and access protection as connected-but-dead neurons.
                 state = states.get(neuron.id)
                 freq = state.access_frequency if state else 0
                 if freq > 0:
                     continue
                 age_days = (reference_time - neuron.created_at).total_seconds() / 86400
-                if age_days >= dead_neuron_days:
-                    report.neurons_pruned += 1
+                if age_days < dead_neuron_days:
+                    continue
+
+                is_orphan = (
+                    neuron.id not in connected_neuron_ids and neuron.id not in fiber_neuron_ids
+                )
+                report.neurons_pruned += 1
+                if is_orphan:
+                    orphan_ids.append(neuron.id)
+                else:
                     dead_ids.append(neuron.id)
 
             offset += len(batch)
