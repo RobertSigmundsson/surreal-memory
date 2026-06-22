@@ -94,13 +94,19 @@ class GeminiEmbedding(EmbeddingProvider):
         batch_size = 100
         for i in range(0, len(texts), batch_size):
             chunk = texts[i : i + batch_size]
-            # functools.partial binds `chunk` at creation (satisfies ruff B023,
-            # no loop-var late binding) and types cleanly for mypy.
+            # google-genai >= 2.0 folds a plain list[str] into ONE multi-part
+            # content (N texts -> 1 embedding); give each text its own content
+            # so the API returns one embedding per text. Plain ContentDicts are
+            # used instead of types.Content to avoid importing google.genai here
+            # (keeps this path working when the SDK is mocked/absent in tests).
+            chunk_contents = [{"parts": [{"text": t}]} for t in chunk]
+            # functools.partial binds the chunk at creation (satisfies ruff
+            # B023, no loop-var late binding) and types cleanly for mypy.
             response = await call_with_retry(
                 partial(
                     client.aio.models.embed_content,
                     model=self._model,
-                    contents=chunk,
+                    contents=chunk_contents,
                     config={"task_type": self._task_type},
                 ),
                 provider="gemini",
