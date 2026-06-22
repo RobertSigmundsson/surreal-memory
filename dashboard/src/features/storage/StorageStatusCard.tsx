@@ -1,84 +1,105 @@
-import type { StorageStatusResponse } from "@/api/types"
+import type { SurrealDBStorageStatus } from "@/api/types"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Badge } from "@/components/ui/badge"
 import { useTranslation } from "react-i18next"
-import { Database, HardDrive, CheckCircle, XCircle } from "@phosphor-icons/react"
+import { Database, CheckCircle, XCircle } from "@phosphor-icons/react"
 
 interface StorageStatusCardProps {
-  status: StorageStatusResponse
-  brain: string
+  status: SurrealDBStorageStatus
 }
 
-function FileStatus({ exists, label }: { exists: boolean; label: string }) {
-  return (
-    <div className="flex items-center gap-2 text-sm">
-      {exists ? (
-        <CheckCircle className="size-4 text-green-500" aria-hidden="true" />
-      ) : (
-        <XCircle className="size-4 text-muted-foreground" aria-hidden="true" />
-      )}
-      <span className={exists ? "text-foreground" : "text-muted-foreground"}>
-        {label}
-      </span>
-    </div>
-  )
-}
-
-export function StorageStatusCard({ status, brain }: StorageStatusCardProps) {
+export function StorageStatusCard({ status }: StorageStatusCardProps) {
   const { t } = useTranslation()
-  const isInfinity = status.current_backend === "infinitydb"
 
   return (
     <Card>
       <CardHeader className="pb-3">
         <CardTitle className="flex items-center gap-2 text-base">
           <Database className="size-5" aria-hidden="true" />
-          {t("storage.currentBackend")}
+          {t("storage.currentBackend", "Storage Backend")}
         </CardTitle>
       </CardHeader>
       <CardContent className="space-y-4">
-        <div className="flex items-center gap-3">
-          <Badge
-            variant={isInfinity ? "default" : "secondary"}
-            className="text-sm px-3 py-1"
-          >
-            {isInfinity ? (
-              <span className="flex items-center gap-1.5">
-                <HardDrive className="size-3.5" aria-hidden="true" />
-                InfinityDB
-              </span>
-            ) : (
-              <span className="flex items-center gap-1.5">
-                <Database className="size-3.5" aria-hidden="true" />
-                SQLite
-              </span>
-            )}
+        {/* Backend badge + connection status */}
+        <div className="flex flex-wrap items-center gap-3">
+          <Badge variant="default" className="text-sm px-3 py-1">
+            <span className="flex items-center gap-1.5">
+              <Database className="size-3.5" aria-hidden="true" />
+              SurrealDB
+            </span>
           </Badge>
-          <span className="text-sm text-muted-foreground">
-            {t("storage.brain")}: <span className="font-medium text-foreground">{brain}</span>
+          <Badge
+            variant={status.healthy ? "outline" : "destructive"}
+            className="text-xs"
+          >
+            {status.healthy
+              ? t("storage.connected", "Connected")
+              : t("storage.disconnected", "Disconnected")}
+          </Badge>
+          {status.health_grade && (
+            <Badge variant="secondary" className="text-xs">
+              {t("storage.grade", "Grade")}: {status.health_grade}
+            </Badge>
+          )}
+        </div>
+
+        {/* Connection URL */}
+        <div className="flex items-center gap-2 text-sm">
+          {status.healthy ? (
+            <CheckCircle className="size-4 shrink-0 text-green-500" aria-hidden="true" />
+          ) : (
+            <XCircle className="size-4 shrink-0 text-destructive" aria-hidden="true" />
+          )}
+          <span className="text-muted-foreground break-all">
+            {status.url || t("storage.urlUnknown", "URL unknown")}
           </span>
         </div>
 
-        <div className="space-y-2">
-          <FileStatus
-            exists={status.sqlite_exists}
-            label={
-              status.sqlite_exists && status.sqlite_size_bytes > 0
-                ? `${t("storage.sqliteFile")} (${(status.sqlite_size_bytes / (1024 * 1024)).toFixed(1)} MB)`
-                : t("storage.sqliteFile")
-            }
-          />
-          <FileStatus
-            exists={status.infinitydb_exists}
-            label={t("storage.infinitydbDir")}
-          />
-        </div>
-
-        {status.is_pro_license && (
-          <Badge variant="outline" className="text-xs">
-            {t("license.pro")}
-          </Badge>
+        {/* Namespace / Database */}
+        {(status.namespace || status.database) && (
+          <div className="grid grid-cols-2 gap-2 text-sm text-muted-foreground">
+            <div>
+              <span className="font-medium text-foreground">
+                {t("storage.namespace", "Namespace")}
+              </span>
+              <p className="truncate">{status.namespace || "—"}</p>
+            </div>
+            <div>
+              <span className="font-medium text-foreground">
+                {t("storage.database", "Database")}
+              </span>
+              <p className="truncate">{status.database || "—"}</p>
+            </div>
+          </div>
         )}
+
+        {/* Live counts */}
+        <dl className="grid grid-cols-3 gap-3 text-center">
+          <div>
+            <dt className="text-xs text-muted-foreground">
+              {t("storage.neurons", "Neurons")}
+            </dt>
+            <dd className="text-lg font-semibold">
+              {status.neuron_count.toLocaleString()}
+            </dd>
+          </div>
+          <div>
+            <dt className="text-xs text-muted-foreground">
+              {t("storage.synapses", "Synapses")}
+            </dt>
+            <dd className="text-lg font-semibold">
+              {status.synapse_count.toLocaleString()}
+            </dd>
+          </div>
+          <div>
+            <dt className="text-xs text-muted-foreground">
+              {t("storage.fibers", "Fibers")}
+            </dt>
+            <dd className="text-lg font-semibold">
+              {status.fiber_count.toLocaleString()}
+            </dd>
+          </div>
+        </dl>
       </CardContent>
     </Card>
   )

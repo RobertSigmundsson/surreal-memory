@@ -252,38 +252,18 @@ export interface SyncConfigUpdateResponse {
   conflict_strategy: string
 }
 
-// GET /api/dashboard/storage/status
-export interface StorageStatusResponse {
-  current_backend: "sqlite" | "infinitydb"
-  pro_installed: boolean
-  is_pro_license: boolean
-  sqlite_exists: boolean
-  sqlite_size_bytes: number
-  infinitydb_exists: boolean
-  migration_job: MigrationJobStatus | null
-}
-
-// POST /api/dashboard/storage/migrate + GET /api/dashboard/storage/migrate/{job_id}
-export interface MigrationJobStatus {
-  job_id: string
-  state: "running" | "done" | "error"
-  direction: "to_infinitydb" | "to_sqlite"
-  brain: string
-  neurons_total: number
-  neurons_done: number
-  synapses_total: number
-  synapses_done: number
-  fibers_total: number
-  fibers_done: number
-  error: string | null
-  started_at: string
-  finished_at: string | null
-}
-
-// POST /api/dashboard/storage/backend
-export interface SetBackendResponse {
-  status: "switched" | "unchanged"
-  backend: string
+// GET /api/dashboard/storage/status (SurrealDB-only)
+export interface SurrealDBStorageStatus {
+  backend: "surrealdb"
+  url: string
+  namespace: string
+  database: string
+  healthy: boolean
+  active_brain: string
+  neuron_count: number
+  fiber_count: number
+  synapse_count: number
+  health_grade: string
 }
 
 // GET /health

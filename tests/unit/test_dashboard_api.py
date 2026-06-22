@@ -258,3 +258,52 @@ class TestFiberDiagramEndpoint:
         assert resp.status_code == 200
         data = resp.json()
         assert len(data["synapses"]) == 0  # External synapse filtered
+
+
+class TestStorageStatusEndpoint:
+    """Tests for GET /api/dashboard/storage/status (SurrealDB-only)."""
+
+    def test_returns_200_with_surrealdb_backend(
+        self, client: TestClient, mock_storage: AsyncMock
+    ) -> None:
+        mock_storage.get_stats = AsyncMock(
+            return_value={"neuron_count": 10, "synapse_count": 3, "fiber_count": 2}
+        )
+        mock_storage._url = "http://localhost:8000"
+        mock_storage._namespace = "surreal_memory"
+        mock_storage._database = "default"
+        resp = client.get("/api/dashboard/storage/status")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["backend"] == "surrealdb"
+        assert data["healthy"] is True
+        assert data["neuron_count"] == 10
+        assert data["synapse_count"] == 3
+        assert data["fiber_count"] == 2
+
+    def test_healthy_false_when_get_stats_fails(
+        self, client: TestClient, mock_storage: AsyncMock
+    ) -> None:
+        mock_storage.get_stats = AsyncMock(side_effect=Exception("db down"))
+        resp = client.get("/api/dashboard/storage/status")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["backend"] == "surrealdb"
+        assert data["healthy"] is False
+        assert data["neuron_count"] == 0
+
+    def test_url_namespace_database_exposed(
+        self, client: TestClient, mock_storage: AsyncMock
+    ) -> None:
+        mock_storage.get_stats = AsyncMock(
+            return_value={"neuron_count": 0, "synapse_count": 0, "fiber_count": 0}
+        )
+        mock_storage._url = "http://surrealdb:8000"
+        mock_storage._namespace = "myns"
+        mock_storage._database = "mydb"
+        resp = client.get("/api/dashboard/storage/status")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["url"] == "http://surrealdb:8000"
+        assert data["namespace"] == "myns"
+        assert data["database"] == "mydb"

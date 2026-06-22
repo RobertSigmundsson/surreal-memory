@@ -1516,6 +1516,92 @@ async def visualize_memory(
     return result
 
 
+# ── Storage Status API ───────────────────────────────────
+
+
+class SurrealDBStorageStatus(BaseModel):
+    """SurrealDB storage status for the Storage tab."""
+
+    backend: str = "surrealdb"
+    url: str = ""
+    namespace: str = ""
+    database: str = ""
+    healthy: bool = False
+    active_brain: str = ""
+    neuron_count: int = 0
+    fiber_count: int = 0
+    synapse_count: int = 0
+    health_grade: str = "F"
+
+
+@router.get(
+    "/storage/status",
+    response_model=SurrealDBStorageStatus,
+    summary="Get SurrealDB storage status",
+)
+async def get_storage_status(
+    storage: Annotated[NeuralStorage, Depends(get_storage)],
+) -> SurrealDBStorageStatus:
+    """Return SurrealDB connection info and live brain counts.
+
+    This endpoint replaces the old SQLite/InfinityDB migration endpoints
+    (removed in the SurrealDB-only release). No backend switching is available
+    or needed — surreal-memory is SurrealDB-only.
+    """
+    from surreal_memory.unified_config import get_config
+
+    cfg = get_config()
+    brain_name = cfg.current_brain
+
+    url = ""
+    namespace = ""
+    database = ""
+    # Introspect the live storage when it is a SurrealDBStorage instance;
+    # fall back to empty strings for test SQLite stubs.
+    if hasattr(storage, "_url"):
+        url = str(storage._url)
+    if hasattr(storage, "_namespace"):
+        namespace = str(storage._namespace)
+    if hasattr(storage, "_database"):
+        database = str(storage._database)
+
+    neuron_count = 0
+    fiber_count = 0
+    synapse_count = 0
+    health_grade = "F"
+    healthy = False
+
+    try:
+        stats = await storage.get_stats(brain_name)
+        neuron_count = stats.get("neuron_count", 0)
+        synapse_count = stats.get("synapse_count", 0)
+        fiber_count = stats.get("fiber_count", 0)
+        healthy = True
+    except Exception:
+        logger.debug("Storage status: get_stats failed", exc_info=True)
+
+    try:
+        from surreal_memory.engine.diagnostics import DiagnosticsEngine
+
+        report = await DiagnosticsEngine(storage).analyze(brain_name)
+        health_grade = report.grade
+    except Exception:
+        logger.debug("Storage status: diagnostics failed", exc_info=True)
+
+    return SurrealDBStorageStatus(
+        backend="surrealdb",
+        url=url,
+        namespace=namespace,
+        database=database,
+        healthy=healthy,
+        active_brain=brain_name,
+        neuron_count=neuron_count,
+        fiber_count=fiber_count,
+        synapse_count=synapse_count,
+        health_grade=health_grade,
+    )
+
+
 @router.get("/license", tags=["dashboard"], summary="Current license tier")
 async def get_license() -> dict[str, Any]:
     """Surreal-Memory is fully free: always report a FULL, unlocked license."""
