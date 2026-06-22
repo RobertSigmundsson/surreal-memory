@@ -61,7 +61,21 @@ class GeminiEmbedding(EmbeddingProvider):
                     "Install it with: pip install 'surreal-memory[embeddings-gemini]'"
                 ) from exc
 
-            self._client = genai.Client(api_key=self._api_key)
+            # Optional gateway routing: honour GOOGLE_GEMINI_BASE_URL (the
+            # SDK env var) but build the client explicitly, because our
+            # gateway path already pins the API version — api_version must be
+            # emptied or the SDK doubles it ('/v1beta/v1beta/...').
+            base_url = os.getenv("GOOGLE_GEMINI_BASE_URL")
+            if base_url:
+                self._client = genai.Client(
+                    api_key=self._api_key,
+                    http_options={
+                        "base_url": base_url,
+                        "api_version": os.getenv("GOOGLE_GEMINI_API_VERSION", ""),
+                    },
+                )
+            else:
+                self._client = genai.Client(api_key=self._api_key)
 
         return self._client
 
