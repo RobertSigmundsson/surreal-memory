@@ -1,7 +1,7 @@
 # MCP Tools Reference
 
 Complete reference for all Surreal-Memory MCP tools.
-**53 tools** available via MCP stdio transport.
+**56 tools** available via MCP stdio transport.
 
 !!! tip
     Tools are called as MCP tool calls, not CLI commands. In Claude Code, call `smem_recall` directly — do not run `smem recall` in terminal.
@@ -71,6 +71,9 @@ Complete reference for all Surreal-Memory MCP tools.
   - [`smem_report_outcome`](#smem_report_outcome)
   - [`smem_budget`](#smem_budget)
   - [`smem_tier`](#smem_tier)
+  - [`smem_offload`](#smem_offload)
+  - [`smem_inflate`](#smem_inflate)
+  - [`smem_situation`](#smem_situation)
 
 ---
 
@@ -94,6 +97,7 @@ Store a memory. Auto-detects type if not specified. Error resolution: when a new
 | `source_id` | string | No | — | Link this memory to a registered source. Creates a SOURCE_OF synapse for provenance tracking. |
 | `context` | object | No | — | Structured context dict merged into content server-side using type-specific templates. Keys like 'reason', 'alternati... |
 | `ephemeral` | boolean | No | — | Session-scoped memory: auto-expires after TTL (default 24h), never synced to cloud, excluded from consolidation. Use ... |
+| `verbose_extraction` | boolean | No | — | Surface concept-extraction observability stats (dropped_short, dropped_noise, dropped_duplicate_entity) in the respon... |
 | `compact` | boolean | No | — | Return compact response (strip metadata hints, truncate lists). Saves 60-80% tokens. |
 | `token_budget` | integer | No | — | Max tokens for response. Progressively strips content to fit budget. |
 
@@ -126,6 +130,7 @@ Query memories by semantic search with confidence ranking.
 | `mode` | string (`associative`, `exact`) | No | — | Recall mode: 'associative' (default) returns formatted context, 'exact' returns raw neuron contents verbatim without ... |
 | `include_citations` | boolean | No | default: true | Include citation and audit trail in exact recall results (default: true). |
 | `recall_token_budget` | integer | No | — | When set, activates budget-aware fiber selection: ranks fibers by value-per-token and selects the most efficient ones... |
+| `prefer_recent` | boolean | No | — | Re-rank matched fibers newest-first (by time_end, fallback created_at). Use for queries about current state ('what's ... |
 | `permanent_only` | boolean | No | — | Exclude ephemeral (session-scoped) memories from results. Default: false (include all). |
 | `clean_for_prompt` | boolean | No | — | Return clean bullet-point text without section headers or neuron-type tags. Use when injecting recall output into pro... |
 | `tier` | string (`hot`, `warm`, `cold`) | No | — | Filter results by memory tier. Only return memories matching this tier. |
@@ -803,6 +808,37 @@ Auto-tier management — promote/demote memories between HOT/WARM/COLD based on 
 | `compact` | boolean | No | — | Return compact response (strip metadata hints, truncate lists). Saves 60-80% tokens. |
 | `token_budget` | integer | No | — | Max tokens for response. Progressively strips content to fit budget. |
 
+### `smem_offload`
+
+Store a large tool result as an ephemeral neuron (24h TTL) and return a compact summary + ref_id. Use when tool output is large (>2KB) and you may need to inspect it again later without keeping it in context. Drill back into full content via smem_inflate(ref_id).
+
+| Parameter | Type | Required | Default | Description |
+|-----------|------|----------|---------|-------------|
+| `content` | string | Yes | — | Raw tool output to offload (≤100k chars) |
+| `tool_name` | string | Yes | — | Name of the tool that produced this output (e.g. 'ls', 'grep') |
+| `summary` | string | No | — | Caller-provided summary. If omitted, an auto-summary (first 200 chars + size hint) is generated. |
+| `compact` | boolean | No | — | Return compact response (strip metadata hints, truncate lists). Saves 60-80% tokens. |
+| `token_budget` | integer | No | — | Max tokens for response. Progressively strips content to fit budget. |
+
+### `smem_inflate`
+
+Retrieve full content of a previously offloaded tool result by its ref_id (returned from smem_offload). Returns the original raw content. Returns an error if the ref has expired or never existed.
+
+| Parameter | Type | Required | Default | Description |
+|-----------|------|----------|---------|-------------|
+| `ref_id` | string | Yes | — | ref_id returned by smem_offload |
+| `compact` | boolean | No | — | Return compact response (strip metadata hints, truncate lists). Saves 60-80% tokens. |
+| `token_budget` | integer | No | — | Max tokens for response. Progressively strips content to fit budget. |
+
+### `smem_situation`
+
+One-shot snapshot of the current working situation: active session task, top 3 recent decisions, open blockers, gap detection. Replaces smem_recap + multiple smem_recall calls when resuming a session. Pure read — never mutates state.
+
+| Parameter | Type | Required | Default | Description |
+|-----------|------|----------|---------|-------------|
+| `compact` | boolean | No | — | Return compact response (strip metadata hints, truncate lists). Saves 60-80% tokens. |
+| `token_budget` | integer | No | — | Max tokens for response. Progressively strips content to fit budget. |
+
 ---
 
-*Auto-generated by `scripts/gen_mcp_docs.py` from `tool_schemas.py` — 53 tools.*
+*Auto-generated by `scripts/gen_mcp_docs.py` from `tool_schemas.py` — 56 tools.*
