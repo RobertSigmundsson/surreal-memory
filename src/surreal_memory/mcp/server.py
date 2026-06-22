@@ -24,6 +24,7 @@ import asyncio
 import json
 import logging
 import sys
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from surreal_memory import __version__
@@ -533,6 +534,29 @@ _TOOL_CALL_TIMEOUT = 30.0  # seconds
 _MAX_MESSAGE_SIZE = 10 * 1024 * 1024  # 10 MB
 
 
+def _running_under_plugin() -> bool:
+    """Detect whether this MCP server was launched from a Claude Code plugin.
+
+    Plugins ship their own ``hooks.json`` that Claude Code loads directly, so the
+    MCP server must NOT also inject hooks into ``~/.claude/settings.json`` — else
+    every hook fires twice (issue #169).
+
+    Heuristic: the plugin cache lives at
+    ``~/.claude/plugins/cache/<marketplace>/surreal-memory/``. If that directory
+    exists, the plugin is installed and owns hook registration.
+    """
+    cache_root = Path.home() / ".claude" / "plugins" / "cache"
+    if not cache_root.is_dir():
+        return False
+    try:
+        for marketplace_dir in cache_root.iterdir():
+            if (marketplace_dir / "surreal-memory").is_dir():
+                return True
+    except OSError:
+        return False
+    return False
+
+
 def _lazy_init() -> None:
     """Run first-time setup if Surreal-Memory has never been initialized.
 
@@ -552,8 +576,16 @@ def _lazy_init() -> None:
     try:
         setup_config(data_dir)
         setup_brain(data_dir)
-        hook_status = setup_hooks_claude()
-        logger.info("Surreal-Memory: first-time auto-init complete (hook: %s)", hook_status)
+        if _running_under_plugin():
+            logger.info(
+                "Surreal-Memory: first-time auto-init complete (plugin detected, "
+                "skipping hook injection — plugin hooks.json owns registration)"
+            )
+        else:
+            hook_status = setup_hooks_claude()
+            logger.info(
+                "Surreal-Memory: first-time auto-init complete (hook: %s)", hook_status
+            )
     except Exception:
         logger.debug("Surreal-Memory: auto-init failed (non-critical)", exc_info=True)
 

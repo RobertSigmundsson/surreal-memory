@@ -194,6 +194,12 @@ _ALL_TOOL_SCHEMAS: list[dict[str, Any]] = [
                     "never synced to cloud, excluded from consolidation. "
                     "Use for scratch notes, debugging context, temporary reasoning.",
                 },
+                "verbose_extraction": {
+                    "type": "boolean",
+                    "description": "Surface concept-extraction observability stats "
+                    "(dropped_short, dropped_noise, dropped_duplicate_entity) in the response. "
+                    "Default: false. Useful for debugging the noise filter or measuring memory hygiene.",
+                },
             },
             "required": ["content"],
         },

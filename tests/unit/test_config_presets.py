@@ -19,9 +19,9 @@ from surreal_memory.unified_config import (
 
 
 class TestListPresets:
-    def test_returns_three_presets(self) -> None:
+    def test_returns_all_presets(self) -> None:
         presets = list_presets()
-        assert len(presets) == 3
+        assert len(presets) == 4
 
     def test_each_has_name_and_description(self) -> None:
         for p in list_presets():
@@ -34,6 +34,7 @@ class TestListPresets:
         assert "safe-cost" in names
         assert "balanced" in names
         assert "max-recall" in names
+        assert "chat-heavy" in names
 
 
 class TestGetPreset:

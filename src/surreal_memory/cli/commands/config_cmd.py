@@ -13,7 +13,7 @@ config_app = typer.Typer(help="Configuration management")
 def preset_cmd(
     name: Annotated[
         str,
-        typer.Argument(help="Preset name: safe-cost, balanced, max-recall"),
+        typer.Argument(help="Preset name: safe-cost, balanced, max-recall, chat-heavy"),
     ] = "",
     list_available: Annotated[
         bool,
