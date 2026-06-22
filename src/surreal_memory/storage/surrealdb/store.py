@@ -51,7 +51,13 @@ def _is_auth_error(exc: Exception) -> bool:
 
 
 def _to_surreal_id(record_id: str) -> str:
-    """Convert a UUID to a valid SurrealDB record name (alphanumeric + _-)."""
+    """Convert a record ID to a valid SurrealDB record name (alphanumeric + _-).
+
+    Strips any existing table prefix (e.g. 'neuron:abc-123' -> 'abc_123')
+    to prevent doubling when the caller later prepends 'neuron:'.
+    """
+    if ":" in record_id:
+        record_id = record_id.rsplit(":", 1)[1]
     return record_id.replace("-", "_")
 
 
