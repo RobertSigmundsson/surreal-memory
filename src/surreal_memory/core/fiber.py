@@ -7,6 +7,7 @@ from datetime import datetime
 from typing import Any
 from uuid import uuid4
 
+from surreal_memory.utils.tag_normalizer import normalize_tags_lower
 from surreal_memory.utils.timeutils import utcnow
 
 
@@ -124,6 +125,10 @@ class Fiber:
         effective_agent = agent_tags or set()
         if tags is not None and not auto_tags and not agent_tags:
             effective_agent = tags
+
+        # Normalize case at ingestion boundary so storage is always lowercase
+        effective_auto = normalize_tags_lower(effective_auto)
+        effective_agent = normalize_tags_lower(effective_agent)
 
         return cls(
             id=fiber_id or str(uuid4()),

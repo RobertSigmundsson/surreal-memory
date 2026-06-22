@@ -3,6 +3,10 @@
 Normalizes tags at ingestion time to prevent semantic drift. Uses a curated
 synonym map for common equivalences and falls back to SimHash fuzzy matching
 for near-duplicates.
+
+``normalize_tags_lower`` is the lightweight primitive used at every read/write
+boundary to make tag matching case-insensitive without imposing the full
+synonym-normalization pipeline.
 """
 
 from __future__ import annotations
@@ -10,6 +14,23 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from surreal_memory.utils.simhash import hamming_distance, simhash
+
+
+def normalize_tags_lower(tags: set[str]) -> set[str]:
+    """Return *tags* with every element lowercased.
+
+    This is the lightweight primitive applied at every write and read boundary
+    to make tag matching case-insensitive.  It does **not** perform synonym
+    mapping — use :class:`TagNormalizer` for that.
+
+    Args:
+        tags: Arbitrary set of tag strings.
+
+    Returns:
+        New set where each tag is ``tag.lower()``.
+    """
+    return {t.lower() for t in tags}
+
 
 # Canonical tag → known synonyms/aliases
 SYNONYM_MAP: dict[str, list[str]] = {

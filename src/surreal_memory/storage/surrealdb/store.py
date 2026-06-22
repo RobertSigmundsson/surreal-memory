@@ -900,7 +900,9 @@ class SurrealDBStorage(
 
         # Post-filter for complex conditions
         if tags:
-            fibers = [f for f in fibers if tags.issubset(f.tags)]
+            # Normalize query tags to lowercase so "KB" matches fibers stored as "kb"
+            normalized_tags = {t.lower() for t in tags}
+            fibers = [f for f in fibers if normalized_tags.issubset(f.tags)]
         if time_overlaps:
             start, end = time_overlaps
             # Normalize to naive UTC for comparison
