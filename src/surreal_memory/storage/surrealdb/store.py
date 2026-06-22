@@ -589,8 +589,8 @@ class SurrealDBStorage(
             brain_id=brain_id,
             nid=sid,
         )
-        # Delete state
-        await self._query(f"DELETE neuron_state:{sid}")
+        # Delete state (record id is state_<sid>, matching the writer in add_neuron)
+        await self._query(f"DELETE neuron_state:state_{sid}")
 
         try:
             await conn.delete(f"neuron:{sid}")
@@ -616,7 +616,7 @@ class SurrealDBStorage(
         conn = self._ensure_conn()
         sid = _to_surreal_id(neuron_id)
         try:
-            result = await conn.select(f"neuron_state:{sid}")
+            result = await conn.select(f"neuron_state:state_{sid}")
             if result:
                 return _row_to_neuron_state(result[0] if isinstance(result, list) else result)
         except Exception:
@@ -640,7 +640,7 @@ class SurrealDBStorage(
         if state.refractory_until:
             update_data["refractory_until"] = state.refractory_until
 
-        await conn.merge(f"neuron_state:{sid}", update_data)
+        await conn.merge(f"neuron_state:state_{sid}", update_data)
 
     # ================================================================
     # Synapse Operations
