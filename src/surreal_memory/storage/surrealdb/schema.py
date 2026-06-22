@@ -54,10 +54,15 @@ DEFINE FIELD created_at        ON neuron_state TYPE datetime DEFAULT time::now()
 DEFINE INDEX idx_state_neuron  ON neuron_state FIELDS brain_id, neuron_id UNIQUE;
 
 -- Synapses (graph edges between neurons)
+-- Edge endpoints live in source_id/target_id (the fields the store reads and
+-- writes); they are declared here so the schema matches what is persisted, and
+-- the source/target indexes below cover the columns lookups actually use.
 DEFINE TABLE synapse SCHEMAFULL;
 DEFINE FIELD id           ON synapse TYPE string;
 DEFINE FIELD brain_id     ON synapse TYPE string DEFAULT 'default';
 DEFINE FIELD type         ON synapse TYPE string;
+DEFINE FIELD source_id    ON synapse TYPE string;
+DEFINE FIELD target_id    ON synapse TYPE string;
 DEFINE FIELD weight       ON synapse TYPE float DEFAULT 1.0;
 DEFINE FIELD direction    ON synapse TYPE string DEFAULT 'forward';
 DEFINE FIELD metadata     ON synapse TYPE object DEFAULT {};
@@ -65,12 +70,8 @@ DEFINE FIELD created_at   ON synapse TYPE datetime DEFAULT time::now();
 DEFINE FIELD last_activated    ON synapse TYPE option<datetime>;
 DEFINE FIELD reinforced_count  ON synapse TYPE int DEFAULT 0;
 DEFINE INDEX idx_synapse_brain ON synapse FIELDS brain_id;
-DEFINE INDEX idx_synapse_source ON synapse FIELDS brain_id, out;
-DEFINE INDEX idx_synapse_target ON synapse FIELDS brain_id, in;
-
--- Synapse edge connections (for graph traversal)
-DEFINE TABLE connects_to SCHEMAFULL;
-DEFINE FIELD brain_id ON connects_to TYPE string;
+DEFINE INDEX idx_synapse_source ON synapse FIELDS brain_id, source_id;
+DEFINE INDEX idx_synapse_target ON synapse FIELDS brain_id, target_id;
 
 -- Fibers (memory clusters / signal pathways)
 DEFINE TABLE fiber SCHEMAFULL;

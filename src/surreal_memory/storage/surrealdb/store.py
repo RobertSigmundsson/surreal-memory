@@ -235,8 +235,9 @@ class SurrealDBStorage(
 ):
     """SurrealDB-backed storage for Surreal-Memory.
 
-    Multi-model: documents (neurons), graphs (synapses via RELATE),
-    and vector search (HNSW via embedding_vec) all in one database.
+    Multi-model: documents (neurons), graphs (synapses linking neurons via
+    source_id/target_id), and vector search (HNSW via embedding_vec) all in
+    one database.
 
     Usage:
         storage = SurrealDBStorage(url="http://localhost:8001", ...)
@@ -588,12 +589,6 @@ class SurrealDBStorage(
             brain_id=brain_id,
             nid=sid,
         )
-        # Delete related edges
-        await self._query(
-            "DELETE connects_to WHERE out = $src OR in = $tgt",
-            src=f"neuron:{sid}",
-            tgt=f"neuron:{sid}",
-        )
         # Delete state
         await self._query(f"DELETE neuron_state:{sid}")
 
@@ -672,17 +667,6 @@ class SurrealDBStorage(
             "reinforced_count": synapse.reinforced_count,
         }
         await conn.insert("synapse", record_data)
-
-        # Create graph edge for traversal
-        try:
-            await self._query(
-                "RELATE neuron:$src -> connects_to -> neuron:$tgt SET brain_id = $brain_id",
-                src=ss,
-                tgt=st,
-                brain_id=brain_id,
-            )
-        except Exception:
-            pass
 
         await self._record_change_internal("synapse", synapse.id, "insert", synapse)
         return synapse.id
