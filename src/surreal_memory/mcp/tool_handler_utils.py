@@ -22,13 +22,18 @@ _MAX_TAG_LENGTH = 100
 def _parse_tags(args: dict[str, Any], *, max_items: int = _MAX_RECALL_TAGS) -> set[str] | None:
     """Parse and validate tags from MCP tool arguments.
 
+    Tag strings are lowercased so that callers querying "KB" match fibers
+    stored as "kb" and vice-versa (case-insensitive tag matching).
+
     Returns a set of valid tag strings, or None if no valid tags provided.
     """
+    from surreal_memory.utils.tag_normalizer import normalize_tags_lower
+
     raw_tags = args.get("tags")
     if not raw_tags or not isinstance(raw_tags, list):
         return None
     tags = {t for t in raw_tags[:max_items] if isinstance(t, str) and 0 < len(t) <= _MAX_TAG_LENGTH}
-    return tags or None
+    return normalize_tags_lower(tags) or None
 
 
 def _require_brain_id(storage: NeuralStorage) -> str:

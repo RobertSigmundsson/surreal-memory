@@ -79,9 +79,14 @@ def _fiber_matches_tags(
     fiber: dict[str, Any],
     required_tags: frozenset[str],
 ) -> bool:
-    """Return True if the fiber carries ANY of the required tags."""
-    fiber_tags = set(fiber.get("tags", []))
-    return bool(fiber_tags & required_tags)
+    """Return True if the fiber carries ANY of the required tags.
+
+    Both the fiber's tags and the query tags are lowercased before comparison
+    so that "KB" matches a fiber tagged "kb" regardless of original casing.
+    """
+    fiber_tags = {t.lower() for t in fiber.get("tags", [])}
+    normalized_required = frozenset(t.lower() for t in required_tags)
+    return bool(fiber_tags & normalized_required)
 
 
 def _fiber_matches_salience(
