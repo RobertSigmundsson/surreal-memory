@@ -586,9 +586,7 @@ def _lazy_init() -> None:
             )
         else:
             hook_status = setup_hooks_claude()
-            logger.info(
-                "Surreal-Memory: first-time auto-init complete (hook: %s)", hook_status
-            )
+            logger.info("Surreal-Memory: first-time auto-init complete (hook: %s)", hook_status)
     except Exception:
         logger.debug("Surreal-Memory: auto-init failed (non-critical)", exc_info=True)
 

@@ -2005,11 +2005,11 @@ async def _migrate_brain_runtime_config(
     customizations there. Failures are logged and swallowed — config migration
     must never break recall.
     """
-    overrides = config.brain.runtime_overrides()
-    if not overrides:
-        return
-
     try:
+        overrides = config.brain.runtime_overrides()
+        if not overrides:
+            return
+
         from surreal_memory.utils.timeutils import utcnow
 
         current = {f.name: getattr(brain.config, f.name) for f in dataclasses.fields(brain.config)}
