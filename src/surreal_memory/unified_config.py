@@ -13,6 +13,7 @@ Brain data is stored in ~/.surrealmemory/brains/<name>.db (SQLite)
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import json
 import logging
 import os
@@ -217,7 +218,16 @@ def _load_embedding_settings(data: dict[str, Any]) -> EmbeddingSettings:
 
 @dataclass
 class BrainSettings:
-    """Settings for brain behavior."""
+    """Settings for brain behavior.
+
+    The explicit fields are the historical keys exposed via ``[brain]`` in
+    ``config.toml``. ``extras`` captures any additional ``[brain]`` keys that map
+    onto ``core.brain.BrainConfig`` fields added after this class was first
+    defined (e.g. ``tag_match_boost``, ``rrf_k``, …), so new BrainConfig knobs
+    become config-toml-controllable without a parallel field for each one
+    (issue #168). Unknown keys are filtered against BrainConfig's field set, so
+    typos in ``config.toml`` do not crash brain creation.
+    """
 
     decay_rate: float = 0.1
     reinforcement_delta: float = 0.05
@@ -225,6 +235,18 @@ class BrainSettings:
     max_spread_hops: int = 4
     max_context_tokens: int = 1500
     freshness_weight: float = 0.0
+    extras: dict[str, Any] = field(default_factory=dict)
+
+    _EXPLICIT_KEYS: ClassVar[frozenset[str]] = frozenset(
+        {
+            "decay_rate",
+            "reinforcement_delta",
+            "activation_threshold",
+            "max_spread_hops",
+            "max_context_tokens",
+            "freshness_weight",
+        }
+    )
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -234,10 +256,12 @@ class BrainSettings:
             "max_spread_hops": self.max_spread_hops,
             "max_context_tokens": self.max_context_tokens,
             "freshness_weight": self.freshness_weight,
+            **self.extras,
         }
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> BrainSettings:
+        extras = {k: v for k, v in data.items() if k not in cls._EXPLICIT_KEYS}
         return cls(
             decay_rate=data.get("decay_rate", 0.1),
             reinforcement_delta=data.get("reinforcement_delta", 0.05),
@@ -245,7 +269,52 @@ class BrainSettings:
             max_spread_hops=data.get("max_spread_hops", 4),
             max_context_tokens=data.get("max_context_tokens", 1500),
             freshness_weight=data.get("freshness_weight", 0.0),
+            extras=extras,
         )
+
+    def to_brain_config_kwargs(self, embedding: EmbeddingSettings | None = None) -> dict[str, Any]:
+        """Build kwargs for ``core.brain.BrainConfig`` from this settings instance.
+
+        Combines the explicit BrainSettings fields, embedding-derived fields, and
+        any ``extras`` keys that match a real BrainConfig field name. Unknown
+        extras are dropped so ``BrainConfig(**kwargs)`` is safe.
+        """
+        from surreal_memory.core.brain import BrainConfig
+
+        valid_fields = {f.name for f in dataclasses.fields(BrainConfig)}
+        kwargs: dict[str, Any] = {
+            "decay_rate": self.decay_rate,
+            "reinforcement_delta": self.reinforcement_delta,
+            "activation_threshold": self.activation_threshold,
+            "max_spread_hops": self.max_spread_hops,
+            "max_context_tokens": self.max_context_tokens,
+            "freshness_weight": self.freshness_weight,
+        }
+        if embedding is not None:
+            kwargs.update(
+                {
+                    "embedding_enabled": embedding.enabled,
+                    "embedding_provider": embedding.provider,
+                    "embedding_model": embedding.model,
+                    "embedding_similarity_threshold": embedding.similarity_threshold,
+                }
+            )
+        for key, value in self.extras.items():
+            if key in valid_fields and key not in kwargs:
+                kwargs[key] = value
+        return kwargs
+
+    def runtime_overrides(self) -> dict[str, Any]:
+        """Return only ``extras`` keys that match real BrainConfig fields.
+
+        Used by storage init to layer ``config.toml [brain]`` over a
+        previously-stored brain config on upgrade (issue #168). The explicit
+        fields are excluded because legacy brains may have customized them.
+        """
+        from surreal_memory.core.brain import BrainConfig
+
+        valid_fields = {f.name for f in dataclasses.fields(BrainConfig)}
+        return {key: value for key, value in self.extras.items() if key in valid_fields}
 
 
 @dataclass
@@ -1920,6 +1989,50 @@ async def list_available_brains() -> list[str]:
     return config.list_brains()
 
 
+async def _migrate_brain_runtime_config(
+    storage: NeuralStorage,
+    brain: Any,
+    config: UnifiedConfig,
+) -> None:
+    """Layer ``config.toml [brain]`` extras over an already-stored brain.config.
+
+    Brains created on older versions store BrainConfig fields that existed at
+    creation time; newer fields fall back to BrainConfig defaults on load, so a
+    ``[brain]`` knob set in ``config.toml`` is silently ignored (issue #168).
+    This applies any ``extras`` keys from ``BrainSettings`` to the stored brain
+    config and persists the patched brain. Only ``extras`` keys are applied — the
+    explicit fields are left untouched because legacy brains may carry per-brain
+    customizations there. Failures are logged and swallowed — config migration
+    must never break recall.
+    """
+    try:
+        overrides = config.brain.runtime_overrides()
+        if not overrides:
+            return
+
+        from surreal_memory.utils.timeutils import utcnow
+
+        current = {f.name: getattr(brain.config, f.name) for f in dataclasses.fields(brain.config)}
+        diff = {k: v for k, v in overrides.items() if current.get(k) != v}
+        if not diff:
+            return
+
+        patched_config = dataclasses.replace(brain.config, **diff)
+        patched_brain = dataclasses.replace(brain, config=patched_config, updated_at=utcnow())
+        await storage.save_brain(patched_brain)
+        logger.info(
+            "Brain %r config migrated from config.toml [brain] extras: %s",
+            brain.name,
+            sorted(diff.keys()),
+        )
+    except Exception:
+        logger.debug(
+            "Brain runtime config migration failed for %r (non-fatal)",
+            getattr(brain, "name", "?"),
+            exc_info=True,
+        )
+
+
 async def _get_sqlite_storage(
     config: UnifiedConfig,
     name: str,
@@ -1965,20 +2078,11 @@ async def _get_sqlite_storage(
         if brain is None:
             from surreal_memory.core.brain import BrainConfig
 
-            brain_config = BrainConfig(
-                decay_rate=config.brain.decay_rate,
-                reinforcement_delta=config.brain.reinforcement_delta,
-                activation_threshold=config.brain.activation_threshold,
-                max_spread_hops=config.brain.max_spread_hops,
-                max_context_tokens=config.brain.max_context_tokens,
-                freshness_weight=config.brain.freshness_weight,
-                embedding_enabled=config.embedding.enabled,
-                embedding_provider=config.embedding.provider,
-                embedding_model=config.embedding.model,
-                embedding_similarity_threshold=config.embedding.similarity_threshold,
-            )
+            brain_config = BrainConfig(**config.brain.to_brain_config_kwargs(config.embedding))
             brain = Brain.create(name=name, config=brain_config, brain_id=name)
             await storage.save_brain(brain)
+        else:
+            await _migrate_brain_runtime_config(storage, brain, config)
 
         storage.set_brain(brain.id)
         _storage_cache[cache_key] = storage
@@ -2035,6 +2139,8 @@ async def _get_surrealdb_storage(config: UnifiedConfig, name: str) -> NeuralStor
     if brain is None:
         brain = Brain.create(name, brain_id=name)
         await storage.save_brain(brain)
+    else:
+        await _migrate_brain_runtime_config(storage, brain, config)
 
     # Brains are addressed by name in this store (neurons carry brain_id as a
     # plain string), so the brain context stays the name — never brain.id,

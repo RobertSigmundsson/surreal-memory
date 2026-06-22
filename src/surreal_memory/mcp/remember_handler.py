@@ -722,6 +722,10 @@ class RememberHandler:
         if alert_info:
             response.update(alert_info)
 
+        # Opt-in concept-extraction observability (c088eaf) — drop counts from pipeline_steps
+        if bool(args.get("verbose_extraction", False)) and result.extraction_stats is not None:
+            response["extraction_stats"] = result.extraction_stats
+
         return response
 
     async def _remember_batch(self, args: dict[str, Any]) -> dict[str, Any]:
