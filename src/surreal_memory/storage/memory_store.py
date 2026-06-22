@@ -251,6 +251,7 @@ class InMemoryStorage(
         target_id: str | None = None,
         type: SynapseType | None = None,
         min_weight: float | None = None,
+        limit: int | None = None,
     ) -> list[Synapse]:
         brain_id = self._get_brain_id()
         results: list[Synapse] = []
@@ -266,6 +267,8 @@ class InMemoryStorage(
                 continue
             results.append(synapse)
 
+        if limit is not None:
+            return results[:limit]
         return results
 
     async def get_synapses_for_neurons(

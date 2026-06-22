@@ -100,6 +100,7 @@ class SQLiteSynapseMixin:
         target_id: str | None = None,
         type: SynapseType | None = None,
         min_weight: float | None = None,
+        limit: int | None = None,
     ) -> list[Synapse]:
         conn = self._ensure_read_conn()
         brain_id = self._get_brain_id()
@@ -123,7 +124,11 @@ class SQLiteSynapseMixin:
             query += " AND weight >= ?"
             params.append(min_weight)
 
-        query += " LIMIT 10000"
+        if limit is not None:
+            query += " LIMIT ?"
+            params.append(limit)
+        else:
+            query += " LIMIT 10000"
 
         async with conn.execute(query, params) as cursor:
             rows = await cursor.fetchall()

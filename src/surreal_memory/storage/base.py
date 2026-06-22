@@ -304,6 +304,7 @@ class NeuralStorage(ABC):
         target_id: str | None = None,
         type: SynapseType | None = None,
         min_weight: float | None = None,
+        limit: int | None = None,
     ) -> list[Synapse]:
         """
         Find synapses matching criteria.
@@ -313,6 +314,7 @@ class NeuralStorage(ABC):
             target_id: Filter by target neuron
             type: Filter by synapse type
             min_weight: Filter by minimum weight
+            limit: Optional cap on number of returned synapses
 
         Returns:
             List of matching synapses
