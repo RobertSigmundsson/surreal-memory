@@ -598,6 +598,14 @@ class ConsolidationEngine:
             states = await self._storage.get_neuron_states_batch(batch_ids)
 
             for neuron in batch:
+                # Never auto-prune pinned neurons, whether isolated (orphan) or
+                # dead. The dead-neuron path already honored pinned, but the
+                # orphan path short-circuited above it, so pinned isolated
+                # neurons were permanently deleted. Hoist the guard so it
+                # protects both paths.
+                if neuron.id in pinned_neuron_ids:
+                    continue
+
                 is_orphan = (
                     neuron.id not in connected_neuron_ids and neuron.id not in fiber_neuron_ids
                 )
@@ -606,9 +614,7 @@ class ConsolidationEngine:
                     orphan_ids.append(neuron.id)
                     continue
 
-                # Dead neuron: has connections but never accessed, old enough, not pinned
-                if neuron.id in pinned_neuron_ids:
-                    continue
+                # Dead neuron: has connections but never accessed, old enough
                 state = states.get(neuron.id)
                 freq = state.access_frequency if state else 0
                 if freq > 0:

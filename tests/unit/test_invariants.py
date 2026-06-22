@@ -178,6 +178,38 @@ class TestOrphanDefinitionConsistency:
         expected_rate = 2 / 9
         assert report.orphan_rate == pytest.approx(expected_rate, abs=0.01)
 
+    @pytest.mark.asyncio
+    async def test_pinned_orphan_not_pruned(self, mixed_storage: InMemoryStorage) -> None:
+        """A pinned isolated neuron must survive consolidation prune.
+
+        Regression: the orphan path short-circuited before the pinned guard,
+        so pinned isolated neurons were permanently deleted while connected-but-
+        dead neurons were protected. Pinning must protect both.
+        """
+
+        # InMemoryStorage has no pin store; expose pinned ids the way the engine
+        # probes for them (hasattr check on get_pinned_neuron_ids).
+        async def _pinned() -> set[str]:
+            return {"n-orphan-1"}
+
+        mixed_storage.get_pinned_neuron_ids = _pinned  # type: ignore[attr-defined]
+
+        config = ConsolidationConfig(
+            prune_min_inactive_days=0.0,
+            prune_weight_threshold=1.0,
+            prune_isolated_neurons=True,
+        )
+        engine = ConsolidationEngine(mixed_storage, config)
+        await engine.run(strategies=[ConsolidationStrategy.PRUNE], dry_run=False)
+
+        # Pinned orphan survives; the unpinned orphan is still pruned.
+        assert await mixed_storage.get_neuron("n-orphan-1") is not None, (
+            "Pinned isolated neuron must not be pruned"
+        )
+        assert await mixed_storage.get_neuron("n-orphan-2") is None, (
+            "Unpinned orphan should still be pruned"
+        )
+
 
 # ── 2. Sanity smoke: health metrics match raw counts ─────────────
 
