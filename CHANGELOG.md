@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.4.0] — 2026-06-22
+
+All changes in this release were contributed by [@RobertSigmundsson](https://github.com/RobertSigmundsson), who adopted surreal-memory as the production memory engine of the Uruboros multi-agent swarm. Huge thanks.
+
+### Added
+
+- `get_synapses(..., limit=None)` — optional cap on returned synapses, mirroring `find_neurons`. Bounds memory/latency on dense graphs (consolidation, replay). (#26)
+- `GeminiEmbedding` honours `GOOGLE_GEMINI_BASE_URL` / `GOOGLE_GEMINI_API_VERSION` for gateway/proxy routing. (#27)
+
+### Fixed
+
+- **Activation persistence restored:** `neuron_state` records are addressed as `neuron_state:state_<sid>` on read/update/delete, matching the writer in `add_neuron`. The missing `state_` prefix made every state read miss and every update a silent no-op, leaving the activation→decay→tiering→consolidation loop dormant. (#29, re-scoped from #16)
+- Never auto-prune pinned isolated (orphan) neurons; the pinned guard now covers both the orphan and dead-neuron prune paths. (#17)
+- Pin `surrealdb` SDK to `>=2.0.0,<3.0.0`; the 2.x API is required and the old `>=0.4.0` floor allowed incompatible installs with opaque `AttributeError`s. (#18)
+- `GeminiEmbedding.embed_batch` wraps each text in its own content, fixing N-texts→1-embedding under `google-genai >= 2.0` (which broke `reindex`). (#19)
+- Tolerant neuron-type parsing; an unknown stored `type` falls back to `concept` with a warning instead of breaking recall for the whole brain. (#20)
+- Remove leftover literal `{{}}` in nine `SCHEMA_SQL` DEFAULT clauses (invalid SurrealQL, so the DEFAULTs silently never applied). (#21)
+- Default `synapse.brain_id` to `'default'` (was undeclared → NONE-coercion when omitted). (#22)
+- `_to_surreal_id` strips an existing table prefix to prevent `neuron:neuron:…` id doubling (all three copies). (#23)
+- Add `FORWARD`/`BACKWARD` to the `Direction` enum so the `'forward'` default in `_row_to_synapse` is valid (was a latent `ValueError`). (#24)
+- Drop the write-only `connects_to` edge table; declare `source_id`/`target_id` on the synapse table and repoint the source/target indexes at those populated columns (Discussion #15, option A). (#25)
+
 ## [2.3.2] — 2026-06-01
 
 ### Fixed
