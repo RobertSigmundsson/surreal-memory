@@ -5,10 +5,36 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-> **Source of truth:** [`CHANGELOG.md`](https://github.com/acidkill/surreal-memory/blob/main/CHANGELOG.md) in the repository root.
-> This page mirrors that file for the MkDocs site.
+> **Source of truth:** [`CHANGELOG.md`](https://github.com/acidkill/surreal-memory/blob/main/CHANGELOG.md)
+> in the repository root. This page covers the **surreal-memory** (post-fork) release line. The full
+> history — including the pre-fork upstream [neural-memory](https://github.com/nhadaututtheky/neural-memory)
+> v4.x → v0.x — lives in that root file.
 
 ## [Unreleased]
+
+## [2.5.0] — 2026-06-23
+
+### Added
+
+- **`chat-heavy` config preset** for conversational agents (fast decay, recency-biased, compact). (#31)
+- **`smem_offload` / `smem_inflate` / `smem_situation` MCP tools** — ephemeral tool-output offload +
+  one-shot session snapshot (agent ergonomics). (#31)
+- **`prefer_recent` recall flag** and **`verbose_extraction` remember flag**. (#31)
+- **`[brain]` config extras pass-through** so new `BrainConfig` knobs are config-controllable. (#31, upstream #168)
+- **Case-insensitive tag matching** at all write/read boundaries. (#33)
+- **Dashboard Storage tab rebuilt for SurrealDB** — live backend status (URL, namespace, database,
+  health, counts) via new `GET /api/dashboard/storage/status`. (#34)
+
+### Changed
+
+- **Lighter PostToolUse hook** (stdlib-only, noise filter, lock-safe append, Codex session id). (#32)
+- **Plugin hook de-duplication** — plugin installs no longer double-register hooks. (#31, upstream #169)
+- **MCP tool count is now 56** (was 53).
+
+### Removed
+
+- **Dead dashboard Storage migration UI** (`MigrationCard` / `MigrationProgress`) — SurrealDB-only,
+  the migration flow was removed. (#34)
 
 ### Maintenance
 
@@ -16,6 +42,352 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   their mode bits drift from `100644` (regular) to `100755` (executable), likely due to a
   `core.fileMode` mismatch on the host filesystem. Zero content changes — this commit restores
   the intended permission state so future diffs reflect only real code changes.
+
+## [2.4.0] — 2026-06-22
+
+All changes in this release were contributed by [@RobertSigmundsson](https://github.com/RobertSigmundsson), who adopted surreal-memory as the production memory engine of the Uruboros multi-agent swarm. Huge thanks.
+
+### Added
+
+- `get_synapses(..., limit=None)` — optional cap on returned synapses, mirroring `find_neurons`. Bounds memory/latency on dense graphs (consolidation, replay). (#26)
+- `GeminiEmbedding` honours `GOOGLE_GEMINI_BASE_URL` / `GOOGLE_GEMINI_API_VERSION` for gateway/proxy routing. (#27)
+
+### Fixed
+
+- **Activation persistence restored:** `neuron_state` records are addressed as `neuron_state:state_<sid>` on read/update/delete, matching the writer in `add_neuron`. The missing `state_` prefix made every state read miss and every update a silent no-op, leaving the activation→decay→tiering→consolidation loop dormant. (#29, re-scoped from #16)
+- Never auto-prune pinned isolated (orphan) neurons; the pinned guard now covers both the orphan and dead-neuron prune paths. (#17)
+- Pin `surrealdb` SDK to `>=2.0.0,<3.0.0`; the 2.x API is required and the old `>=0.4.0` floor allowed incompatible installs with opaque `AttributeError`s. (#18)
+- `GeminiEmbedding.embed_batch` wraps each text in its own content, fixing N-texts→1-embedding under `google-genai >= 2.0` (which broke `reindex`). (#19)
+- Tolerant neuron-type parsing; an unknown stored `type` falls back to `concept` with a warning instead of breaking recall for the whole brain. (#20)
+- Remove leftover literal `{{}}` in nine `SCHEMA_SQL` DEFAULT clauses (invalid SurrealQL, so the DEFAULTs silently never applied). (#21)
+- Default `synapse.brain_id` to `'default'` (was undeclared → NONE-coercion when omitted). (#22)
+- `_to_surreal_id` strips an existing table prefix to prevent `neuron:neuron:…` id doubling (all three copies). (#23)
+- Add `FORWARD`/`BACKWARD` to the `Direction` enum so the `'forward'` default in `_row_to_synapse` is valid (was a latent `ValueError`). (#24)
+- Drop the write-only `connects_to` edge table; declare `source_id`/`target_id` on the synapse table and repoint the source/target indexes at those populated columns (Discussion #15, option A). (#25)
+
+## [2.3.2] — 2026-06-01
+
+### Fixed
+- **SurrealDB auth fail-fast** — `SurrealDBStorage.initialize()` and `_reconnect()` now
+  raise `StorageAuthError` (actionable) instead of propagating the raw SDK
+  `NotAllowedError`. The MCP server surfaces this as JSON-RPC code `-32001` with a
+  hint pointing to `SURREALDB_PASS` and `smem doctor --fix`, replacing the opaque
+  `-32000 "failed unexpectedly"` that made bad-credential failures invisible.
+- **Default password unified** — the silent default `SURREALDB_PASS=root` (which never
+  matched the Docker default `surrealmemory`) is replaced by a single source of truth
+  in `storage/surrealdb/connection.py`. Both `store.py` and `unified_config.py` now
+  derive the default from this module, eliminating the drift that caused clean-install
+  auth failures.
+
+### Added
+- **`storage/surrealdb/connection.py`** (new module) — `SurrealSettings.from_env()`,
+  `StorageAuthError`, `is_credential_error()`, `build_mcp_env()`; single source of
+  truth for all SurrealDB connection defaults.
+- **Claude Desktop MCP support** — `smem init` and `smem setup mcp` now write the
+  `surreal-memory` entry (including the full `env` block with `SURREALDB_PASS`) to
+  `claude_desktop_config.json` on Linux, macOS, and Windows. Existing entries without
+  `env` are backfilled automatically.
+- **`env` block in all MCP configs** — `find_smem_command()` always returns an `env`
+  dict so newly written Claude Code and Cursor configs include SurrealDB connection
+  variables, preventing the "empty env" bug on clean installs.
+- **`smem doctor` SurrealDB checks** — two new diagnostic checks:
+  - `SurrealDB connection` (TIER_CORE): live auth test with 5-second timeout; FAIL
+    with actionable fix on `StorageAuthError`.
+  - `MCP env completeness` (TIER_RECOMMENDED): verifies `SURREALDB_PASS` is present
+    in the `env` block of each MCP client config.
+  - `smem doctor --fix` backfills missing env in all detected client configs.
+- **`_warn_missing_surreal_pass()`** — one-time warning when `storage=surrealdb` is
+  active but `SURREALDB_PASS` is unset.
+
+### Changed
+- `_check_brain` and `_check_schema_version` in `smem doctor` now return `SKIP`
+  (not `FAIL`) when the SurrealDB backend is active — those checks are SQLite-only.
+- `setup_mcp_claude()` uses JSON write path exclusively (the `claude mcp add` CLI
+  does not support the `env` block). Behaviour from the user perspective is identical.
+- `SURREALDB_PASS` default (`surrealmemory`) documented in installation and
+  contributing guides.
+
+## [2.3.1] — 2026-05-31
+
+### Fixed
+- **Dashboard ⇄ CLI metric parity** — `SurrealDBStorage.get_enhanced_stats` now
+  returns a `synapse_stats` block (per-type counts), so `DiagnosticsEngine`
+  computes `diversity` and `recall_confidence` on the SurrealDB backend exactly
+  as it does on SQLite. Previously both were `0` on SurrealDB, so the dashboard
+  and the `smem` CLI reported different health grades (e.g. F vs D) for the same
+  brain.
+- **Consistent brain grade across endpoints** — `/api/dashboard/brains` now runs
+  diagnostics like `/api/dashboard/stats`, so the Brains table and the stats
+  cards report the same grade. Per-brain analysis runs sequentially to avoid
+  racing the shared SurrealDB storage singleton.
+- **Resilient SurrealDB connection** — `SurrealDBStorage._query` re-authenticates
+  and retries once on an expired/closed connection (HTTP 401), so long-lived MCP
+  and CLI processes survive SurrealDB restarts and root-token expiry instead of
+  failing every subsequent call.
+- **Accurate orphan rate** — `DiagnosticsEngine.analyze` pins the storage brain
+  context before its reads, preventing a false high orphan rate when multiple
+  brains are analyzed concurrently.
+
+### Added
+- **SQLite misconfiguration guard** — emit a loud, one-time warning when the
+  active storage backend resolves to SQLite, with a targeted message when
+  SurrealDB connection vars are set. surreal-memory targets SurrealDB; this
+  surfaces the "memories silently written to a local SQLite brain that diverges
+  from the SurrealDB the dashboard reads" footgun instead of failing silently.
+
+### Changed
+- Pin the `surrealdb` Docker image to `v3.1.1` in `docker-compose.surrealdb.yml`.
+
+## [2.3.0] — 2026-05-29
+
+### Added
+- **SurrealDB tool-event storage** — new `tool_events` table (schema v6) brings the
+  SurrealDB backend to parity with SQLite. Powers the dashboard **Tool Stats** page
+  and consolidation's tool-usage pattern mining on the SurrealDB backend (previously
+  raised `AttributeError`).
+
+### Fixed
+- **Dashboard is fully free** — removed leftover Pro-tier gating that survived the
+  SurrealDB-only switch. **Evolution** and **Visualize** no longer show a "PRO FEATURE"
+  overlay, the **Embedding Provider** settings are editable (no 403), and **Settings →
+  General** reports a `FULL` license with no upgrade prompt.
+- **Storage page** — rebuilt for the SurrealDB-only model. It now shows the active
+  SurrealDB backend, neuron/synapse/fiber counts, and tier distribution from the live
+  `/stats` + `/tier-stats` endpoints, instead of calling the removed `/storage/status`
+  endpoint that left the page blank.
+- **Brain lookup by name** — `SurrealDBStorage.get_brain` now matches the `name` field,
+  fixing an orphan-row leak where the bootstrap re-created a fresh brain on every start
+  (active brain reported 0 neurons even when the store held data).
+- **Dashboard brain enumeration** — `/api/dashboard/stats` and `/api/dashboard/brains`
+  now list brains from the active SurrealDB store (`list_available_brains`) instead of
+  only local SQLite fixture files, so the dashboard no longer shows zero brains.
+
+### Changed
+- `UnifiedConfig.is_pro()` always returns `True` and `/api/dashboard/license` reports the
+  `full` tier — Surreal-Memory is fully free; every feature is unlocked for everyone.
+- A fresh process now honors `SURREAL_MEMORY_STORAGE` before a `config.toml` exists, so it
+  no longer caches a SQLite singleton while the environment asks for SurrealDB.
+
+## [2.2.0] — 2026-05-28
+
+### Added
+- **Embedding env overrides** — the unified config now honors
+  `SURREAL_MEMORY_EMBEDDING_ENABLED` / `_PROVIDER` / `_MODEL` /
+  `_SIMILARITY_THRESHOLD` (precedence: env > `config.toml` > default), so the
+  MCP server and CLI follow the embedding provider set in their environment.
+- **`smem reindex`** — (re)embed a brain's neurons with the effective provider.
+  Flags: `--dry-run`, `--missing-only` (default) / `--all`, `--batch-size`;
+  idempotent and fail-soft per neuron.
+
+### Changed
+- **Effective config wins** — embedding `enabled`/`provider`/`model` now resolve
+  from the effective config (`config.toml` + env) instead of the stale stored
+  `brain.config`. Fixes embeddings silently staying disabled after a user edits
+  their config/env. `smem_health` now reports the effective embedding state.
+
+### Performance
+- The Stop hook no longer loads a local `sentence-transformers` model on every
+  session end (it was the dominant session-save latency). Semantic dedup uses a
+  local Ollama server when one is running, otherwise it is skipped.
+
+## [2.1.0] — 2026-05-28
+
+### Added
+- **Project-aware memory hooks** — SessionStart, PreCompact, and Stop hooks scope
+  captured memories to the current project (git repo basename as `project_id`);
+  SessionStart injects only the current project's memories.
+- **Task-context hook** — new `smem-hook-task-context` entry point persists a rich,
+  structured per-task note as one project-scoped `context` memory.
+- **SurrealDB Project entity** — `add_project` / `get_project` / `get_project_by_name`
+  / `list_projects` / `update_project` / `delete_project` restored on the SurrealDB
+  backend (parity broken by the v2.0.0 SurrealDB-only refactor); new `project` table,
+  schema version 5.
+- `get_project_memories` declared on the `NeuralStorage` base interface.
+
+### Fixed
+- **Connection close** — `SurrealDBStorage.close()` tolerates transports that don't
+  implement `close()` (the HTTP connection raises `NotImplementedError`), fixing a
+  long-running MCP server degrading to "No brain configured".
+- **CLI regression** — restored `surreal_memory/utils/sandbox.py`; `smem` no longer
+  fails with `ModuleNotFoundError` (regression from the v2.0.0 refactor).
+- **Embedding pipeline hardening** — retry/backoff, embedding-capability probe, and
+  removal of a decommissioned default model.
+- **Latent recall bug** — save hooks persist the verbatim text as the fiber summary,
+  so SessionStart actually injects context (previously `fiber.summary`/`essence` were
+  always `None`).
+- Cross-backend parity test fixture (`connect()` → `initialize()`, and skip when the
+  optional `surrealdb` package is absent).
+
+### Documentation
+- README: new **Embeddings** section (Gemini `gemini-embedding-001` recommended; local
+  `sentence-transformers` `all-MiniLM-L6-v2` / `paraphrase-multilingual-MiniLM-L12-v2`
+  as the no-API-key fallback; Ollama / OpenAI / OpenRouter; `auto` detection).
+- Fixed rename-rot ("What's Different From NeuralMemory?", `~/.neuralmemory` migration)
+  and corrected counts: 15 memory types, 41 synapse types, 5500+ tests.
+- INSTALL_PROMPT: fixed stale repository URLs; Gemini recommended (not required) with a
+  documented local no-key path.
+- `.env.example`, `AGENTS.md`, `CONTRIBUTING.md` corrections.
+
+## [2.0.0] — 2026-05-27
+
+### Removed — InfinityDB Pro chain + SQLite/InMemory demoted to test fixtures (BREAKING)
+
+Surreal-Memory is now **SurrealDB-only** on the public surface. The
+InfinityDB Pro plugin chain is gone; SQLite and InMemory remain in the
+tree but only as internal test infrastructure — they are no longer
+documented, no longer offered through the CLI, and no longer reachable
+through any public configuration path.
+
+Deletions:
+- `src/surreal_memory/cli/commands/migrate.py` (no alternative backends
+  to migrate to).
+- `tests/unit/test_infinitydb_integration.py`.
+- `tests/unit/test_storage_migration_api.py`.
+- ~400 lines of Storage Management code in
+  `src/surreal_memory/server/routes/dashboard_api.py`:
+  `MigrationJobStatus`, `StorageStatusResponse`,
+  `StartMigrationRequest`, `SetBackendRequest`, the
+  `GET /storage/status`, `POST /storage/migrate`,
+  `GET /storage/migrate/{job_id}`, `POST /storage/backend` endpoints,
+  `_run_migration_task`, `_open_sqlite_storage`,
+  `_open_infinitydb_storage`.
+
+Code surgery:
+- `src/surreal_memory/cli/main.py`: stopped importing/registering
+  `migrate`.
+- `src/surreal_memory/cli/commands/storage.py`: rewritten. Only
+  `smem storage status` remains; it probes the SurrealDB connection
+  instead of describing SQLite/InfinityDB files. `storage switch` is
+  gone — nothing to switch between.
+- `src/surreal_memory/cli/commands/shared.py`: removed the
+  "Pro activated -> upgrade to InfinityDB" hint block.
+- `src/surreal_memory/engine/consolidation.py`: removed
+  `ConsolidationStrategy.SMART_MERGE` and `_smart_merge_pro`.
+- `src/surreal_memory/engine/retrieval.py`: `"cone"` strategy now logs
+  a debug message and falls back to classic activation.
+- `src/surreal_memory/mcp/stats_handler.py`,
+  `src/surreal_memory/mcp/sync_handler.py`,
+  `src/surreal_memory/server/app.py`: removed every "Pro tip:
+  InfinityDB ..." upsell.
+- `src/surreal_memory/unified_config.py`: removed
+  `_get_infinitydb_storage`, the `infinitydb` dispatch branch, and the
+  InfinityDB-directory fall-through in `list_brains()`.
+- `src/surreal_memory/storage/factory.py`: dropped `_try_pro_storage`.
+- `src/surreal_memory/plugins/__init__.py`,
+  `src/surreal_memory/plugins/base.py`,
+  `src/surreal_memory/plugins/community.py`: dropped
+  `get_storage_class()`.
+
+Test-only surface markings:
+- `src/surreal_memory/storage/sqlite_store.py` and
+  `src/surreal_memory/storage/memory_store.py` now carry an explicit
+  TEST FIXTURE ONLY header so contributors don't mistake them for
+  production paths.
+
+Config and docs:
+- `.env.example`: `SURREAL_MEMORY_STORAGE=surrealdb` is uncommented and
+  the comment explains that `sqlite` is not a production option.
+- `docs/landing/pro.md`: dropped the InfinityDB row from the backend
+  table.
+- `ROADMAP.md`: current-state line updated.
+- `dashboard/src/i18n/en.json` + `vi.json`: dropped
+  `storage.infinitydb*` / `enableInfinitydb` / migration UI strings.
+- `docs/getting-started/cli-reference.md`, `docs/api/mcp-tools.md`:
+  regenerated.
+
+Verification:
+- `ruff check src/ tests/` clean.
+- `mypy src/ --ignore-missing-imports` clean (334 files).
+- `pytest --co tests/unit`: 5515 tests collected, zero import errors.
+- `pytest test_unified_config + test_dx_wizard + test_brain_isolation +
+  test_health_fixes`: 93/93 passed locally.
+
+**BREAKING CHANGE:** anyone running the Pro InfinityDB chain on v1.x
+must export their brain to JSON and re-import on SurrealDB before
+upgrading. `smem migrate` and `smem storage switch` are gone — point
+users at `docker-compose.surrealdb.yml` instead.
+
+### Removed — FalkorDB and PostgreSQL backends (BREAKING)
+
+Surreal-Memory is **SurrealDB-only** from v2.0.0 onwards. The opt-in
+FalkorDB and PostgreSQL backends added in upstream v4.7 are gone:
+
+- Deleted `src/surreal_memory/storage/falkordb/` (8 mixin files + store).
+- Deleted `src/surreal_memory/storage/postgres/` (11 mixin files + store).
+- Deleted `docker-compose.falkordb.yml` and `docker-compose.postgres.yml`.
+- Deleted `scripts/postgres-init.sh`.
+- Deleted FalkorDB integration test `tests/integration/test_falkordb_spreading.py`.
+- Deleted FalkorDB storage tests in `tests/storage/test_falkordb_*.py` (5 files)
+  and the entire `tests/storage/postgres/` suite (5 files + conftest).
+- Deleted `tests/unit/test_postgres_migration.py`.
+
+Code paths trimmed:
+
+- `pyproject.toml`: dropped `[project.optional-dependencies] falkordb` and
+  `postgres` extras (and the matching ruff per-file-ignores rule).
+- `src/surreal_memory/unified_config.py`: removed `FalkorDBConfig`,
+  `PostgresConfig`, `_get_falkordb_storage`, `_get_postgres_storage`, the
+  cached module globals, the TOML serializers, and the dispatch branches.
+  `_VALID_STORAGE_BACKENDS` is now `{"sqlite", "surrealdb"}` (InfinityDB
+  remains available via the Pro plugin).
+- `src/surreal_memory/utils/config.py`: dropped `falkordb_*` fields.
+- `src/surreal_memory/storage/__init__.py`: removed lazy `__getattr__`
+  branches for `FalkorDBStorage` / `PostgreSQLStorage`.
+- `src/surreal_memory/cli/commands/migrate.py`: rewritten — only
+  `infinitydb` and `sqlite` (no-op) targets remain; FalkorDB/Postgres
+  targets emit a deprecation hint pointing to docker-compose.surrealdb.yml.
+- `src/surreal_memory/cli/commands/storage.py`: help text reads
+  "SQLite, SurrealDB, InfinityDB" only.
+- `docker-compose.yml`: removed the `falkordb` optional service; readers
+  are routed to `docker-compose.surrealdb.yml`.
+- `.env.example`: removed `FALKORDB_*` block; storage options list shows
+  `sqlite, surrealdb`.
+
+Docs synced:
+
+- `ROADMAP.md`: replaced "PostgreSQL Backend Parity" milestone with
+  "SurrealDB Backend Parity"; updated current-state line and the C1
+  tiered storage section.
+- `docs/contributing.md`, `docs/FAQ.md`, `docs/landing/pro.md`,
+  `docs/promo/reddit-localllama.md`: backend table and prose updated to
+  reflect the new surface.
+- `docs/getting-started/cli-reference.md`: regenerated from the new
+  `smem migrate` signature.
+
+**Migration:** if you were running on PostgreSQL or FalkorDB on v1.x,
+export your brain to JSON before upgrading and re-import on SurrealDB
+(or stay on v1.x — that line is still supported for one minor release).
+
+### Fixed — Concept Neuron Noise Filtering (#156)
+
+Short and casual text no longer creates low-signal concept neurons that pollute
+recall context. `ExtractConceptNeuronsStep` now:
+
+- Raises min keyword length from 3 to 4 chars (filters `AI`, `OS`, `It`)
+- Scales concept floor from 5 to 3 for content under 100 chars
+- Skips keywords already captured as entity neurons (avoids duplicates)
+- Filters known noise words (`use`, `run`, `new`, `got`, etc.)
+
+Aligns with the F2 Fiber Precision & Density roadmap item.
+
+### Fixed — Advisory hints stripped from machine output (#155)
+
+CLI update notices are now skipped for machine-oriented commands
+(`context`, `recall`, `stats`, `status`) and any invocation with `--json`.
+MCP `strip_hints` now strips advisory fields even in non-compact mode.
+Adds an Agent Memory Governance guide.
+
+### Added — Contributor dev diagnostics (#154)
+
+`smem doctor --dev` now reports source checkout detection, editable install
+status, dev dependencies, and checkout/package version parity for
+contributors working from a source checkout.
+
+### Fixed — Coroutine warning on sandbox fail-fast (#153)
+
+CLI commands that fail fast in restricted sandboxes no longer emit
+`RuntimeWarning: coroutine was never awaited`. The unawaited command
+coroutine is now explicitly closed before re-raising the sandbox exit.
 
 ## [1.0.0] — 2026-05-04
 
@@ -59,3 +431,9 @@ via the bundled community plugin.
 - **150+ new parametrised tests** across four new test files covering `get_project_memories`
   parity, `suggest_memory_type` coverage (128 tests), remember-handler all-types (19 tests), and
   SurrealDB typed-memory integration (31 tests, skipped without `SURREALDB_URL`).
+
+---
+
+> **Earlier history.** Releases before the fork (upstream neural-memory **v4.53.4 → v0.x**) are not
+> repeated here. See the full [`CHANGELOG.md`](https://github.com/acidkill/surreal-memory/blob/main/CHANGELOG.md)
+> in the repository root.

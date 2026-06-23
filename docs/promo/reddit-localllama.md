@@ -1,63 +1,63 @@
 # Reddit r/LocalLLaMA Post
 
-**Title:** Open-source graph-based memory for AI coding agents — spreading activation instead of RAG (no API keys needed)
+**Title:** Open-source graph memory for AI agents — spreading activation instead of RAG, $0/query, no API keys needed
 
 **Body:**
 
-I've been working on an alternative approach to giving AI agents persistent memory. Instead of the usual RAG pipeline (embed → vector search → return chunks), I built a system that stores memories as a neural graph and retrieves them through **spreading activation**.
+I've been working on an alternative approach to persistent memory for AI agents. Instead of the usual RAG pipeline (embed → vector search → return chunks), it stores memories as a neural graph and retrieves them through **spreading activation** — closer to how biological memory works than cosine similarity.
 
 ## The problem with RAG for agent memory
 
-RAG treats memory as a search problem: "find text similar to this query." It works, but it loses structure. When you ask "why did the outage happen?", RAG returns "JWT caused the outage" — but not *why* you chose JWT, who suggested it, or what it replaced.
+RAG treats memory as a search problem: "find text similar to this query." It works for documents, but it loses causal structure. When you ask "why did the outage happen?", RAG returns "JWT caused the outage" — but not *why* JWT was chosen, who suggested it, or what decision it replaced.
 
 ## Spreading activation approach
 
-Surreal-Memory stores everything as typed neurons connected by typed synapses (`CAUSED_BY`, `LEADS_TO`, `SUGGESTED_BY`, `RESOLVED_BY`, etc.). Recall works by:
+[Surreal-Memory](https://github.com/acidkill/surreal-memory) stores everything as typed neurons connected by 41 explicit synapse types (`CAUSED_BY`, `LEADS_TO`, `SUGGESTED_BY`, `RESOLVED_BY`, `CONTRADICTS`, ...). Recall works by:
 
 1. Activate seed neurons matching your query
 2. Activation spreads through synapses (weighted, with decay)
-3. Most-activated neurons form the response context
+3. Most-activated neurons surface as context
 
-This gives you multi-hop reasoning for free. "Why did the outage happen?" traces: `outage ← CAUSED_BY ← JWT ← SUGGESTED_BY ← Alice ← DECIDED_AT ← Tuesday meeting`.
+This gives you multi-hop causal reasoning. "Why did the outage happen?" traces: `outage ← CAUSED_BY ← JWT ← SUGGESTED_BY ← Alice ← DECIDED_AT ← Tuesday meeting`.
 
-**No embedding API calls needed.** Core recall is pure graph traversal with O(n) complexity on the local subgraph. Embeddings are optional (supports Ollama, sentence-transformers, Gemini free tier, OpenAI).
+**No embedding API calls required for core recall.** It's graph traversal. Embeddings are optional and local-first (Ollama, sentence-transformers, or nothing at all).
 
 ## Technical details
 
-- **Storage**: SQLite via aiosqlite (async), FTS5 for text search
-- **Graph**: 14 neuron types, 24 synapse types, fiber bundles for episodic grouping
+- **Storage**: SurrealDB multi-model backend (document + graph + vector HNSW in one DB — no separate vector store)
+- **Graph**: 15 memory types (fact, decision, error, insight, preference, workflow, todo, ...), 41 synapse types, fiber bundles for episodic grouping
 - **Retrieval**: Spreading activation with configurable decay, threshold, and max hops
-- **Consolidation**: Memory lifecycle — decay, reinforcement, pruning of orphan nodes
-- **Extraction**: Entity/keyword/temporal extraction, Vietnamese NLP support
-- **MCP server**: 53 tools (incl. cognitive reasoning), stdio + HTTP transport, works with Claude Code, Cursor, etc.
-- **Tests**: 3,976+, 67% coverage, CI with mypy + ruff + pytest
+- **Lifecycle**: Ebbinghaus decay, Hebbian reinforcement, sleep consolidation (ENRICH/PRUNE/MERGE/DREAM), 5-tier compression
+- **MCP server**: 56 tools (3-tool core: smem_remember, smem_recall, smem_health), stdio + HTTP, works with Claude Code, Cursor, Windsurf, Cline, Zed, Gemini CLI
+- **Pro features**: cone/HNSW vector search, smart merge, directional compression — all FREE via the bundled community plugin, no license keys
+- **Tests**: 5,500+ unit tests, 67%+ CI coverage, mypy + ruff + pytest
 
-## What makes it interesting for local LLM users
+## Why local/offline users care
 
-- **Zero API cost**: core recall doesn't need embeddings or LLM calls
-- **Ollama integration**: if you want embeddings, use your local Ollama instance
-- **Works with any MCP client**: not locked to Claude — any agent that speaks MCP
-- **Light**: single SQLite file, ~23MB for 1000+ memories with full graph
+- **$0.00/query**: core encode and recall make zero LLM or embedding API calls — works fully offline
+- **No API keys needed** for core operations
+- **Ollama support**: opt-in local embeddings if you want semantic similarity on top of graph traversal
+- **Single portable brain**: export/import JSON, brain versioning and transplant, multi-device sync via your own Cloudflare account (Merkle delta, encrypted)
+- **MIT licensed**: no paywalls, no telemetry, no vendor lock-in
+
+## Relationship to neural-memory
+
+Surreal-Memory is a fork of [nhadaututtheky/neural-memory](https://github.com/nhadaututtheky/neural-memory). It inherits the neuron/synapse/fiber architecture, spreading activation model, and the MCP tool surface from upstream (credit where it's due). The main differences: SurrealDB multi-model backend instead of SQLite; all Pro-tier features (vector search, smart merge, compression) unlocked free via the community plugin — upstream gates these behind a paid plan; and ongoing port of storage-agnostic upstream improvements.
 
 ## Install
 
 ```bash
-pip install surreal-memory
+# Core install
+pip install "surreal-memory[surrealdb]"
 
-# With local embeddings via Ollama
-pip install surreal-memory[embeddings]
-```
+# Claude Code plugin
+# /plugin marketplace add acidkill/surreal-memory
 
-Config for Ollama embeddings:
-```toml
-# ~/.surrealmemory/config.toml
-[embedding]
-enabled = true
-provider = "ollama"
-model = "nomic-embed-text"
+# Docker (recommended for persistent brain)
+docker compose -f docker-compose.surrealdb.yml up -d
 ```
 
 GitHub: https://github.com/acidkill/surreal-memory
-Architecture docs: https://acidkill.github.io/surreal-memory/
+Docs: https://acidkill.github.io/surreal-memory/
 
-The codebase is MIT licensed. Contributions welcome.
+MIT licensed. Early project — contributions welcome.
