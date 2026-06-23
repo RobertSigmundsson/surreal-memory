@@ -7,6 +7,53 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.5.0] — 2026-06-23
+
+Storage-agnostic improvements ported from upstream
+[nhadaututtheky/neural-memory](https://github.com/nhadaututtheky/neural-memory) and adapted
+to the SurrealDB-only backend, plus two follow-up fixes.
+
+### Added
+
+- **`chat-heavy` config preset** — a conversational-agent profile (Telegram/Discord/Slack):
+  faster decay, recency-biased recall, compact context. Apply with `smem config preset chat-heavy`. (#31)
+- **`smem_offload` / `smem_inflate` MCP tools** — store a large tool result as an ephemeral
+  neuron (24h TTL) and get back a compact `ref_id` + summary, then drill into the full content
+  on demand. Keeps bulky tool output out of the agent's context. (#31)
+- **`smem_situation` MCP tool** — one-shot snapshot of the working situation (active session
+  task, top recent decisions, open blockers), so an agent can resume context without chaining
+  `smem_recap` + multiple `smem_recall` calls. (#31)
+- **`prefer_recent` recall flag** — re-ranks matched fibers newest-first (by `time_end`, falling
+  back to `created_at`) for "current state" queries; off by default. (#31)
+- **`verbose_extraction` flag on `smem_remember`** — surfaces concept-extraction observability
+  counters (`dropped_short` / `dropped_noise` / `dropped_duplicate_entity`) so you can see why
+  concept neurons were filtered; off by default. (#31)
+- **`[brain]` config extras pass-through** — `BrainSettings` now forwards any `[brain]` key in
+  `config.toml` that maps to a real `BrainConfig` field, so new tuning knobs become
+  config-controllable without a parallel setting each, and already-stored brains pick them up
+  on load. (#31, upstream #168)
+- **Case-insensitive tag matching** — tags are normalized (lowercased) at every write and read
+  boundary, so `KB`, `kb`, and `Kb` all match. (#33)
+- **Dashboard Storage tab rebuilt for SurrealDB** — the Storage tab now shows live SurrealDB
+  backend status (URL, namespace, database, connection health, and neuron/fiber/synapse counts)
+  via the new `GET /api/dashboard/storage/status` endpoint. (#34)
+
+### Changed
+
+- **Lighter PostToolUse hook** — rewritten to be stdlib-only (no heavy imports on the hot path),
+  with a noise-tool fast-path filter, lock-safe JSONL append (POSIX `flock` / Windows fallback),
+  and `CODEX_SESSION_ID` support alongside `CLAUDE_SESSION_ID`. (#32)
+- **Plugin hook de-duplication** — when running as the Claude Code plugin, first-time init skips
+  `setup_hooks_claude()` so hooks are not registered twice (the plugin's own `hooks.json` owns
+  registration). (#31, upstream #169)
+- **MCP tool count is now 56** (was 53) with the three new agent-ergonomics tools above. (#31)
+
+### Removed
+
+- **Dead multi-backend dashboard Storage UI** — the legacy SQLite↔InfinityDB migration components
+  (`MigrationCard` / `MigrationProgress`) were removed; surreal-memory is SurrealDB-only, so the
+  migration flow no longer applies. (#34)
+
 ## [2.4.0] — 2026-06-22
 
 All changes in this release were contributed by [@RobertSigmundsson](https://github.com/RobertSigmundsson), who adopted surreal-memory as the production memory engine of the Uruboros multi-agent swarm. Huge thanks.

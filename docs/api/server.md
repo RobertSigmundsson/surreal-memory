@@ -452,6 +452,30 @@ Get brain file paths and disk usage.
 }
 ```
 
+### Storage Status
+
+#### GET /api/dashboard/storage/status
+
+Get the active storage backend and live connection status (SurrealDB-only since v2.0.0).
+Powers the dashboard **Storage** tab.
+
+**Response:**
+
+```json
+{
+  "backend": "surrealdb",
+  "url": "http://localhost:8001",
+  "namespace": "surreal_memory",
+  "database": "default",
+  "healthy": true,
+  "active_brain": "my-brain.v2",
+  "neuron_count": 0,
+  "fiber_count": 0,
+  "synapse_count": 0,
+  "health_grade": "F"
+}
+```
+
 ### Telegram Status
 
 #### GET /api/dashboard/telegram/status
