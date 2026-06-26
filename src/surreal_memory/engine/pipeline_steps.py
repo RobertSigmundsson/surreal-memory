@@ -121,6 +121,7 @@ class ExtractTimeNeuronsStep:
             neuron = Neuron.create(
                 type=NeuronType.TIME,
                 content=hint.original,
+                content_hash=simhash(hint.original),
                 metadata={
                     "absolute_start": hint.absolute_start.isoformat(),
                     "absolute_end": hint.absolute_end.isoformat(),
@@ -132,9 +133,11 @@ class ExtractTimeNeuronsStep:
             ctx.neurons_created.append(neuron)
 
         # Always create a timestamp neuron for reference time
+        ts_content = ctx.timestamp.strftime("%Y-%m-%d %H:%M")
         timestamp_neuron = Neuron.create(
             type=NeuronType.TIME,
-            content=ctx.timestamp.strftime("%Y-%m-%d %H:%M"),
+            content=ts_content,
+            content_hash=simhash(ts_content),
             metadata={
                 "absolute_start": ctx.timestamp.isoformat(),
                 "absolute_end": ctx.timestamp.isoformat(),
@@ -339,7 +342,7 @@ class ExtractConceptNeuronsStep:
         for keyword in valid_keywords:
             if keyword in existing_map:
                 continue
-            neuron = Neuron.create(type=NeuronType.CONCEPT, content=keyword)
+            neuron = Neuron.create(type=NeuronType.CONCEPT, content=keyword, content_hash=simhash(keyword))
             await storage.add_neuron(neuron)
             ctx.concept_neurons.append(neuron)
             ctx.neurons_created.append(neuron)
@@ -397,7 +400,7 @@ class ExtractActionNeuronsStep:
         for action_text in valid_actions:
             if action_text in existing_map:
                 continue
-            neuron = Neuron.create(type=NeuronType.ACTION, content=action_text)
+            neuron = Neuron.create(type=NeuronType.ACTION, content=action_text, content_hash=simhash(action_text))
             await storage.add_neuron(neuron)
             ctx.action_neurons.append(neuron)
             ctx.neurons_created.append(neuron)
@@ -455,7 +458,7 @@ class ExtractIntentNeuronsStep:
         for intent_text in valid_intents:
             if intent_text in existing_map:
                 continue
-            neuron = Neuron.create(type=NeuronType.INTENT, content=intent_text)
+            neuron = Neuron.create(type=NeuronType.INTENT, content=intent_text, content_hash=simhash(intent_text))
             await storage.add_neuron(neuron)
             ctx.intent_neurons.append(neuron)
             ctx.neurons_created.append(neuron)
