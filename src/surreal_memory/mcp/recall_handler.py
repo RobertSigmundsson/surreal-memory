@@ -271,6 +271,31 @@ class RecallHandler:
             exclude_ephemeral=permanent_only,
         )
 
+        # Reinforce on recall: bump access_frequency for the activated subgraph
+        # so lifecycle/decay + consolidation guards can tell hot from cold. The
+        # built-in reinforce (engine/retrieval.py) only fires for the top-10 at
+        # confidence>0.3 and is skipped on temporal/instant paths → access_freq
+        # stayed 0 for 100% of neurons. This covers every recall. Non-fatal.
+        try:
+            _sg = getattr(result, "subgraph", None)
+            _recalled = list(_sg.neuron_ids) if _sg and getattr(_sg, "neuron_ids", None) else []
+            if _recalled:
+                import dataclasses
+                from surreal_memory.utils.timeutils import utcnow as _utcnow
+                _states = await storage.get_neuron_states_batch(_recalled)
+                _now = _utcnow()
+                _updates = [
+                    dataclasses.replace(
+                        _st, access_frequency=_st.access_frequency + 1, last_activated=_now
+                    )
+                    for _st in (_states.get(_nid) for _nid in _recalled)
+                    if _st is not None
+                ]
+                if _updates:
+                    await storage.update_neuron_states_batch(_updates)
+        except Exception:
+            logger.debug("recall access_frequency bump failed (non-fatal)", exc_info=True)
+
         # Passive auto-capture on long queries
         if self.config.auto.enabled and len(query) >= 50:
             await self._passive_capture(query)
