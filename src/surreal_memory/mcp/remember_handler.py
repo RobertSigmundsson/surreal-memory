@@ -251,9 +251,13 @@ class RememberHandler:
                     logger.error("Encryption failed, refusing to store plaintext", exc_info=True)
                     return {"error": "Encryption failed — memory not stored. Check encryption key."}
 
-        # Write gate: reject low-quality content before encoding
+        # Write gate: score content; SHADOW logs the decision to gate_decision
+        # without blocking, ENFORCE rejects. Covers auto-capture (errors/todos/
+        # decisions/...) via is_auto_capture so we can tune before enforcing.
         write_gate_cfg = self.config.write_gate
-        if write_gate_cfg.enabled is True:
+        gate_mode = write_gate_cfg.effective_mode
+        if gate_mode != "off":
+            from surreal_memory.engine.gate_telemetry import log_gate_decision
             from surreal_memory.engine.quality_scorer import check_write_gate
 
             gate_result = check_write_gate(
@@ -264,9 +268,18 @@ class RememberHandler:
                 tags=args.get("tags"),
                 context=args.get("context") if isinstance(args.get("context"), dict) else None,
             )
-            if gate_result.rejected:
+            await log_gate_decision(
+                storage,
+                intent="auto" if is_auto_capture else "manual",
+                accepted=not gate_result.rejected,
+                reason=gate_result.rejection_reason or "accept",
+                score=gate_result.score,
+                mode=gate_mode,
+                content=content,
+            )
+            if gate_mode == "enforce" and gate_result.rejected:
                 logger.debug(
-                    "Write gate rejected: %s (score=%d)",
+                    "Write gate rejected: %s (score=%s)",
                     gate_result.rejection_reason,
                     gate_result.score,
                 )
