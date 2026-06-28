@@ -65,7 +65,10 @@ async def save_task_context(note: str, project_name: str | None) -> dict[str, An
         if matches:
             logger.debug("Auto-redacted %d matches in task-context note", len(matches))
 
-        encoder = MemoryEncoder(storage, brain.config)
+        from surreal_memory.engine.dedup import build_dedup_pipeline
+
+        dedup_pipeline = build_dedup_pipeline(config, storage)
+        encoder = MemoryEncoder(storage, brain.config, dedup_pipeline=dedup_pipeline)
         storage.disable_auto_save()
 
         result = await encoder.encode(
