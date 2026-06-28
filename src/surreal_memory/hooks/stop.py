@@ -360,7 +360,13 @@ async def capture_text(text: str, project_name: str | None = None) -> dict[str, 
         if not brain:
             return {"error": "No brain configured", "saved": 0}
 
-        encoder = MemoryEncoder(storage, brain.config)
+        # E-dedup: build + pass dedup_pipeline so stop-hook anchors are
+        # deduplicated like the remember path. Without it this encoder had no
+        # dedup, so identical "Session activity" summaries accumulated (x4 live).
+        from surreal_memory.engine.dedup import build_dedup_pipeline
+
+        dedup_pipeline = build_dedup_pipeline(config, storage)
+        encoder = MemoryEncoder(storage, brain.config, dedup_pipeline=dedup_pipeline)
         storage.disable_auto_save()
 
         auto_redact_severity = config.safety.auto_redact_min_severity
