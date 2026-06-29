@@ -296,6 +296,9 @@ class WriteGateConfig:
     min_length: int = 30  # reject content shorter than this
     min_quality_score: int = 3  # reject score below this (0-10 scale)
     auto_capture_min_score: int = 5  # stricter threshold for passive captures
+    # NOTE 2026-06-29: lowering this to 4 does NOT fix the false-reject — verified
+    # that terse noise scores the same (4) as real terse knowledge, so threshold
+    # tuning can't discriminate. Real fix is source-quality (structured captures).
     max_content_length: int = 2000  # reject wall-of-text above this
     reject_generic_filler: bool = True  # reject "done", "ok", "completed" etc.
 

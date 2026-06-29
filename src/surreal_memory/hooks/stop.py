@@ -391,6 +391,7 @@ async def capture_text(text: str, project_name: str | None = None) -> dict[str, 
                         gate_config=write_gate_cfg,
                         is_auto_capture=True,
                         memory_type=item.get("type"),
+                        tags=list(base_tags),  # gate must see the tags actually saved
                     )
                     await log_gate_decision(
                         storage,
@@ -456,6 +457,7 @@ async def capture_text(text: str, project_name: str | None = None) -> dict[str, 
                         gate_config=write_gate_cfg,
                         is_auto_capture=True,
                         memory_type="context",
+                        tags=list(base_tags) + ["session_summary"],  # match saved tags
                     )
                     await log_gate_decision(
                         storage,
