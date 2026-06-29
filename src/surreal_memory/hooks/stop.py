@@ -356,22 +356,25 @@ async def capture_text(text: str, project_name: str | None = None) -> dict[str, 
         if len(eligible) > 1:
             eligible = await _embedding_dedup(eligible)
 
-        # A — idempotency at source: drop fragments already captured this
-        # session. The Stop hook fires after every assistant turn and re-reads
-        # an overlapping transcript tail, so without this the same fragments
-        # are re-encoded every turn (the dominant memory-poisoning source).
+        # A+B — idempotency + near-dup at source: drop fragments already
+        # captured this session. The Stop hook fires after every assistant turn
+        # and re-reads an overlapping transcript tail, so without this the same
+        # (and near-identical) fragments are re-encoded every turn — the
+        # dominant memory-poisoning source.
         from surreal_memory.hooks.capture_state import (
-            content_key,
+            is_duplicate,
             load_seen,
             mark_seen,
             session_key,
         )
 
         _skey = session_key()
-        _seen = load_seen(_skey)
-        _captured_keys: list[str] = []
-        if _seen:
-            eligible = [it for it in eligible if content_key(it["content"]) not in _seen]
+        _seen_keys, _seen_sims = load_seen(_skey)
+        _captured: list[str] = []
+        if _seen_keys or _seen_sims:
+            eligible = [
+                it for it in eligible if not is_duplicate(it["content"], _seen_keys, _seen_sims)
+            ]
 
         brain = await storage.get_brain(config.current_brain)
         if not brain:
@@ -456,7 +459,7 @@ async def capture_text(text: str, project_name: str | None = None) -> dict[str, 
                 )
                 await storage.add_typed_memory(typed_mem)
                 saved.append(redacted_content[:60])
-                _captured_keys.append(content_key(content))
+                _captured.append(content)
             except Exception:
                 logger.debug("Failed to save stop-hook memory", exc_info=True)
                 continue
@@ -464,8 +467,8 @@ async def capture_text(text: str, project_name: str | None = None) -> dict[str, 
         # Always save a session summary if no patterns were detected
         if not saved:
             summary = _extract_session_summary(text)
-            # A — idempotency: skip a session summary already captured this session.
-            if summary and content_key(summary) in _seen:
+            # A+B — skip a session summary already captured (exact or near-dup).
+            if summary and is_duplicate(summary, _seen_keys, _seen_sims):
                 summary = None  # type: ignore[assignment]
             if summary and len(summary) > 30:
                 # Apply write gate to session summary too (SHADOW logs, ENFORCE drops)
@@ -518,12 +521,12 @@ async def capture_text(text: str, project_name: str | None = None) -> dict[str, 
                         )
                         await storage.add_typed_memory(typed_mem)
                         saved.append(redacted_summary[:60])
-                        _captured_keys.append(content_key(summary))
+                        _captured.append(summary)
                     except Exception:
                         logger.debug("Failed to save session summary", exc_info=True)
 
-        # A — persist idempotency state so next turn's re-read skips these.
-        mark_seen(_skey, _captured_keys)
+        # A+B — persist idempotency + near-dup state so next turn's re-read skips these.
+        mark_seen(_skey, _captured)
 
         await storage.batch_save()
 

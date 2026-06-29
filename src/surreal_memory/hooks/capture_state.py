@@ -1,27 +1,44 @@
-"""Per-session idempotency state for auto-capture hooks.
+"""Per-session idempotency + near-dup state for auto-capture hooks.
 
 The Stop hook fires after *every* assistant turn and PreCompact fires on
 each compaction; both re-read an overlapping transcript tail and run
 ``analyze_text_for_memories`` over it. Without memory of what was already
-captured, identical fragments (and session summaries, timestamps, paths)
-are re-encoded on every invocation — the dominant source of memory
-poisoning (duplicate fragments accumulating across turns).
+captured, identical (and near-identical) fragments — plus session
+summaries, timestamps, paths — are re-encoded on every invocation, the
+dominant source of memory poisoning (duplicate fragments accumulating
+across turns).
 
-This module provides a deterministic, dependency-free idempotency key:
-a per-session set of normalized-content hashes persisted to a small JSON
-file. A capture hook skips any fragment whose ``content_key`` was already
-saved in the same session.
+This module provides two deterministic, dependency-free guards, keyed per
+session:
+
+1. **Exact** (idempotency): a set of normalized-content md5 hashes. A
+   re-captured byte-identical fragment is skipped.
+2. **Near-dup**: a parallel list of SimHashes. A fragment within
+   ``NEAR_DUP_THRESHOLD`` Hamming bits of a previously captured one is
+   skipped too — catching trivial variants (timestamp tick, whitespace,
+   truncation) that exact hashing misses.
+
+The threshold is calibrated on real pairs from the live brain (normalized
+SimHash): trivial variants are small (whitespace/case = 0, punctuation
+<=7), whereas *distinct* valuable fragments score >=23 (real-auto 28–40,
+real-summary 23–38). A threshold of 7 leaves a 16-bit margin, so distinct
+content is never collapsed, and it matches the engine's existing dedup
+``simhash_threshold``. Larger single-fragment edits (truncation or an
+appended timestamp on a short fragment, 8–18 bits) are deliberately
+treated as *new* — they border on "different fragment", and the exact-key
+guard still catches byte-identical re-captures. The "same template,
+different content" trap (``completed X`` vs ``completed Y``) sits well
+above the threshold, so different events are kept apart.
 
 Design notes:
 - Fail-open: any error → treat content as not-seen. Losing real content is
   worse than tolerating a duplicate, so errors never block a capture.
-- Bounded: at most ``_MAX_HASHES_PER_SESSION`` hashes per session and
-  ``_MAX_SESSIONS`` sessions are retained (FIFO trim) so the file cannot
-  grow without bound.
-- Atomic-ish write: write to a temp file then ``replace`` to avoid a torn
-  state file if two hooks race.
+- Bounded: at most ``_MAX_HASHES_PER_SESSION`` entries per session and
+  ``_MAX_SESSIONS`` sessions (FIFO trim) so the file cannot grow without
+  bound.
+- Atomic-ish write: temp file then ``replace`` to avoid a torn state file.
 - Shared key: keyed on ``CLAUDE_SESSION_ID`` so Stop and PreCompact share
-  one seen-set and do not re-capture each other's writes.
+  one state and do not re-capture each other's writes.
 """
 
 from __future__ import annotations
@@ -33,17 +50,24 @@ import os
 import re
 from pathlib import Path
 
+from surreal_memory.utils.simhash import hamming_distance, simhash
+
 logger = logging.getLogger(__name__)
 
 # Bounded retention so the state file stays small.
 _MAX_HASHES_PER_SESSION = 2000
 _MAX_SESSIONS = 50
 
+# SimHash Hamming threshold for near-duplicates. Calibrated on live pairs
+# (normalized): trivial variants <=7, distinct-valuable >=23 (16-bit margin).
+# Matches the engine's existing dedup simhash_threshold.
+NEAR_DUP_THRESHOLD = 7
+
 _WS = re.compile(r"\s+")
 
 
 def _state_path() -> Path:
-    """Location of the JSON idempotency state file."""
+    """Location of the JSON state file."""
     data_dir = Path(os.environ.get("SURREAL_MEMORY_DIR", "")) or (Path.home() / ".surrealmemory")
     return data_dir / "capture_state.json"
 
@@ -52,8 +76,7 @@ def session_key(transcript_path: str | None = None) -> str:
     """Stable per-session key.
 
     Prefers ``CLAUDE_SESSION_ID`` (set by Claude Code); falls back to a hash
-    of the transcript path, then a constant. The fallback degrades safely:
-    worst case the seen-set is shared a bit too broadly within one machine.
+    of the transcript path, then a constant.
     """
     sid = os.environ.get("CLAUDE_SESSION_ID", "").strip()
     if sid:
@@ -63,14 +86,18 @@ def session_key(transcript_path: str | None = None) -> str:
     return "default"
 
 
-def content_key(content: str) -> str:
-    """Deterministic key for a fragment: whitespace-normalized, lowercased md5.
+def _normalize(content: str) -> str:
+    return _WS.sub(" ", content.strip().lower())
 
-    Re-captured fragments are byte-identical, so even a raw hash would match;
-    normalization additionally collapses trivial whitespace/case variants.
-    """
-    norm = _WS.sub(" ", content.strip().lower())
-    return hashlib.md5(norm.encode("utf-8")).hexdigest()
+
+def content_key(content: str) -> str:
+    """Deterministic exact key: whitespace-normalized, lowercased md5."""
+    return hashlib.md5(_normalize(content).encode("utf-8")).hexdigest()
+
+
+def content_simhash(content: str) -> int:
+    """SimHash of normalized content (same normalization as content_key)."""
+    return simhash(_normalize(content))
 
 
 def _load_all() -> dict:
@@ -85,19 +112,45 @@ def _load_all() -> dict:
         return {}
 
 
-def load_seen(skey: str) -> set[str]:
-    """Return the set of content keys already captured in this session."""
+def load_seen(skey: str) -> tuple[set[str], list[int]]:
+    """Return (exact content-keys, SimHashes) already captured this session."""
     entry = _load_all().get(skey, {})
-    hashes = entry.get("hashes", []) if isinstance(entry, dict) else []
-    return set(hashes) if isinstance(hashes, list) else set()
+    if not isinstance(entry, dict):
+        return set(), []
+    keys = entry.get("hashes", [])
+    sims = entry.get("simhashes", [])
+    key_set = set(keys) if isinstance(keys, list) else set()
+    sim_list = [s for s in sims if isinstance(s, int)] if isinstance(sims, list) else []
+    return key_set, sim_list
 
 
-def mark_seen(skey: str, new_keys: list[str]) -> None:
-    """Persist newly captured content keys for this session (bounded, atomic-ish).
+def is_duplicate(
+    content: str,
+    seen_keys: set[str],
+    seen_simhashes: list[int],
+    threshold: int = NEAR_DUP_THRESHOLD,
+) -> bool:
+    """True if content is an exact or near-duplicate of something seen this session.
 
-    Never raises — idempotency bookkeeping must not break a capture path.
+    Exact: normalized md5 already present. Near-dup: SimHash within
+    ``threshold`` Hamming bits of a previously captured fragment.
     """
-    if not new_keys:
+    if content_key(content) in seen_keys:
+        return True
+    if seen_simhashes:
+        sh = content_simhash(content)
+        if any(hamming_distance(sh, s) <= threshold for s in seen_simhashes):
+            return True
+    return False
+
+
+def mark_seen(skey: str, contents: list[str]) -> None:
+    """Persist newly captured contents (exact key + SimHash) for this session.
+
+    Accepts raw content strings (computes both keys). Bounded, atomic-ish,
+    and never raises — idempotency bookkeeping must not break a capture path.
+    """
+    if not contents:
         return
     try:
         ts = ""
@@ -109,20 +162,36 @@ def mark_seen(skey: str, new_keys: list[str]) -> None:
             ts = ""
 
         data = _load_all()
-        entry = data.get(skey, {})
-        existing = entry.get("hashes", []) if isinstance(entry, dict) else []
-        if not isinstance(existing, list):
-            existing = []
+        entry = data.get(skey, {}) if isinstance(data.get(skey), dict) else {}
+        keys = entry.get("hashes", [])
+        sims = entry.get("simhashes", [])
+        if not isinstance(keys, list):
+            keys = []
+        if not isinstance(sims, list):
+            sims = []
 
-        seen_existing = set(existing)
-        combined = existing + [k for k in new_keys if k not in seen_existing]
-        if len(combined) > _MAX_HASHES_PER_SESSION:
-            combined = combined[-_MAX_HASHES_PER_SESSION:]
-        data[skey] = {"hashes": combined, "ts": ts}
+        seen_k = set(keys)
+        for c in contents:
+            k = content_key(c)
+            if k in seen_k:
+                continue
+            seen_k.add(k)
+            keys.append(k)
+            sims.append(content_simhash(c))
+
+        # Bound both lists (FIFO; kept parallel by trimming the same tail count).
+        if len(keys) > _MAX_HASHES_PER_SESSION:
+            keys = keys[-_MAX_HASHES_PER_SESSION:]
+        if len(sims) > _MAX_HASHES_PER_SESSION:
+            sims = sims[-_MAX_HASHES_PER_SESSION:]
+        data[skey] = {"hashes": keys, "simhashes": sims, "ts": ts}
 
         # Bound the number of retained sessions (drop oldest by timestamp).
         if len(data) > _MAX_SESSIONS:
-            ordered = sorted(data.items(), key=lambda kv: kv[1].get("ts", "") if isinstance(kv[1], dict) else "")
+            ordered = sorted(
+                data.items(),
+                key=lambda kv: kv[1].get("ts", "") if isinstance(kv[1], dict) else "",
+            )
             data = dict(ordered[-_MAX_SESSIONS:])
 
         path = _state_path()

@@ -171,22 +171,25 @@ async def flush_text(text: str, project_name: str | None = None) -> dict[str, An
             for item in eligible
         ]
 
-        # A — idempotency at source: drop fragments already captured this
-        # session (shared seen-set with the Stop hook via CLAUDE_SESSION_ID).
-        # PreCompact re-reads an overlapping tail too, so this prevents the
-        # same fragments being re-encoded on each compaction.
+        # A+B — idempotency + near-dup at source: drop fragments already
+        # captured this session (shared state with the Stop hook via
+        # CLAUDE_SESSION_ID). PreCompact re-reads an overlapping tail too, so
+        # this prevents the same (and near-identical) fragments being
+        # re-encoded on each compaction.
         from surreal_memory.hooks.capture_state import (
-            content_key,
+            is_duplicate,
             load_seen,
             mark_seen,
             session_key,
         )
 
         _skey = session_key()
-        _seen = load_seen(_skey)
-        _captured_keys: list[str] = []
-        if _seen:
-            boosted = [it for it in boosted if content_key(it["content"]) not in _seen]
+        _seen_keys, _seen_sims = load_seen(_skey)
+        _captured: list[str] = []
+        if _seen_keys or _seen_sims:
+            boosted = [
+                it for it in boosted if not is_duplicate(it["content"], _seen_keys, _seen_sims)
+            ]
 
         # Get brain for encoder
         brain = await storage.get_brain(config.current_brain)
@@ -238,13 +241,13 @@ async def flush_text(text: str, project_name: str | None = None) -> dict[str, An
                 )
                 await storage.add_typed_memory(typed_mem)
                 saved.append(redacted_content[:60])
-                _captured_keys.append(content_key(content))
+                _captured.append(content)
             except Exception:
                 logger.debug("Failed to save flush memory", exc_info=True)
                 continue
 
-        # A — persist idempotency state so the next re-read skips these.
-        mark_seen(_skey, _captured_keys)
+        # A+B — persist idempotency + near-dup state so the next re-read skips these.
+        mark_seen(_skey, _captured)
 
         await storage.batch_save()
 
