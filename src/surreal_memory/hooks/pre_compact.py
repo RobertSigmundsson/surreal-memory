@@ -171,6 +171,23 @@ async def flush_text(text: str, project_name: str | None = None) -> dict[str, An
             for item in eligible
         ]
 
+        # A — idempotency at source: drop fragments already captured this
+        # session (shared seen-set with the Stop hook via CLAUDE_SESSION_ID).
+        # PreCompact re-reads an overlapping tail too, so this prevents the
+        # same fragments being re-encoded on each compaction.
+        from surreal_memory.hooks.capture_state import (
+            content_key,
+            load_seen,
+            mark_seen,
+            session_key,
+        )
+
+        _skey = session_key()
+        _seen = load_seen(_skey)
+        _captured_keys: list[str] = []
+        if _seen:
+            boosted = [it for it in boosted if content_key(it["content"]) not in _seen]
+
         # Get brain for encoder
         brain = await storage.get_brain(config.current_brain)
         if not brain:
@@ -221,9 +238,13 @@ async def flush_text(text: str, project_name: str | None = None) -> dict[str, An
                 )
                 await storage.add_typed_memory(typed_mem)
                 saved.append(redacted_content[:60])
+                _captured_keys.append(content_key(content))
             except Exception:
                 logger.debug("Failed to save flush memory", exc_info=True)
                 continue
+
+        # A — persist idempotency state so the next re-read skips these.
+        mark_seen(_skey, _captured_keys)
 
         await storage.batch_save()
 
