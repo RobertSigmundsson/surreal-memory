@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import logging
 from datetime import datetime
 from typing import TYPE_CHECKING, Any
@@ -13,11 +14,72 @@ from surreal_memory.utils.timeutils import utcnow
 
 if TYPE_CHECKING:
     from surreal_memory.engine.hooks import HookRegistry
+    from surreal_memory.engine.retrieval_types import RetrievalResult
     from surreal_memory.mcp.maintenance_handler import HealthPulse
     from surreal_memory.storage.base import NeuralStorage
     from surreal_memory.unified_config import UnifiedConfig
 
 logger = logging.getLogger(__name__)
+
+
+async def _apply_tier_trust_filter(
+    result: RetrievalResult,
+    storage: NeuralStorage,
+    *,
+    tier: Any | None,
+    min_trust: float | None,
+) -> RetrievalResult:
+    """Post-filter recall results by tier and/or trust_score (single DB pass).
+
+    Tier semantics: a fiber with no typed_memory row is treated as "warm".
+    - tier="warm" → keeps un-typed fibers (they default to warm)
+    - tier="hot"/"cold" → only fibers whose explicit tier matches
+    - default (tier=None) → exclude_cold: drop cold only (un-typed→warm→kept),
+      still recoverable via smem_recall(tier="cold").
+
+    Returns the result unchanged on any error (the filter is non-critical).
+    """
+    recall_tier = str(tier).lower().strip() if tier is not None else None
+    exclude_cold = recall_tier is None
+    needs_post_filter = (
+        min_trust is not None or recall_tier or exclude_cold
+    ) and result.fibers_matched
+    if not needs_post_filter:
+        return result
+    try:
+        passing_ids: set[str] = set()
+        for fid in result.fibers_matched:
+            # fibers_matched carries the SurrealDB record-id form (underscored);
+            # typed_memory.fiber_id is the canonical uuid (hyphenated). Normalize
+            # so the lookup matches — otherwise tm is always None and the filter
+            # silently no-ops (inverse of _to_surreal_id's hyphen→underscore).
+            tm = await storage.get_typed_memory(fid.replace("_", "-"))
+
+            # Trust filter
+            if min_trust is not None:
+                if tm is not None and tm.trust_score is not None:
+                    if tm.trust_score < min_trust:
+                        continue
+
+            # Tier filter
+            if recall_tier:
+                if tm is None:
+                    if recall_tier != "warm":
+                        continue
+                elif getattr(tm, "tier", "warm") != recall_tier:
+                    continue
+            elif exclude_cold:
+                # Default path: drop cold only (un-typed → warm → kept).
+                if tm is not None and getattr(tm, "tier", "warm") == "cold":
+                    continue
+
+            passing_ids.add(fid)
+
+        filtered_fibers = [f for f in result.fibers_matched if f in passing_ids]
+        return dataclasses.replace(result, fibers_matched=filtered_fibers)
+    except Exception:
+        logger.debug("Post-filter (trust/tier) failed (non-critical)", exc_info=True)
+        return result
 
 
 class RecallHandler:
@@ -281,6 +343,7 @@ class RecallHandler:
             _recalled = list(_sg.neuron_ids) if _sg and getattr(_sg, "neuron_ids", None) else []
             if _recalled:
                 import dataclasses
+
                 from surreal_memory.utils.timeutils import utcnow as _utcnow
                 _states = await storage.get_neuron_states_batch(_recalled)
                 _now = _utcnow()
@@ -388,56 +451,10 @@ class RecallHandler:
                 "confidence": result.confidence,
             }
 
-        # Post-filter by trust_score and/or tier (single pass to avoid redundant DB lookups).
-        # Tier semantics: fibers without a typed_memory row are treated as "warm" (the default).
-        # - tier="warm" → includes un-typed fibers (they default to warm)
-        # - tier="hot"/"cold" → excludes un-typed fibers (only explicit tier matches)
-        recall_tier = args.get("tier")
-        if recall_tier is not None:
-            recall_tier = str(recall_tier).lower().strip()
-        # C — cold is explicit-only: by default drop cold from recall unless the
-        # caller asks for tier="cold". The tier router sends session summaries
-        # and obvious noise to cold; this keeps them out of the default recall
-        # path while staying recoverable via smem_recall(tier="cold"). Un-typed
-        # fibers default to warm, so they are always kept.
-        exclude_cold = recall_tier is None
-        needs_post_filter = (
-            min_trust is not None or recall_tier or exclude_cold
-        ) and result.fibers_matched
-        if needs_post_filter:
-            try:
-                passing_ids: set[str] = set()
-                for fid in result.fibers_matched:
-                    tm = await storage.get_typed_memory(fid)
-
-                    # Trust filter
-                    if min_trust is not None:
-                        if tm is not None and tm.trust_score is not None:
-                            if tm.trust_score < min_trust:
-                                continue
-
-                    # Tier filter
-                    if recall_tier:
-                        if tm is None:
-                            if recall_tier != "warm":
-                                continue
-                        elif getattr(tm, "tier", "warm") != recall_tier:
-                            continue
-                    elif exclude_cold:
-                        # Default path: drop cold only (un-typed → warm → kept).
-                        if tm is not None and getattr(tm, "tier", "warm") == "cold":
-                            continue
-
-                    passing_ids.add(fid)
-
-                filtered_fibers = [f for f in result.fibers_matched if f in passing_ids]
-                result = (
-                    result._replace(fibers_matched=filtered_fibers)
-                    if hasattr(result, "_replace")
-                    else result
-                )
-            except Exception:
-                logger.debug("Post-filter (trust/tier) failed (non-critical)", exc_info=True)
+        # Post-filter recall results by tier and/or trust_score (cold is explicit-only).
+        result = await _apply_tier_trust_filter(
+            result, storage, tier=args.get("tier"), min_trust=min_trust
+        )
 
         # Exact mode: return raw neuron contents without truncation
         if recall_mode == "exact" and result.fibers_matched:
