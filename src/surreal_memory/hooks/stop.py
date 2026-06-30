@@ -367,6 +367,7 @@ async def capture_text(text: str, project_name: str | None = None) -> dict[str, 
             mark_seen,
             session_key,
         )
+        from surreal_memory.hooks.tier_router import route_tier
 
         _skey = session_key()
         _seen_keys, _seen_sims = load_seen(_skey)
@@ -456,6 +457,9 @@ async def capture_text(text: str, project_name: str | None = None) -> dict[str, 
                     source="stop_hook",
                     tags=set(base_tags),
                     project_id=project_id,
+                    # C — route, don't gate: low-value auto-captures land in cold
+                    # (kept, out of default recall). Conservative: only obvious noise.
+                    tier=route_tier(content, memory_type=mem_type_str, tags=base_tags),
                 )
                 await storage.add_typed_memory(typed_mem)
                 saved.append(redacted_content[:60])
@@ -518,6 +522,8 @@ async def capture_text(text: str, project_name: str | None = None) -> dict[str, 
                             source="stop_hook",
                             tags=set(summary_tags),
                             project_id=project_id,
+                            # C — session summaries → cold (kept, recoverable, out of default recall).
+                            tier=route_tier(redacted_summary, memory_type="context", tags=summary_tags),
                         )
                         await storage.add_typed_memory(typed_mem)
                         saved.append(redacted_summary[:60])

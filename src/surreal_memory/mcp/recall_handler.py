@@ -395,7 +395,15 @@ class RecallHandler:
         recall_tier = args.get("tier")
         if recall_tier is not None:
             recall_tier = str(recall_tier).lower().strip()
-        needs_post_filter = (min_trust is not None or recall_tier) and result.fibers_matched
+        # C — cold is explicit-only: by default drop cold from recall unless the
+        # caller asks for tier="cold". The tier router sends session summaries
+        # and obvious noise to cold; this keeps them out of the default recall
+        # path while staying recoverable via smem_recall(tier="cold"). Un-typed
+        # fibers default to warm, so they are always kept.
+        exclude_cold = recall_tier is None
+        needs_post_filter = (
+            min_trust is not None or recall_tier or exclude_cold
+        ) and result.fibers_matched
         if needs_post_filter:
             try:
                 passing_ids: set[str] = set()
@@ -414,6 +422,10 @@ class RecallHandler:
                             if recall_tier != "warm":
                                 continue
                         elif getattr(tm, "tier", "warm") != recall_tier:
+                            continue
+                    elif exclude_cold:
+                        # Default path: drop cold only (un-typed → warm → kept).
+                        if tm is not None and getattr(tm, "tier", "warm") == "cold":
                             continue
 
                     passing_ids.add(fid)

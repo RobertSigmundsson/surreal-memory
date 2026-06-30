@@ -182,6 +182,7 @@ async def flush_text(text: str, project_name: str | None = None) -> dict[str, An
             mark_seen,
             session_key,
         )
+        from surreal_memory.hooks.tier_router import route_tier
 
         _skey = session_key()
         _seen_keys, _seen_sims = load_seen(_skey)
@@ -238,6 +239,8 @@ async def flush_text(text: str, project_name: str | None = None) -> dict[str, An
                     source="pre_compact_hook",
                     tags=set(base_tags),
                     project_id=project_id,
+                    # C — route, don't gate: low-value auto-captures → cold (kept).
+                    tier=route_tier(content, memory_type=mem_type_str, tags=base_tags),
                 )
                 await storage.add_typed_memory(typed_mem)
                 saved.append(redacted_content[:60])
