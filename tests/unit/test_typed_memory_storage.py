@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import timedelta
+from typing import Any
 
 import pytest
 
@@ -15,6 +16,7 @@ from surreal_memory.core.memory_types import (
 )
 from surreal_memory.core.neuron import Neuron, NeuronType
 from surreal_memory.storage.memory_store import InMemoryStorage
+from surreal_memory.storage.surrealdb.typed_memory import SurrealDBTypedMemoryMixin
 from surreal_memory.utils.timeutils import utcnow
 
 
@@ -355,3 +357,94 @@ class TestCanonicalFiberId:
         from surreal_memory.storage.surrealdb.typed_memory import _to_canonical_fiber_id
 
         assert _to_canonical_fiber_id("") == ""
+
+
+_SIB_CANON = "63840762-cdfe-49c5-849e-eb0dc2f6b79f"
+_SIB_UNDER = "63840762_cdfe_49c5_849e_eb0dc2f6b79f"
+_SIB_PREF = f"fiber:{_SIB_UNDER}"
+
+
+class _CapturingTypedMemoryStore(SurrealDBTypedMemoryMixin):
+    """Minimal fake of the SurrealDB mixin: records the fiber_id reaching the SQL
+    layer and the record-id write/delete target, so the sibling-method
+    normalization (commit f4abd57) is locked at the unit level (the live
+    behavioural harness lives outside the test suite)."""
+
+    def __init__(self) -> None:
+        self.query_fiber_ids: list[str] = []
+        self.merge_targets: list[str] = []
+        self.delete_targets: list[str] = []
+
+    def _ensure_conn(self) -> Any:
+        return self
+
+    def _get_brain_id(self) -> str:
+        return "test-brain"
+
+    async def _query(self, sql: str, **params: Any) -> list[dict[str, Any]]:
+        if "fiber_id" in params:
+            self.query_fiber_ids.append(params["fiber_id"])
+        return [
+            {
+                "id": "typed_memory:x",
+                "fiber_id": params.get("fiber_id", ""),
+                "memory_type": "fact",
+                "priority": "5",
+                "metadata": {},
+                "tags": [],
+            }
+        ]
+
+    async def merge(self, target: str, data: dict[str, Any]) -> None:
+        self.merge_targets.append(target)
+
+    async def delete(self, target: str) -> None:
+        self.delete_targets.append(target)
+
+
+class TestSiblingFiberIdNormalization:
+    """The sibling write/delete lookups normalize every caller id-form to the
+    canonical hyphenated uuid AND build the record-id write/delete target from it
+    (commit f4abd57) — the inverse of _to_surreal_id, idempotent on canonical."""
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("form", [_SIB_CANON, _SIB_UNDER, _SIB_PREF])
+    async def test_delete_typed_memory_normalizes(self, form: str) -> None:
+        store = _CapturingTypedMemoryStore()
+        assert await store.delete_typed_memory(form) is True
+        assert store.query_fiber_ids == [_SIB_CANON]
+        assert store.delete_targets == [f"typed_memory:{_SIB_UNDER}"]
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("form", [_SIB_CANON, _SIB_UNDER, _SIB_PREF])
+    async def test_update_typed_memory_source_normalizes(self, form: str) -> None:
+        store = _CapturingTypedMemoryStore()
+        assert await store.update_typed_memory_source(form, "source:abc") is True
+        assert store.query_fiber_ids == [_SIB_CANON]
+        assert store.merge_targets == [f"typed_memory:{_SIB_UNDER}"]
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("form", [_SIB_CANON, _SIB_UNDER, _SIB_PREF])
+    async def test_promote_memory_type_normalizes(self, form: str) -> None:
+        store = _CapturingTypedMemoryStore()
+        assert await store.promote_memory_type(form, MemoryType.INSIGHT) is True
+        assert store.query_fiber_ids == [_SIB_CANON]
+        assert store.merge_targets == [f"typed_memory:{_SIB_UNDER}"]
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("form", [_SIB_CANON, _SIB_UNDER, _SIB_PREF])
+    async def test_get_expiring_memories_for_fibers_normalizes(self, form: str) -> None:
+        store = _CapturingTypedMemoryStore()
+        await store.get_expiring_memories_for_fibers([form])
+        assert store.query_fiber_ids == [_SIB_CANON]
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("form", [_SIB_CANON, _SIB_UNDER, _SIB_PREF])
+    async def test_update_typed_memory_normalizes(self, form: str) -> None:
+        store = _CapturingTypedMemoryStore()
+        tm = TypedMemory.create(
+            fiber_id=form, memory_type=MemoryType.INSIGHT, priority=Priority.HIGH
+        )
+        await store.update_typed_memory(tm)
+        assert store.query_fiber_ids == [_SIB_CANON]
+        assert store.merge_targets == [f"typed_memory:{_SIB_UNDER}"]
