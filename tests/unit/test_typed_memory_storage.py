@@ -295,3 +295,63 @@ class TestTypedMemoryExportImport:
         assert result is not None
         assert result.memory_type == MemoryType.INSIGHT
         assert result.priority == Priority.NORMAL
+
+
+class TestCanonicalFiberId:
+    """Tests for _to_canonical_fiber_id — the get_typed_memory id normalizer.
+
+    typed_memory.fiber_id is stored as the canonical hyphenated uuid, but callers
+    pass several record-id shapes (bare underscored, table-prefixed). The lookup
+    must normalize every shape to the canonical form (inverse of _to_surreal_id).
+    """
+
+    def test_hyphenated_is_unchanged(self) -> None:
+        from surreal_memory.storage.surrealdb.typed_memory import _to_canonical_fiber_id
+
+        uuid = "63840762-cdfe-49c5-849e-eb0dc2f6b79f"
+        assert _to_canonical_fiber_id(uuid) == uuid
+
+    def test_underscored_maps_to_hyphenated(self) -> None:
+        from surreal_memory.storage.surrealdb.typed_memory import _to_canonical_fiber_id
+
+        assert (
+            _to_canonical_fiber_id("63840762_cdfe_49c5_849e_eb0dc2f6b79f")
+            == "63840762-cdfe-49c5-849e-eb0dc2f6b79f"
+        )
+
+    def test_fiber_prefixed_is_stripped_and_normalized(self) -> None:
+        from surreal_memory.storage.surrealdb.typed_memory import _to_canonical_fiber_id
+
+        assert (
+            _to_canonical_fiber_id("fiber:63840762_cdfe_49c5_849e_eb0dc2f6b79f")
+            == "63840762-cdfe-49c5-849e-eb0dc2f6b79f"
+        )
+
+    def test_typed_memory_prefixed_is_stripped_and_normalized(self) -> None:
+        from surreal_memory.storage.surrealdb.typed_memory import _to_canonical_fiber_id
+
+        assert (
+            _to_canonical_fiber_id("typed_memory:63840762_cdfe_49c5_849e_eb0dc2f6b79f")
+            == "63840762-cdfe-49c5-849e-eb0dc2f6b79f"
+        )
+
+    def test_idempotent(self) -> None:
+        from surreal_memory.storage.surrealdb.typed_memory import _to_canonical_fiber_id
+
+        once = _to_canonical_fiber_id("fiber:63840762_cdfe_49c5_849e_eb0dc2f6b79f")
+        assert _to_canonical_fiber_id(once) == once
+
+    def test_inverse_of_to_surreal_id(self) -> None:
+        from surreal_memory.storage.surrealdb.typed_memory import (
+            _to_canonical_fiber_id,
+            _to_surreal_id,
+        )
+
+        uuid = "63840762-cdfe-49c5-849e-eb0dc2f6b79f"
+        # _to_surreal_id builds the record-id form; canonicalizing the (prefixed) record id round-trips.
+        assert _to_canonical_fiber_id(f"fiber:{_to_surreal_id(uuid)}") == uuid
+
+    def test_empty_string(self) -> None:
+        from surreal_memory.storage.surrealdb.typed_memory import _to_canonical_fiber_id
+
+        assert _to_canonical_fiber_id("") == ""

@@ -23,6 +23,22 @@ def _to_surreal_id(record_id: str) -> str:
     return record_id.replace("-", "_")
 
 
+def _to_canonical_fiber_id(fiber_id: str) -> str:
+    """Normalize any caller id-form to the canonical hyphenated uuid stored in
+    ``typed_memory.fiber_id``.
+
+    Callers pass several shapes for the same fiber: the bare hyphenated uuid
+    (canonical), the SurrealDB record-id form with underscores (``fibers_matched``
+    in recall), and the table-prefixed record id (``fiber:<uuid>`` from
+    ``fiber.id`` in consolidation / context_optimizer). Strip any ``table:``
+    prefix and map underscores back to hyphens (the inverse of
+    :func:`_to_surreal_id`). A canonical hyphenated uuid passes through
+    unchanged, so this is idempotent and safe for every caller.
+    """
+    candidate = fiber_id.split(":", 1)[1] if ":" in fiber_id else fiber_id
+    return candidate.replace("_", "-")
+
+
 def _parse_datetime(val: Any) -> datetime | None:
     if val is None:
         return None
@@ -165,7 +181,7 @@ class SurrealDBTypedMemoryMixin:
         rows = await self._query(
             "SELECT * FROM typed_memory WHERE brain_id = $brain_id AND fiber_id = $fiber_id LIMIT 1",
             brain_id=brain_id,
-            fiber_id=fiber_id,
+            fiber_id=_to_canonical_fiber_id(fiber_id),
         )
         if not rows:
             return None
