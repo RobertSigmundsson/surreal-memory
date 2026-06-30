@@ -40,7 +40,7 @@ _TRAILING_STOP = frozenset(
     {
         "i", "oraz", "w", "do", "na", "z", "że", "nie", "po", "przy", "o", "a",
         "ale", "lub", "czy", "jako", "dla", "od", "za", "to",
-        "the", "to", "of", "and", "or", "in", "by", "a", "is", "was", "for", "with", "at", "on",
+        "the", "of", "and", "or", "in", "by", "is", "was", "for", "with", "at", "on",
     }
 )
 
