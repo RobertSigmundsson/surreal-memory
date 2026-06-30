@@ -262,7 +262,7 @@ class SurrealDBTypedMemoryMixin:
     async def update_typed_memory(self, typed_memory: TypedMemory) -> None:
         conn = self._ensure_conn()
         brain_id = self._get_brain_id()
-        sid = _to_surreal_id(typed_memory.fiber_id)
+        canonical_fid = _to_canonical_fiber_id(typed_memory.fiber_id)
 
         full_metadata = dict(typed_memory.metadata)
         full_metadata["_provenance"] = provenance_to_dict(typed_memory.provenance)
@@ -270,11 +270,12 @@ class SurrealDBTypedMemoryMixin:
         rows = await self._query(
             "SELECT id FROM typed_memory WHERE brain_id = $brain_id AND fiber_id = $fiber_id LIMIT 1",
             brain_id=brain_id,
-            fiber_id=typed_memory.fiber_id,
+            fiber_id=canonical_fid,
         )
         if not rows:
             raise ValueError(f"TypedMemory for fiber {typed_memory.fiber_id} does not exist")
 
+        sid = _to_surreal_id(canonical_fid)
         await conn.merge(
             f"typed_memory:{sid}",
             {
@@ -292,6 +293,7 @@ class SurrealDBTypedMemoryMixin:
         )
 
     async def update_typed_memory_source(self, fiber_id: str, source: str) -> bool:
+        fiber_id = _to_canonical_fiber_id(fiber_id)
         conn = self._ensure_conn()
         brain_id = self._get_brain_id()
 
@@ -308,6 +310,7 @@ class SurrealDBTypedMemoryMixin:
         return True
 
     async def delete_typed_memory(self, fiber_id: str) -> bool:
+        fiber_id = _to_canonical_fiber_id(fiber_id)
         brain_id = self._get_brain_id()
 
         rows = await self._query(
@@ -367,6 +370,7 @@ class SurrealDBTypedMemoryMixin:
 
         all_memories: list[TypedMemory] = []
         for fid in fiber_ids:
+            fid = _to_canonical_fiber_id(fid)
             rows = await self._query(
                 "SELECT * FROM typed_memory"
                 " WHERE brain_id = $brain_id AND fiber_id = $fiber_id"
@@ -445,6 +449,7 @@ class SurrealDBTypedMemoryMixin:
         new_type: MemoryType,
         new_expires_at: str | None = None,
     ) -> bool:
+        fiber_id = _to_canonical_fiber_id(fiber_id)
         brain_id = self._get_brain_id()
 
         rows = await self._query(
