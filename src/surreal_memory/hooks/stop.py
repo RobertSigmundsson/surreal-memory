@@ -393,17 +393,20 @@ async def capture_text(text: str, project_name: str | None = None) -> dict[str, 
         auto_redact_severity = config.safety.auto_redact_min_severity
         saved: list[str] = []
 
-        # Write gate check for stop hook (auto-capture path). SHADOW logs to
-        # gate_decision without blocking; ENFORCE skips rejected items.
+        # Write gate check for stop hook. Auto-captured items (intent=auto)
+        # resolve their own mode (auto_capture_mode) so junk can be enforced;
+        # the session-summary fallback (intent=summary) keeps the global mode —
+        # summaries are known to false-reject real decisions under enforce.
         write_gate_cfg = config.write_gate
         gate_mode = write_gate_cfg.effective_mode
+        gate_mode_auto = write_gate_cfg.effective_auto_mode
 
         for item in eligible:
             try:
                 content = item["content"]
 
                 # Score + log the gate decision (uses auto_capture threshold)
-                if gate_mode != "off":
+                if gate_mode_auto != "off":
                     from surreal_memory.engine.gate_telemetry import log_gate_decision
                     from surreal_memory.engine.quality_scorer import check_write_gate
 
@@ -420,10 +423,10 @@ async def capture_text(text: str, project_name: str | None = None) -> dict[str, 
                         accepted=not gate_result.rejected,
                         reason=gate_result.rejection_reason or "accept",
                         score=gate_result.score,
-                        mode=gate_mode,
+                        mode=gate_mode_auto,
                         content=content,
                     )
-                    if gate_mode == "enforce" and gate_result.rejected:
+                    if gate_mode_auto == "enforce" and gate_result.rejected:
                         logger.debug(
                             "Stop hook write gate rejected: %s",
                             gate_result.rejection_reason,
@@ -523,7 +526,9 @@ async def capture_text(text: str, project_name: str | None = None) -> dict[str, 
                             tags=set(summary_tags),
                             project_id=project_id,
                             # C — session summaries → cold (kept, recoverable, out of default recall).
-                            tier=route_tier(redacted_summary, memory_type="context", tags=summary_tags),
+                            tier=route_tier(
+                                redacted_summary, memory_type="context", tags=summary_tags
+                            ),
                         )
                         await storage.add_typed_memory(typed_mem)
                         saved.append(redacted_summary[:60])

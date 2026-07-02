@@ -252,10 +252,13 @@ class RememberHandler:
                     return {"error": "Encryption failed — memory not stored. Check encryption key."}
 
         # Write gate: score content; SHADOW logs the decision to gate_decision
-        # without blocking, ENFORCE rejects. Covers auto-capture (errors/todos/
-        # decisions/...) via is_auto_capture so we can tune before enforcing.
+        # without blocking, ENFORCE rejects. Auto-captures resolve their own
+        # mode (auto_capture_mode) so junk can be enforced while manual writes
+        # stay in shadow.
         write_gate_cfg = self.config.write_gate
-        gate_mode = write_gate_cfg.effective_mode
+        gate_mode = (
+            write_gate_cfg.effective_auto_mode if is_auto_capture else write_gate_cfg.effective_mode
+        )
         if gate_mode != "off":
             from surreal_memory.engine.gate_telemetry import log_gate_decision
             from surreal_memory.engine.quality_scorer import check_write_gate
