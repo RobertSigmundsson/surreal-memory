@@ -2,11 +2,21 @@
 
 from __future__ import annotations
 
+import os
+import tempfile
 from collections.abc import AsyncGenerator
 from datetime import datetime
 
 import pytest
 import pytest_asyncio
+
+# Isolate ALL tests from the developer's real ~/.surrealmemory (the env
+# override is honored by get_surrealmemory_dir). Without this, any test that
+# constructs UnifiedConfig() with the default data_dir and triggers save()
+# rewrites the real config.toml with defaults — a validation test did exactly
+# that via switch_brain() (live incident: 2026-06-30 / 2026-07-02).
+# Top-level (not a fixture) so even import-time config reads are covered.
+os.environ["SURREAL_MEMORY_DIR"] = tempfile.mkdtemp(prefix="smem-tests-")
 
 from surreal_memory.core.brain import Brain, BrainConfig
 from surreal_memory.core.fiber import Fiber

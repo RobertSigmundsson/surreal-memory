@@ -8,7 +8,7 @@ import pytest
 
 from surreal_memory.mcp.auto_capture import analyze_text_for_memories
 from surreal_memory.mcp.server import MCPServer, create_mcp_server, handle_message
-from surreal_memory.unified_config import ToolTierConfig
+from surreal_memory.unified_config import ToolTierConfig, WriteGateConfig
 
 
 class TestMCPServer:
@@ -217,7 +217,10 @@ class TestMCPToolCalls:
                 tool_tier=ToolTierConfig(tier="full"),
                 response=ResponseConfig(),
             )
-            cfg.write_gate.enabled = False
+            # Real WriteGateConfig (default mode "off") — a bare MagicMock makes
+            # effective_mode truthy, sending _remember down the gate path where
+            # int comparisons against mock attributes raise TypeError.
+            cfg.write_gate = WriteGateConfig()
             mock_get_config.return_value = cfg
             return MCPServer()
 
@@ -519,6 +522,7 @@ class TestMCPToolCalls:
                 current_brain="test-brain",
                 get_brain_db_path=MagicMock(return_value="/tmp/test-brain.db"),
                 auto=mock_auto_config,
+                write_gate=WriteGateConfig(),
             )
             server = MCPServer()
 
@@ -2090,6 +2094,7 @@ class TestMCPAutoExtended:
                 get_brain_db_path=MagicMock(return_value="/tmp/test-brain.db"),
                 auto=mock_auto_config,
                 eternal=mock_eternal_config,
+                write_gate=WriteGateConfig(),
             )
             return MCPServer()
 
@@ -2317,6 +2322,7 @@ class TestMCPRecallExtended:
                 get_brain_db_path=MagicMock(return_value="/tmp/test-brain.db"),
                 auto=mock_auto_config,
                 eternal=mock_eternal_config,
+                write_gate=WriteGateConfig(),
             )
             return MCPServer()
 
@@ -2611,6 +2617,7 @@ class TestMCPInputValidation:
                 get_brain_db_path=MagicMock(return_value="/tmp/test-brain.db"),
                 auto=MagicMock(enabled=True, min_confidence=0.7),
                 eternal=MagicMock(enabled=False),
+                write_gate=WriteGateConfig(),
             )
             return MCPServer()
 

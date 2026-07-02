@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -106,20 +107,22 @@ class TestMem0SyncConfig:
 
 
 class TestSwitchBrainValidation:
-    def test_valid_brain_name(self) -> None:
-        config = UnifiedConfig()
+    def test_valid_brain_name(self, tmp_path: Path) -> None:
+        # data_dir MUST be isolated: switch_brain() saves config.toml, and the
+        # default data_dir is the user's real ~/.surrealmemory.
+        config = UnifiedConfig(data_dir=tmp_path)
         config.current_brain = "default"
         # Should not raise for valid names
         config.switch_brain("my-brain.v2")
         assert config.current_brain == "my-brain.v2"
 
-    def test_invalid_brain_name_rejected(self) -> None:
-        config = UnifiedConfig()
+    def test_invalid_brain_name_rejected(self, tmp_path: Path) -> None:
+        config = UnifiedConfig(data_dir=tmp_path)
         with pytest.raises(ValueError, match="Invalid brain name"):
             config.switch_brain('bad"name\nnewline')
 
-    def test_path_traversal_rejected(self) -> None:
-        config = UnifiedConfig()
+    def test_path_traversal_rejected(self, tmp_path: Path) -> None:
+        config = UnifiedConfig(data_dir=tmp_path)
         with pytest.raises(ValueError, match="Invalid brain name"):
             config.switch_brain("../etc/passwd")
 

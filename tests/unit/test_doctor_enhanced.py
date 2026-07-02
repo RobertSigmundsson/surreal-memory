@@ -250,6 +250,7 @@ class TestRunDoctorIntegration:
     """Test run_doctor with new checks."""
 
     @patch("surreal_memory.cli.doctor._check_pro_plugin")
+    @patch("surreal_memory.cli.doctor._check_config_freshness")
     @patch("surreal_memory.cli.doctor._check_surface")
     @patch("surreal_memory.cli.doctor._check_dedup")
     @patch("surreal_memory.cli.doctor._check_hooks")
