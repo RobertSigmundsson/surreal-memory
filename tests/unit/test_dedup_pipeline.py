@@ -112,6 +112,33 @@ class TestTier1SimHash:
 
         assert result.is_duplicate is False
 
+    @pytest.mark.asyncio
+    async def test_exact_duplicate_outside_word_search_window(self) -> None:
+        """Exact dup must be caught even when the first-significant-word search
+        misses it (common leading token -> true dup outside the LIMIT window)."""
+        content = "Error: agent registry creates a new record per init instead of upsert"
+        true_dup = _make_anchor(content, neuron_id="anchor-true-dup")
+        unrelated = [
+            _make_anchor(f"Error: some unrelated failure number {i}", neuron_id=f"anchor-{i}")
+            for i in range(30)
+        ]
+
+        async def find_neurons(**kwargs: object) -> list[Neuron]:
+            if kwargs.get("content_exact") is not None:
+                return [true_dup]
+            return unrelated
+
+        storage = AsyncMock()
+        storage.find_neurons = AsyncMock(side_effect=find_neurons)
+
+        cfg = DedupConfig(enabled=True)
+        pipeline = DedupPipeline(config=cfg, storage=storage)
+        result = await pipeline.check_duplicate(content)
+
+        assert result.is_duplicate is True
+        assert result.existing_neuron_id == "anchor-true-dup"
+        assert result.tier == 1
+
 
 class TestTier2Embedding:
     @pytest.mark.asyncio

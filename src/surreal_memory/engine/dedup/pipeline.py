@@ -111,6 +111,15 @@ class DedupPipeline:
         """Fetch candidate anchor neurons for comparison."""
         max_candidates = min(self._config.max_candidates, 50)
 
+        # Exact-content lookup first: the word search below keys on the FIRST
+        # significant word, so for content starting with a common token
+        # ("Error", "Session", ...) the true duplicate routinely falls outside
+        # its LIMIT window and exact dups slip through.
+        exact_matches = await self._storage.find_neurons(
+            content_exact=content,
+            limit=max_candidates,
+        )
+
         # Use first significant word as search key
         words = content.split()
         search_term = ""
@@ -120,13 +129,20 @@ class DedupPipeline:
                 search_term = cleaned
                 break
 
-        if not search_term:
-            return []
+        contains_matches: list[Neuron] = []
+        if search_term:
+            contains_matches = await self._storage.find_neurons(
+                content_contains=search_term,
+                limit=max_candidates,
+            )
 
-        candidates = await self._storage.find_neurons(
-            content_contains=search_term,
-            limit=max_candidates,
-        )
+        seen_ids: set[str] = set()
+        candidates: list[Neuron] = []
+        for neuron in (*exact_matches, *contains_matches):
+            if neuron.id in seen_ids:
+                continue
+            seen_ids.add(neuron.id)
+            candidates.append(neuron)
 
         # Filter to anchor neurons only
         return [

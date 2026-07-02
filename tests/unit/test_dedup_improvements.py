@@ -170,10 +170,10 @@ class TestPipelineCandidateCap:
         pipeline = DedupPipeline(config=cfg, storage=mock_storage)
         await pipeline.check_duplicate("test content here")
 
-        # Should have called find_neurons with limit=50 (capped)
-        mock_storage.find_neurons.assert_called_once()
-        call_kwargs = mock_storage.find_neurons.call_args
-        assert call_kwargs[1]["limit"] == 50
+        # Both lookups (content_exact + content_contains) use limit=50 (capped)
+        assert mock_storage.find_neurons.call_count == 2
+        for call in mock_storage.find_neurons.call_args_list:
+            assert call[1]["limit"] == 50
 
     @pytest.mark.asyncio
     async def test_candidates_uses_config_when_under_50(self) -> None:
@@ -187,9 +187,9 @@ class TestPipelineCandidateCap:
         pipeline = DedupPipeline(config=cfg, storage=mock_storage)
         await pipeline.check_duplicate("test content here")
 
-        mock_storage.find_neurons.assert_called_once()
-        call_kwargs = mock_storage.find_neurons.call_args
-        assert call_kwargs[1]["limit"] == 20
+        assert mock_storage.find_neurons.call_count == 2
+        for call in mock_storage.find_neurons.call_args_list:
+            assert call[1]["limit"] == 20
 
 
 # ---------------------------------------------------------------------------
