@@ -342,7 +342,9 @@ class ExtractConceptNeuronsStep:
         for keyword in valid_keywords:
             if keyword in existing_map:
                 continue
-            neuron = Neuron.create(type=NeuronType.CONCEPT, content=keyword, content_hash=simhash(keyword))
+            neuron = Neuron.create(
+                type=NeuronType.CONCEPT, content=keyword, content_hash=simhash(keyword)
+            )
             await storage.add_neuron(neuron)
             ctx.concept_neurons.append(neuron)
             ctx.neurons_created.append(neuron)
@@ -400,7 +402,9 @@ class ExtractActionNeuronsStep:
         for action_text in valid_actions:
             if action_text in existing_map:
                 continue
-            neuron = Neuron.create(type=NeuronType.ACTION, content=action_text, content_hash=simhash(action_text))
+            neuron = Neuron.create(
+                type=NeuronType.ACTION, content=action_text, content_hash=simhash(action_text)
+            )
             await storage.add_neuron(neuron)
             ctx.action_neurons.append(neuron)
             ctx.neurons_created.append(neuron)
@@ -458,7 +462,9 @@ class ExtractIntentNeuronsStep:
         for intent_text in valid_intents:
             if intent_text in existing_map:
                 continue
-            neuron = Neuron.create(type=NeuronType.INTENT, content=intent_text, content_hash=simhash(intent_text))
+            neuron = Neuron.create(
+                type=NeuronType.INTENT, content=intent_text, content_hash=simhash(intent_text)
+            )
             await storage.add_neuron(neuron)
             ctx.intent_neurons.append(neuron)
             ctx.neurons_created.append(neuron)

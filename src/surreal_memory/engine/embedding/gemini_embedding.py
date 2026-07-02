@@ -113,9 +113,7 @@ class GeminiEmbedding(EmbeddingProvider):
             # google-genai >= 2.0 folds a plain list[str] into ONE multi-part
             # content (N texts -> 1 embedding); wrap each text in its own
             # Content so the API returns one embedding per text.
-            chunk_contents = [
-                genai_types.Content(parts=[genai_types.Part(text=t)]) for t in chunk
-            ]
+            chunk_contents = [genai_types.Content(parts=[genai_types.Part(text=t)]) for t in chunk]
             # functools.partial binds the chunk at creation (satisfies ruff
             # B023, no loop-var late binding) and types cleanly for mypy.
             response = await call_with_retry(

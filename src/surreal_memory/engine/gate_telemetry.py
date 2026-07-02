@@ -5,6 +5,7 @@ auto-capture / stop-hook) decisions in one report.
 
 Fire-and-forget: logging must never break a write.
 """
+
 from __future__ import annotations
 
 import logging

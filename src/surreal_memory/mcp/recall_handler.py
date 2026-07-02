@@ -345,6 +345,7 @@ class RecallHandler:
                 import dataclasses
 
                 from surreal_memory.utils.timeutils import utcnow as _utcnow
+
                 _states = await storage.get_neuron_states_batch(_recalled)
                 _now = _utcnow()
                 _updates = [
