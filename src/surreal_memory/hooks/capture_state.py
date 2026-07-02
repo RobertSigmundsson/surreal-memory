@@ -20,11 +20,11 @@ session:
 
 The threshold is calibrated on real pairs from the live brain (normalized
 SimHash): trivial variants are small (whitespace/case = 0, punctuation
-<=7), whereas *distinct* valuable fragments score >=23 (real-auto 28–40,
-real-summary 23–38). A threshold of 7 leaves a 16-bit margin, so distinct
+<=7), whereas *distinct* valuable fragments score >=23 (real-auto 28-40,
+real-summary 23-38). A threshold of 7 leaves a 16-bit margin, so distinct
 content is never collapsed, and it matches the engine's existing dedup
 ``simhash_threshold``. Larger single-fragment edits (truncation or an
-appended timestamp on a short fragment, 8–18 bits) are deliberately
+appended timestamp on a short fragment, 8-18 bits) are deliberately
 treated as *new* — they border on "different fragment", and the exact-key
 guard still catches byte-identical re-captures. The "same template,
 different content" trap (``completed X`` vs ``completed Y``) sits well
