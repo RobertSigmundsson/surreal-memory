@@ -64,6 +64,25 @@ class TestEncodingFlow:
         assert len(time_neurons) > 0
 
     @pytest.mark.asyncio
+    async def test_same_minute_reuses_reference_timestamp_neuron(
+        self, storage: InMemoryStorage
+    ) -> None:
+        """Two encodes in the same minute must not create duplicate reference
+        timestamp TIME neurons (regression: unconditional create → dup_excess)."""
+        brain = await storage.get_brain(storage._current_brain_id)  # type: ignore
+        assert brain is not None
+        encoder = MemoryEncoder(storage, brain.config)
+
+        ts_a = datetime(2024, 2, 4, 15, 43, 37)
+        ts_b = datetime(2024, 2, 4, 15, 43, 48)  # same minute, later second
+        await encoder.encode("First distinct note about alpha", timestamp=ts_a)
+        await encoder.encode("Second distinct note about beta", timestamp=ts_b)
+
+        minute = ts_a.strftime("%Y-%m-%d %H:%M")
+        matches = await storage.find_neurons(type=NeuronType.TIME, content_exact=minute)
+        assert len(matches) == 1, f"expected 1 reference timestamp neuron, got {len(matches)}"
+
+    @pytest.mark.asyncio
     async def test_encode_extracts_entities(self, storage: InMemoryStorage) -> None:
         """Test that encoding extracts entities."""
         brain = await storage.get_brain(storage._current_brain_id)  # type: ignore

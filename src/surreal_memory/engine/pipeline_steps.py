@@ -132,21 +132,31 @@ class ExtractTimeNeuronsStep:
             ctx.time_neurons.append(neuron)
             ctx.neurons_created.append(neuron)
 
-        # Always create a timestamp neuron for reference time
+        # Reference timestamp neuron (minute granularity). Reuse an existing
+        # one for the same minute instead of unconditionally creating a new
+        # node — two encodes in the same minute otherwise produce identical
+        # duplicate TIME neurons (the ±1h _find_similar check above is too
+        # coarse to dedupe distinct minutes, so match exact content here).
         ts_content = ctx.timestamp.strftime("%Y-%m-%d %H:%M")
-        timestamp_neuron = Neuron.create(
-            type=NeuronType.TIME,
-            content=ts_content,
-            content_hash=simhash(ts_content),
-            metadata={
-                "absolute_start": ctx.timestamp.isoformat(),
-                "absolute_end": ctx.timestamp.isoformat(),
-                "granularity": "minute",
-            },
+        existing_ts = await storage.find_neurons(
+            type=NeuronType.TIME, content_exact=ts_content, limit=1
         )
-        await storage.add_neuron(timestamp_neuron)
-        ctx.time_neurons.append(timestamp_neuron)
-        ctx.neurons_created.append(timestamp_neuron)
+        if existing_ts:
+            ctx.time_neurons.append(existing_ts[0])
+        else:
+            timestamp_neuron = Neuron.create(
+                type=NeuronType.TIME,
+                content=ts_content,
+                content_hash=simhash(ts_content),
+                metadata={
+                    "absolute_start": ctx.timestamp.isoformat(),
+                    "absolute_end": ctx.timestamp.isoformat(),
+                    "granularity": "minute",
+                },
+            )
+            await storage.add_neuron(timestamp_neuron)
+            ctx.time_neurons.append(timestamp_neuron)
+            ctx.neurons_created.append(timestamp_neuron)
 
         return ctx
 
