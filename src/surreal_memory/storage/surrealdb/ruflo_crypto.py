@@ -20,10 +20,11 @@ from __future__ import annotations
 import base64
 import os
 
+AESGCM: type | None
 try:
     from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 except ImportError:  # pragma: no cover — optional [encryption] extra
-    AESGCM = None  # type: ignore[assignment]
+    AESGCM = None
 
 MAGIC = b"RFE1"
 MAGIC_LEN = 4
@@ -105,7 +106,7 @@ def decrypt_content(content: str) -> str:
         ciphertext = raw[MAGIC_LEN + IV_LEN : -TAG_LEN]
 
         aesgcm = AESGCM(key)
-        plaintext = aesgcm.decrypt(iv, ciphertext + tag, None)
+        plaintext = bytes(aesgcm.decrypt(iv, ciphertext + tag, None))
         return plaintext.decode("utf-8")
     except Exception:
         # Decryption failed — return as-is (plaintext or corrupted)

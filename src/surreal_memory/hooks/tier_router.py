@@ -38,9 +38,38 @@ _SHORT_LEN = 50
 # Trailing word that signals a cut-off fragment (PL + EN prepositions/conjunctions).
 _TRAILING_STOP = frozenset(
     {
-        "i", "oraz", "w", "do", "na", "z", "że", "nie", "po", "przy", "o", "a",
-        "ale", "lub", "czy", "jako", "dla", "od", "za", "to",
-        "the", "of", "and", "or", "in", "by", "is", "was", "for", "with", "at", "on",
+        "i",
+        "oraz",
+        "w",
+        "do",
+        "na",
+        "z",
+        "że",
+        "nie",
+        "po",
+        "przy",
+        "o",
+        "a",
+        "ale",
+        "lub",
+        "czy",
+        "jako",
+        "dla",
+        "od",
+        "za",
+        "to",
+        "the",
+        "of",
+        "and",
+        "or",
+        "in",
+        "by",
+        "is",
+        "was",
+        "for",
+        "with",
+        "at",
+        "on",
     }
 )
 
@@ -73,11 +102,8 @@ def _incomplete(content: str) -> bool:
 
 
 def _is_session_summary(content: str, memory_type: str | None, tags: object) -> bool:
-    try:
-        if tags and "session_summary" in tags:
-            return True
-    except TypeError:
-        pass
+    if isinstance(tags, (list, tuple, set, frozenset)) and "session_summary" in tags:
+        return True
     return content.lstrip().lower().startswith("session activity")
 
 
@@ -94,10 +120,6 @@ def route_tier(
     """
     if _is_session_summary(content, memory_type, tags):
         return MemoryTier.COLD
-    if (
-        len(content.strip()) < _SHORT_LEN
-        and _specificity(content) == 0
-        and _incomplete(content)
-    ):
+    if len(content.strip()) < _SHORT_LEN and _specificity(content) == 0 and _incomplete(content):
         return MemoryTier.COLD
     return MemoryTier.WARM

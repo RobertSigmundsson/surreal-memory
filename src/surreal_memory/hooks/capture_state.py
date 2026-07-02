@@ -49,6 +49,7 @@ import logging
 import os
 import re
 from pathlib import Path
+from typing import Any
 
 from surreal_memory.utils.simhash import hamming_distance, simhash
 
@@ -100,7 +101,7 @@ def content_simhash(content: str) -> int:
     return simhash(_normalize(content))
 
 
-def _load_all() -> dict:
+def _load_all() -> dict[str, Any]:
     path = _state_path()
     if not path.exists():
         return {}
