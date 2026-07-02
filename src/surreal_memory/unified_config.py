@@ -1458,6 +1458,7 @@ class UnifiedConfig:
             "# Write gate (quality enforcement before storage)",
             "[write_gate]",
             f"enabled = {'true' if self.write_gate.enabled else 'false'}",
+            f'mode = "{_sanitize_toml_str(self.write_gate.mode)}"',
             f"min_length = {self.write_gate.min_length}",
             f"min_quality_score = {self.write_gate.min_quality_score}",
             f"auto_capture_min_score = {self.write_gate.auto_capture_min_score}",

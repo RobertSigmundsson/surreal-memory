@@ -377,3 +377,30 @@ class TestWriteGateEdgeCases:
         result = check_write_gate("done", gate_config=self._gate())
         with pytest.raises(AttributeError):
             result.rejected = False  # type: ignore[misc]
+
+
+class TestWriteGateModePersistence:
+    """write_gate.mode must survive a config save()/load() round-trip.
+
+    Regression: the TOML serializer omitted the mode key, so every engine-side
+    config save silently demoted an active shadow/enforce gate to effective
+    'off' (live incident 2026-06-30)."""
+
+    def test_mode_survives_save_load_roundtrip(self, tmp_path) -> None:
+        from pathlib import Path
+
+        from surreal_memory.unified_config import UnifiedConfig
+
+        config = UnifiedConfig(
+            data_dir=Path(tmp_path),
+            current_brain="default",
+            write_gate=WriteGateConfig(enabled=False, mode="shadow"),
+        )
+        config.save()
+
+        toml_content = (Path(tmp_path) / "config.toml").read_text()
+        assert 'mode = "shadow"' in toml_content
+
+        loaded = UnifiedConfig.load(Path(tmp_path) / "config.toml")
+        assert loaded.write_gate.mode == "shadow"
+        assert loaded.write_gate.effective_mode == "shadow"
