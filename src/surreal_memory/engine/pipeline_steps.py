@@ -320,11 +320,14 @@ class ExtractConceptNeuronsStep:
             kw_lower = kw.lower()
             # Minimum 4 chars — 3-char words produce too many noise concepts ("ai", "os")
             if len(kw_lower) < 4:
+                ctx.dropped_short += 1
                 return False
             if kw_lower in _NOISE_CONCEPTS:
+                ctx.dropped_noise += 1
                 return False
             # Skip if already captured as an entity neuron
             if kw_lower in entity_content:
+                ctx.dropped_duplicate_entity += 1
                 return False
             return True
 
@@ -1319,6 +1322,7 @@ class ConflictDetectionStep:
                 conflicts=remaining_conflicts,
                 new_neuron_id=ctx.anchor_neuron.id,
                 storage=storage,
+                new_memory_type=memory_type_str,
             )
             for resolution in resolutions:
                 ctx.synapses_created.append(resolution.contradicts_synapse)

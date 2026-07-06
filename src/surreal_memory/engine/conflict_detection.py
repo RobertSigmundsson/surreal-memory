@@ -103,6 +103,7 @@ class ConflictType(StrEnum):
 
     FACTUAL_CONTRADICTION = "factual_contradiction"
     DECISION_REVERSAL = "decision_reversal"
+    GOVERNANCE_SUPERSESSION = "governance_supersession"
 
 
 @dataclass(frozen=True)
@@ -238,6 +239,29 @@ def _tag_overlap(tags_a: set[str], tags_b: set[str]) -> float:
     return intersection / union if union > 0 else 0.0
 
 
+# Governance memory types: always-in-context rules whose stale versions are
+# strictly more dangerous than a stale fact — a superseded rule that still
+# outranks its correction makes an agent enforce a revoked limit (issue #36).
+GOVERNANCE_TYPES: frozenset[str] = frozenset({"boundary", "instruction", "preference", "decision"})
+
+# Explicit supersession markers. A correction phrased as a positive restatement
+# ("X IS allowed now, this supersedes the earlier rule") carries no lexical
+# negation, so predicate-contradiction detection misses it — match the marker
+# directly instead.
+_SUPERSESSION_RE = re.compile(
+    r"\b(supersed(?:e|es|ed|ing)|replac(?:e|es|ed|ing)|overrid(?:e|es|den|ing)|"
+    r"deprecat(?:e|es|ed|ing)|revok(?:e|es|ed|ing)|rescind(?:s|ed|ing)?|"
+    r"no longer (?:applies|valid|true)|as of now|from now on|"
+    r"nadpisuj\w*|zast[eę]puj\w*|uniewa[zż]ni\w*|odwo[lł]uj\w*)\b",
+    re.IGNORECASE,
+)
+
+
+def _has_supersession_marker(content: str) -> bool:
+    """True if content explicitly signals it supersedes a prior memory."""
+    return bool(_SUPERSESSION_RE.search(content or ""))
+
+
 async def detect_conflicts(
     content: str,
     tags: set[str],
@@ -341,6 +365,31 @@ async def detect_conflicts(
                             )
                         )
 
+        # Check for governance supersession (issue #36): a same-type governance
+        # memory (boundary/instruction/preference/decision) that explicitly
+        # supersedes an existing one, or restates it differently. Positive
+        # restatements carry no lexical negation, so the paths above miss them.
+        already_flagged = any(c.existing_neuron_id == candidate.id for c in conflicts)
+        if (
+            not already_flagged
+            and memory_type in GOVERNANCE_TYPES
+            and str(candidate.metadata.get("type", "")) == memory_type
+        ):
+            candidate_tags = _extract_implicit_tags(candidate)
+            overlap = _tag_overlap(tags, candidate_tags) if tags and candidate_tags else 0.0
+            if overlap >= tag_overlap_threshold and (
+                _has_supersession_marker(content) or not _content_agrees(content, candidate.content)
+            ):
+                conflicts.append(
+                    Conflict(
+                        type=ConflictType.GOVERNANCE_SUPERSESSION,
+                        existing_neuron_id=candidate.id,
+                        existing_content=candidate.content,
+                        new_content=content,
+                        confidence=min(1.0, 0.6 + overlap),
+                    )
+                )
+
     return conflicts
 
 
@@ -351,6 +400,7 @@ async def resolve_conflicts(
     confidence_delta: float = 0.3,
     supersede_threshold: float = 0.2,
     existing_memory_type: str = "",
+    new_memory_type: str = "",
 ) -> list[ConflictResolution]:
     """Apply resolution actions for detected conflicts.
 
@@ -381,7 +431,19 @@ async def resolve_conflicts(
         if existing_neuron is None:
             continue
 
-        is_error_resolution = _is_error_memory(existing_neuron, existing_memory_type)
+        # Strong resolution (2x demotion + guaranteed >=50% drop + RESOLVED_BY +
+        # resolved marker) applies to error memories AND to same-type governance
+        # supersession — a stale rule outranking its correction is the failure
+        # governance memories exist to prevent (issue #36).
+        existing_type = str(existing_neuron.metadata.get("type", "")) or existing_memory_type
+        is_governance_supersession = conflict.type == ConflictType.GOVERNANCE_SUPERSESSION or (
+            existing_type in GOVERNANCE_TYPES
+            and new_memory_type in GOVERNANCE_TYPES
+            and (new_memory_type == existing_type or _has_supersession_marker(conflict.new_content))
+        )
+        is_strong_resolution = (
+            _is_error_memory(existing_neuron, existing_memory_type) or is_governance_supersession
+        )
 
         # 1. Get existing neuron state for confidence reduction
         existing_state = await storage.get_neuron_state(conflict.existing_neuron_id)
@@ -389,7 +451,7 @@ async def resolve_conflicts(
 
         # 2. Compute anti-Hebbian reduction
         # Error resolution uses stronger demotion (2x learning rate)
-        effective_delta = confidence_delta * 2.0 if is_error_resolution else confidence_delta
+        effective_delta = confidence_delta * 2.0 if is_strong_resolution else confidence_delta
         update = anti_hebbian_update(
             current_weight=current_confidence,
             strength=conflict.confidence,
@@ -398,7 +460,7 @@ async def resolve_conflicts(
         confidence_reduced = abs(update.delta)
 
         # For error resolution, ensure at least 50% reduction
-        if is_error_resolution:
+        if is_strong_resolution:
             max_allowed = current_confidence * 0.5
             effective_activation = min(update.new_weight, max_allowed)
         else:
@@ -412,7 +474,7 @@ async def resolve_conflicts(
         # 4. Mark existing neuron as disputed (or resolved for errors)
         is_superseded = effective_activation < supersede_threshold
 
-        if is_error_resolution:
+        if is_strong_resolution:
             updated_neuron = existing_neuron.with_metadata(
                 _disputed=True,
                 _disputed_at=utcnow().isoformat(),
@@ -452,7 +514,7 @@ async def resolve_conflicts(
             pass
 
         # 6. Error Resolution Learning: create RESOLVED_BY synapse
-        if is_error_resolution:
+        if is_strong_resolution:
             resolved_by_synapse = Synapse.create(
                 source_id=new_neuron_id,
                 target_id=conflict.existing_neuron_id,
