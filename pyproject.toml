@@ -101,6 +101,7 @@ embeddings = [
 ]
 embeddings-openai = [
     "openai>=1.0",
+    "numpy>=1.24",  # vectorised cosine for semantic-link consolidation (pure-python fallback exists)
 ]
 embeddings-openrouter = [
     "openai>=1.0",

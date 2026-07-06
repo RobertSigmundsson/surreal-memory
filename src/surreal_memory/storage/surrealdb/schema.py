@@ -7,7 +7,7 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 
 SCHEMA_SQL = """
 -- ============================================================
@@ -36,7 +36,8 @@ DEFINE INDEX idx_neuron_brain    ON neuron FIELDS brain_id;
 DEFINE INDEX idx_neuron_type     ON neuron FIELDS brain_id, type;
 DEFINE INDEX idx_neuron_hash     ON neuron FIELDS brain_id, content_hash;
 DEFINE INDEX idx_neuron_content  ON neuron FIELDS brain_id, content;
-DEFINE INDEX idx_neuron_embedding ON neuron FIELDS embedding_vec HNSW DIMENSION 3072 DIST COSINE;
+-- idx_neuron_embedding (HNSW) is defined dynamically in ensure_schema() with the
+-- configured embedding dimension, so the vector index always matches the model.
 
 -- Neuron activation states
 DEFINE TABLE neuron_state SCHEMAFULL;
@@ -263,6 +264,18 @@ DEFINE INDEX idx_review_brain   ON review_schedules FIELDS brain_id;
 DEFINE INDEX idx_review_fiber   ON review_schedules FIELDS brain_id, fiber_id UNIQUE;
 DEFINE INDEX idx_review_due     ON review_schedules FIELDS brain_id, next_review;
 
+-- Memory maturation (STM -> Working -> Episodic -> Semantic, one record per fiber)
+DEFINE TABLE maturation SCHEMAFULL;
+DEFINE FIELD fiber_id                 ON maturation TYPE string;
+DEFINE FIELD brain_id                 ON maturation TYPE string;
+DEFINE FIELD stage                    ON maturation TYPE string DEFAULT 'stm';
+DEFINE FIELD stage_entered_at         ON maturation TYPE datetime DEFAULT time::now();
+DEFINE FIELD rehearsal_count          ON maturation TYPE int DEFAULT 0;
+DEFINE FIELD reinforcement_timestamps ON maturation TYPE array<string> DEFAULT [];
+DEFINE INDEX idx_maturation_brain     ON maturation FIELDS brain_id;
+DEFINE INDEX idx_maturation_fiber     ON maturation FIELDS brain_id, fiber_id UNIQUE;
+DEFINE INDEX idx_maturation_stage     ON maturation FIELDS brain_id, stage;
+
 -- Brain versions (snapshot/checkpoint history with compressed snapshots)
 DEFINE TABLE brain_versions SCHEMAFULL;
 DEFINE FIELD id              ON brain_versions TYPE string;
@@ -389,12 +402,31 @@ DEFINE INDEX idx_tevt_time    ON tool_events FIELDS brain_id, created_at;
 """
 
 
-async def ensure_schema(conn: Any) -> None:
-    """Apply schema to SurrealDB. Safe to call multiple times."""
-    logger.info("Applying SurrealDB schema (v%d)...", SCHEMA_VERSION)
+async def ensure_schema(conn: Any, embedding_dim: int = 3072) -> None:
+    """Apply schema to SurrealDB. Safe to call multiple times.
+
+    The neuron embedding HNSW index dimension is parameterized by
+    ``embedding_dim`` so the vector index always matches the configured
+    embedding model (e.g. 1024 for bge-m3 via a local OpenAI-compatible
+    server, 3072 for Gemini). SurrealDB rejects vectors whose length differs
+    from the index dimension, so this MUST equal the provider's output
+    dimension.
+
+    Note: a plain ``DEFINE INDEX`` errors when the index already exists (and
+    the error is swallowed below), so this does NOT change the dimension of an
+    EXISTING index — it only sets it correctly on first creation. Changing the
+    dimension of a populated index requires an explicit ``REMOVE INDEX`` +
+    re-``DEFINE`` migration.
+    """
+    dim = int(embedding_dim) if embedding_dim and int(embedding_dim) > 0 else 3072
+    logger.info("Applying SurrealDB schema (v%d, embedding_dim=%d)...", SCHEMA_VERSION, dim)
     statements = [
         s.strip() for s in SCHEMA_SQL.split(";") if s.strip() and not s.strip().startswith("--")
     ]
+    statements.append(
+        "DEFINE INDEX idx_neuron_embedding ON neuron "
+        f"FIELDS embedding_vec HNSW DIMENSION {dim} DIST COSINE"
+    )
     for stmt in statements:
         try:
             await conn.query(stmt + ";")

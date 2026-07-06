@@ -114,6 +114,11 @@ class EmbeddingSettings:
     provider: str = "sentence_transformer"
     model: str = "all-MiniLM-L6-v2"
     similarity_threshold: float = 0.7
+    # Explicit embedding vector dimension. 0 = auto (derive from provider/model).
+    # Set this when the provider/model is not in a built-in dimension table
+    # (e.g. a local OpenAI-compatible server serving bge-m3 → 1024); it drives
+    # the SurrealDB HNSW index dimension so the index always matches the vectors.
+    dimension: int = 0
 
     _VALID_PROVIDERS: ClassVar[tuple[str, ...]] = (
         "sentence_transformer",
@@ -143,6 +148,7 @@ class EmbeddingSettings:
             "provider": self.provider,
             "model": self.model,
             "similarity_threshold": self.similarity_threshold,
+            "dimension": self.dimension,
         }
 
     @classmethod
@@ -152,6 +158,7 @@ class EmbeddingSettings:
             provider=str(data.get("provider", "sentence_transformer")),
             model=str(data.get("model", "all-MiniLM-L6-v2")),
             similarity_threshold=float(data.get("similarity_threshold", 0.7)),
+            dimension=int(data.get("dimension", 0) or 0),
         )
 
 
@@ -177,6 +184,7 @@ def _load_embedding_settings(data: dict[str, Any]) -> EmbeddingSettings:
         SURREAL_MEMORY_EMBEDDING_PROVIDER             -> provider
         SURREAL_MEMORY_EMBEDDING_MODEL                -> model
         SURREAL_MEMORY_EMBEDDING_SIMILARITY_THRESHOLD -> similarity_threshold
+        SURREAL_MEMORY_EMBEDDING_DIMENSION            -> dimension
 
     Only env vars that are actually set (non-empty) override the file values.
     """
@@ -208,11 +216,72 @@ def _load_embedding_settings(data: dict[str, Any]) -> EmbeddingSettings:
                 env_threshold,
             )
 
+    dimension = base.dimension
+    env_dimension = os.environ.get("SURREAL_MEMORY_EMBEDDING_DIMENSION")
+    if env_dimension is not None and env_dimension.strip():
+        try:
+            dimension = int(env_dimension)
+        except ValueError:
+            logging.getLogger(__name__).warning(
+                "Invalid SURREAL_MEMORY_EMBEDDING_DIMENSION=%r — ignoring",
+                env_dimension,
+            )
+
     return EmbeddingSettings(
         enabled=enabled,
         provider=provider,
         model=model,
         similarity_threshold=similarity_threshold,
+        dimension=dimension,
+    )
+
+
+def _load_sync_settings(data: dict[str, Any]) -> SyncConfig:
+    """Build SyncConfig from config.toml, letting env vars override.
+
+    Env precedence (env wins over config.toml, config.toml wins over defaults):
+        SURREAL_MEMORY_HUB_URL       -> hub_url
+        SURREAL_MEMORY_API_KEY       -> api_key
+        SURREAL_MEMORY_SYNC_ENABLED  -> enabled (truthy parse)
+        SURREAL_MEMORY_SYNC_AUTO     -> auto_sync (truthy parse)
+
+    This makes a sync hub configured purely via the environment (docker-compose
+    or the MCP client env) visible to the dashboard/Overview without first
+    writing a ``[sync]`` block to config.toml — mirroring the embedding/storage
+    env-override layers. Values are re-validated through ``SyncConfig.from_dict``
+    so env-provided hub_url/api_key get the same format sanitisation.
+    """
+    base = SyncConfig.from_dict(data)
+
+    hub_url = base.hub_url
+    env_hub = os.environ.get("SURREAL_MEMORY_HUB_URL")
+    if env_hub is not None and env_hub.strip():
+        hub_url = env_hub.strip()
+
+    api_key = base.api_key
+    env_key = os.environ.get("SURREAL_MEMORY_API_KEY")
+    if env_key is not None and env_key.strip():
+        api_key = env_key.strip()
+
+    enabled = base.enabled
+    env_enabled = _env_truthy(os.environ.get("SURREAL_MEMORY_SYNC_ENABLED"))
+    if env_enabled is not None:
+        enabled = env_enabled
+
+    auto_sync = base.auto_sync
+    env_auto = _env_truthy(os.environ.get("SURREAL_MEMORY_SYNC_AUTO"))
+    if env_auto is not None:
+        auto_sync = env_auto
+
+    return SyncConfig.from_dict(
+        {
+            "enabled": enabled,
+            "hub_url": hub_url,
+            "api_key": api_key,
+            "auto_sync": auto_sync,
+            "sync_interval_seconds": base.sync_interval_seconds,
+            "conflict_strategy": base.conflict_strategy,
+        }
     )
 
 
@@ -1402,7 +1471,7 @@ class UnifiedConfig:
             tiers=TierConfig.from_dict(data.get("tiers", {})),
             watcher=WatcherConfig.from_dict(data.get("watcher", {})),
             device_id=raw_device_id,
-            sync=SyncConfig.from_dict(sync_data),
+            sync=_load_sync_settings(sync_data),
             storage_backend=_validate_storage_backend(
                 os.environ.get("SURREAL_MEMORY_STORAGE")
                 or str(data.get("storage_backend") or sync_data.get("storage_backend") or "sqlite")
@@ -1450,6 +1519,7 @@ class UnifiedConfig:
             f'provider = "{self.embedding.provider}"',
             f'model = "{self.embedding.model}"',
             f"similarity_threshold = {self.embedding.similarity_threshold}",
+            f"dimension = {self.embedding.dimension}",
             "",
             "# Auto-capture settings for MCP server",
             "[auto]",
@@ -2104,11 +2174,17 @@ async def _get_surrealdb_storage(config: UnifiedConfig, name: str) -> NeuralStor
         _surrealdb_storage.set_brain(name)
         return _surrealdb_storage
 
+    # Resolve the embedding vector dimension that the SurrealDB HNSW index must
+    # match. Priority: explicit config.embedding.dimension (e.g. a local
+    # OpenAI-compatible bge-m3 server → 1024) > known Gemini model dim > 3072.
     emb_dim = 3072  # Gemini 2.0 default
-    if config.embedding.enabled and config.embedding.model:
-        from surreal_memory.engine.embedding.gemini_embedding import _MODEL_DIMENSIONS
+    if config.embedding.enabled:
+        if config.embedding.dimension and config.embedding.dimension > 0:
+            emb_dim = int(config.embedding.dimension)
+        elif config.embedding.model:
+            from surreal_memory.engine.embedding.gemini_embedding import _MODEL_DIMENSIONS
 
-        emb_dim = _MODEL_DIMENSIONS.get(config.embedding.model, 3072)
+            emb_dim = _MODEL_DIMENSIONS.get(config.embedding.model, 3072)
 
     _warn_missing_surreal_pass()
 
