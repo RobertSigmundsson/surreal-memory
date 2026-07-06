@@ -64,7 +64,7 @@ class BrainConfig:
     embedding_activation_boost: float = 0.15
     freshness_weight: float = 0.0
     semantic_discovery_similarity_threshold: float = 0.7
-    semantic_discovery_max_pairs: int = 100
+    semantic_discovery_max_pairs: int = 2000
     # Adaptive recall (Bayesian depth priors)
     adaptive_depth_enabled: bool = True
     adaptive_depth_epsilon: float = 0.05

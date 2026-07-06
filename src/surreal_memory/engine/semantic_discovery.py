@@ -28,9 +28,11 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-# Hard caps to prevent runaway
-MAX_NEURONS_TO_EMBED = 500
-MAX_PAIRS_HARD_CAP = 200
+# Caps that bound work on very large brains. Semantic discovery now reads the
+# STORED embedding on each neuron (no re-embedding), so it scales well.
+MAX_NEURONS_TO_LINK = 10000  # max CONCEPT/ENTITY neurons considered per run
+MAX_PAIRS_HARD_CAP = 5000  # absolute cap on synapses created per run
+SEMANTIC_TOP_K = 5  # link each neuron to its K most-similar peers
 
 
 @dataclass(frozen=True)
@@ -212,47 +214,42 @@ async def discover_semantic_synapses(
     storage: NeuralStorage,
     config: BrainConfig,
 ) -> SemanticDiscoveryResult:
-    """Discover SIMILAR_TO synapses between unconnected neurons.
+    """Discover SIMILAR_TO synapses between CONCEPT/ENTITY neurons.
+
+    Uses the embedding vectors ALREADY STORED on each neuron
+    (``metadata["_embedding"]`` / ``embedding_vec``) — it does NOT re-embed —
+    so this is fast, does not depend on the embedding backend being reachable,
+    and is cheap enough to run inside automatic consolidation. For each eligible
+    neuron it links its top-K most-similar peers above the configured cosine
+    threshold, skipping pairs that already share a synapse.
 
     Steps:
-        1. Fetch CONCEPT + ENTITY neurons (capped at MAX_NEURONS_TO_EMBED)
-        2. Batch-embed their content via EmbeddingProvider
-        3. Compute pairwise cosine similarity
-        4. Create SIMILAR_TO synapses for pairs above threshold
-        5. Skip pairs that already have a synapse connection
-
-    Args:
-        storage: Neural storage backend
-        config: Brain configuration (uses embedding_* and semantic_discovery_* fields)
-
-    Returns:
-        SemanticDiscoveryResult with created synapses
+        1. Collect CONCEPT+ENTITY neurons that carry a stored embedding.
+        2. Compute cosine similarity (vectorised via numpy when available,
+           pure-python otherwise).
+        3. Create SIMILAR_TO synapses for each neuron's top-K peers above
+           threshold, up to ``semantic_discovery_max_pairs``.
     """
     effective_enabled, _, _ = _effective_embedding(config)
     if not effective_enabled:
         logger.debug("Embedding disabled — skipping semantic discovery")
         return SemanticDiscoveryResult()
 
-    # Try to create embedding provider
-    try:
-        provider = _create_provider(config, task_type="RETRIEVAL_DOCUMENT")
-    except Exception:
-        logger.debug("Embedding provider unavailable — skipping semantic discovery")
-        return SemanticDiscoveryResult()
-
-    # Paginate through all neurons to collect CONCEPT+ENTITY (avoid OOM)
+    # Collect eligible neurons that already carry a stored embedding (no re-embed).
     batch_size = 5000
     offset = 0
     eligible: list[Neuron] = []
+    vectors: list[list[float]] = []
     while True:
         batch = await storage.find_neurons(limit=batch_size, offset=offset)
         if not batch:
             break
-        eligible.extend(
-            n
-            for n in batch
-            if n.type in (NeuronType.CONCEPT, NeuronType.ENTITY) and n.content.strip()
-        )
+        for n in batch:
+            if n.type in (NeuronType.CONCEPT, NeuronType.ENTITY) and n.content.strip():
+                emb = n.metadata.get("_embedding")
+                if emb:
+                    eligible.append(n)
+                    vectors.append([float(x) for x in emb])
         offset += len(batch)
         if len(batch) < batch_size:
             break
@@ -260,69 +257,86 @@ async def discover_semantic_synapses(
     if len(eligible) < 2:
         return SemanticDiscoveryResult()
 
-    # Cap to prevent embedding too many
-    eligible = eligible[:MAX_NEURONS_TO_EMBED]
+    # Safety cap on very large brains.
+    if len(eligible) > MAX_NEURONS_TO_LINK:
+        eligible = eligible[:MAX_NEURONS_TO_LINK]
+        vectors = vectors[:MAX_NEURONS_TO_LINK]
+    neurons_embedded = len(vectors)
 
-    # Batch embed
-    texts = [n.content for n in eligible]
-    try:
-        embeddings = await provider.embed_batch(texts)
-    except Exception:
-        logger.debug("Embedding batch failed — skipping semantic discovery", exc_info=True)
-        return SemanticDiscoveryResult()
-
-    neurons_embedded = len(embeddings)
-
-    # Build set of existing synapse pairs for fast lookup
-    # Need all types to prevent creating duplicates across different synapse types
+    # Existing pairs (any synapse type) so we never duplicate a connection.
     all_synapses = await storage.get_synapses()
-    existing_pairs: set[frozenset[str]] = set()
-    for syn in all_synapses:
-        existing_pairs.add(frozenset({syn.source_id, syn.target_id}))
+    existing_pairs: set[frozenset[str]] = {
+        frozenset({s.source_id, s.target_id}) for s in all_synapses
+    }
 
-    # Compute pairwise cosine similarity
     threshold = config.semantic_discovery_similarity_threshold
     max_pairs = min(config.semantic_discovery_max_pairs, MAX_PAIRS_HARD_CAP)
+    top_k = SEMANTIC_TOP_K
 
-    candidates: list[tuple[int, int, float]] = []
-    pairs_evaluated = 0
-
-    for i in range(len(eligible)):
-        for j in range(i + 1, len(eligible)):
-            pairs_evaluated += 1
-            sim = _cosine_similarity(embeddings[i], embeddings[j])
-            if sim >= threshold:
-                candidates.append((i, j, sim))
-
-    # Sort by similarity descending, take top max_pairs
-    candidates.sort(key=lambda x: x[2], reverse=True)
-    candidates = candidates[:max_pairs]
-
-    # Create synapses
     new_synapses: list[Synapse] = []
     skipped = 0
+    pairs_evaluated = 0
 
-    for i, j, sim in candidates:
-        neuron_a = eligible[i]
-        neuron_b = eligible[j]
-        pair_key = frozenset({neuron_a.id, neuron_b.id})
-
-        if pair_key in existing_pairs:
+    def _link(i: int, j: int, sim: float) -> bool:
+        """Create one SIMILAR_TO synapse if the pair is new. Returns True if added."""
+        nonlocal skipped
+        pair = frozenset({eligible[i].id, eligible[j].id})
+        if pair in existing_pairs:
             skipped += 1
-            continue
-
-        synapse = Synapse.create(
-            source_id=neuron_a.id,
-            target_id=neuron_b.id,
-            type=SynapseType.SIMILAR_TO,
-            weight=sim * 0.6,  # Scale down to avoid dominating graph
-            metadata={
-                "_semantic_discovery": True,
-                "cosine_similarity": round(sim, 4),
-            },
+            return False
+        new_synapses.append(
+            Synapse.create(
+                source_id=eligible[i].id,
+                target_id=eligible[j].id,
+                type=SynapseType.SIMILAR_TO,
+                weight=sim * 0.6,  # scale down so semantic links don't dominate
+                metadata={"_semantic_discovery": True, "cosine_similarity": round(sim, 4)},
+            )
         )
-        new_synapses.append(synapse)
-        existing_pairs.add(pair_key)
+        existing_pairs.add(pair)
+        return True
+
+    try:
+        import numpy as np
+
+        mat = np.asarray(vectors, dtype=np.float32)
+        mat /= np.linalg.norm(mat, axis=1, keepdims=True) + 1e-9
+        for i in range(len(eligible)):
+            sims = mat @ mat[i]
+            sims[i] = -1.0
+            order = np.argsort(-sims)[:top_k]
+            for jj in order:
+                j = int(jj)
+                sim = float(sims[j])
+                pairs_evaluated += 1
+                if sim < threshold:
+                    break
+                _link(i, j, sim)
+                if len(new_synapses) >= max_pairs:
+                    break
+            if len(new_synapses) >= max_pairs:
+                break
+    except ImportError:
+        # Pure-python fallback (slower) — bounded by the caps above.
+        for i in range(len(eligible)):
+            row = sorted(
+                (
+                    (j, _cosine_similarity(vectors[i], vectors[j]))
+                    for j in range(len(eligible))
+                    if j != i
+                ),
+                key=lambda t: t[1],
+                reverse=True,
+            )[:top_k]
+            for j, sim in row:
+                pairs_evaluated += 1
+                if sim < threshold:
+                    break
+                _link(i, j, sim)
+                if len(new_synapses) >= max_pairs:
+                    break
+            if len(new_synapses) >= max_pairs:
+                break
 
     return SemanticDiscoveryResult(
         neurons_embedded=neurons_embedded,
