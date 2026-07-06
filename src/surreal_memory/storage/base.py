@@ -596,6 +596,7 @@ class NeuralStorage(ABC):
         limit: int = 10,
         order_by: Literal["created_at", "salience", "frequency"] = "created_at",
         descending: bool = True,
+        exclude_expired: bool = False,
     ) -> list[Fiber]:
         """
         Get fibers with ordering.
@@ -604,6 +605,7 @@ class NeuralStorage(ABC):
             limit: Maximum results
             order_by: Field to order by
             descending: Sort descending if True
+            exclude_expired: Drop fibers whose typed_memory is past expires_at
 
         Returns:
             List of fibers
