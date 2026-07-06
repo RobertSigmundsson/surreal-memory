@@ -40,9 +40,23 @@ class TestStopWords:
     """Tests for language-aware stop word selection."""
 
     def test_combined_stop_words(self) -> None:
-        from surreal_memory.extraction.keywords import _STOP_WORDS_CONVERSATIONAL_EN
+        # Updated for the Polish stopword fix: STOP_WORDS is now a 5-set union
+        # (EN, VI, conversational-EN, PL, conversational-PL) instead of 3 — this is
+        # the intended effect of closing root cause B (the "auto" language branch
+        # must filter Polish function words too), not a regression.
+        from surreal_memory.extraction.keywords import (
+            _STOP_WORDS_CONVERSATIONAL_EN,
+            _STOP_WORDS_CONVERSATIONAL_PL,
+            STOP_WORDS_PL,
+        )
 
-        assert STOP_WORDS == STOP_WORDS_EN | STOP_WORDS_VI | _STOP_WORDS_CONVERSATIONAL_EN
+        assert STOP_WORDS == (
+            STOP_WORDS_EN
+            | STOP_WORDS_VI
+            | _STOP_WORDS_CONVERSATIONAL_EN
+            | STOP_WORDS_PL
+            | _STOP_WORDS_CONVERSATIONAL_PL
+        )
 
     def test_english_stop_words(self) -> None:
         assert "the" in STOP_WORDS_EN
