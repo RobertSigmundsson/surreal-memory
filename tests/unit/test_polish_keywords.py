@@ -58,6 +58,18 @@ class TestClauseBoundaryBigrams:
         bigrams = _bigrams("ten branch, i potwierdzone zostaly")
         assert "branch potwierdzone" not in bigrams
 
+    def test_no_bigram_across_em_dash(self) -> None:
+        # U3 fresh-process proof (2026-07-06) live-reproduced this: a filename
+        # fragment ("py" from "keywords.py") glued onto the next clause's first
+        # word across an em-dash, since em-dash wasn't originally a clause boundary.
+        bigrams = _bigrams("blad w keywords.py — bigramy nie powinny przecinac granic")
+        assert "py bigramy" not in bigrams
+        # Sanity: the words still survive as unigrams / pair within their own clause.
+        assert "bigramy nie" not in bigrams  # "nie" is a stopword, excluded anyway
+        unigrams = _unigrams("blad w keywords.py — bigramy nie powinny przecinac granic")
+        assert "py" in unigrams
+        assert "bigramy" in unigrams
+
     def test_phase1_junk_bigrams_eliminated(self) -> None:
         junk = {
             "reguly czy",
