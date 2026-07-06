@@ -1322,6 +1322,7 @@ class ConflictDetectionStep:
                 conflicts=remaining_conflicts,
                 new_neuron_id=ctx.anchor_neuron.id,
                 storage=storage,
+                new_memory_type=memory_type_str,
             )
             for resolution in resolutions:
                 ctx.synapses_created.append(resolution.contradicts_synapse)

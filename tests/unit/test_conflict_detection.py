@@ -12,6 +12,7 @@ from surreal_memory.engine.conflict_detection import (
     _content_agrees,
     _extract_predicates,
     _extract_search_terms,
+    _has_supersession_marker,
     _is_decision_content,
     _predicates_conflict,
     _subjects_match,
@@ -464,3 +465,109 @@ class TestResolveConflicts:
             storage=storage,
         )
         assert len(resolutions) == 0
+
+
+class TestGovernanceSupersession:
+    """Issue #36: superseding a governance rule must demote the stale version."""
+
+    def test_supersession_marker_helper(self) -> None:
+        assert _has_supersession_marker("this supersedes the earlier rule")
+        assert _has_supersession_marker("the old limit no longer applies")
+        assert _has_supersession_marker("to nadpisuje wczesniejsza regule")
+        assert not _has_supersession_marker("we use MySQL for the database")
+
+    async def test_detects_governance_supersession_positive_restatement(self) -> None:
+        """A positive restatement with a supersede marker must be detected,
+        even though it carries no lexical negation to trip predicate conflict."""
+        storage = _MockStorage()
+        existing = Neuron.create(
+            type=NeuronType.CONCEPT,
+            content="Direct production deploys by agents are forbidden.",
+            neuron_id="existing-1",
+            metadata={"type": "boundary", "tags": ["agents", "deploy", "production"]},
+        )
+        storage.add_neuron_for_test(existing)
+
+        conflicts = await detect_conflicts(
+            content=(
+                "Direct production deploys by agents are approved from now on; "
+                "this supersedes the earlier boundary."
+            ),
+            tags={"agents", "deploy", "production"},
+            storage=storage,
+            memory_type="boundary",
+        )
+        assert any(c.type == ConflictType.GOVERNANCE_SUPERSESSION for c in conflicts)
+
+    async def test_governance_supersession_applies_strong_demotion(self) -> None:
+        """Same-type governance supersession gets the strong path: >=50% activation
+        drop, resolved marker, and a RESOLVED_BY synapse (like error resolution)."""
+        storage = _MockStorage()
+        existing = Neuron.create(
+            type=NeuronType.CONCEPT,
+            content="Agents must never deploy to production.",
+            neuron_id="existing-1",
+            metadata={"type": "boundary"},
+        )
+        state = NeuronState(neuron_id="existing-1", activation_level=0.9)
+        storage.add_neuron_for_test(existing, state)
+
+        conflict = Conflict(
+            type=ConflictType.GOVERNANCE_SUPERSESSION,
+            existing_neuron_id="existing-1",
+            existing_content="Agents must never deploy to production.",
+            new_content="Agents may deploy to production; supersedes the earlier rule.",
+            confidence=0.9,
+        )
+
+        resolutions = await resolve_conflicts(
+            [conflict],
+            new_neuron_id="new-1",
+            storage=storage,
+            existing_memory_type="boundary",
+            new_memory_type="boundary",
+        )
+
+        assert len(resolutions) == 1
+        updated_state = await storage.get_neuron_state("existing-1")
+        assert updated_state is not None
+        # Guaranteed >=50% demotion (error-resolution-strength).
+        assert updated_state.activation_level <= 0.45
+        updated = await storage.get_neuron("existing-1")
+        assert updated is not None
+        assert updated.metadata.get("_conflict_resolved") is True
+        assert any(getattr(s, "type", None) == SynapseType.RESOLVED_BY for s in storage._synapses)
+
+    async def test_non_governance_fact_keeps_weak_path(self) -> None:
+        """Regression: a plain fact conflict must NOT get the strong path."""
+        storage = _MockStorage()
+        existing = Neuron.create(
+            type=NeuronType.CONCEPT,
+            content="We use PostgreSQL",
+            neuron_id="existing-1",
+            metadata={"type": "fact"},
+        )
+        state = NeuronState(neuron_id="existing-1", activation_level=0.8)
+        storage.add_neuron_for_test(existing, state)
+
+        conflict = Conflict(
+            type=ConflictType.FACTUAL_CONTRADICTION,
+            existing_neuron_id="existing-1",
+            existing_content="We use PostgreSQL",
+            new_content="We use MySQL",
+            confidence=0.9,
+        )
+
+        await resolve_conflicts(
+            [conflict],
+            new_neuron_id="new-1",
+            storage=storage,
+            existing_memory_type="fact",
+            new_memory_type="fact",
+        )
+        updated = await storage.get_neuron("existing-1")
+        assert updated is not None
+        assert updated.metadata.get("_conflict_resolved") is None
+        assert not any(
+            getattr(s, "type", None) == SynapseType.RESOLVED_BY for s in storage._synapses
+        )
