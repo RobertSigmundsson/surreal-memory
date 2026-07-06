@@ -478,6 +478,11 @@ class SyncToolHandler:
 
                 self.config = dc_replace(self.config, sync=new_sync)
                 self.config.save()
+                from surreal_memory.unified_config import set_config
+
+                set_config(
+                    self.config
+                )  # refresh REST get_config() singleton (mirror activate path)
 
                 result: dict[str, Any] = {
                     "status": "updated",

@@ -118,7 +118,9 @@ class SurrealDBCognitiveMixin:
             neuron_id=neuron_id,
         )
         if existing:
-            await conn.merge(f"cognitive_state:{sid}", record_data)
+            # Merge by existing record id (not recomputed sid) — survives a brain
+            # rename where the id keeps the old brain prefix (else silent no-op).
+            await conn.merge(existing[0]["id"], record_data)
         else:
             insert_data = dict(record_data)
             insert_data["id"] = sid
