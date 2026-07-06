@@ -614,6 +614,9 @@ STOP_WORDS: frozenset[str] = (
 # Vietnamese diacritical character pattern (unique to Vietnamese, not French)
 _VI_DIACRITICS = re.compile(r"[ăâđêôơưắằẳẵặấầẩẫậếềểễệốồổỗộớờởỡợứừửữự]")
 
+# Clause boundary: bigrams never pair words that cross one of these.
+_CLAUSE_BOUNDARY = re.compile(r"[.,;:!?\n\r]+")
+
 
 def _detect_vietnamese(text: str) -> bool:
     """Detect if text contains Vietnamese based on diacritical characters."""
@@ -713,11 +716,16 @@ def extract_weighted_keywords(
         if vi_tokenized is not None:
             tokenized_text = vi_tokenized
 
-    words = re.findall(r"\b[a-zA-ZÀ-ỹ]+(?:_[a-zA-ZÀ-ỹ]+)*\b", tokenized_text.lower())
+    words: list[str] = []
+    clause_of: list[int] = []
+    for clause_idx, clause in enumerate(_CLAUSE_BOUNDARY.split(tokenized_text.lower())):
+        for w in re.findall(r"\b[a-zA-ZÀ-ỹ]+(?:_[a-zA-ZÀ-ỹ]+)*\b", clause):
+            words.append(w)
+            clause_of.append(clause_idx)
 
-    # Filter to content words with original position
-    filtered: list[tuple[str, int]] = [
-        (w, i)
+    # Filter to content words with original position and clause id
+    filtered: list[tuple[str, int, int]] = [
+        (w, i, clause_of[i])
         for i, w in enumerate(words)
         if len(w.replace("_", "")) >= min_length
         and w.replace("_", " ") not in stop_words
@@ -731,17 +739,17 @@ def extract_weighted_keywords(
     weighted: dict[str, float] = {}
 
     # Unigrams with position decay (1.0 at start → 0.5 at end)
-    for idx, (word, _orig_pos) in enumerate(filtered):
+    for idx, (word, _orig_pos, _clause_idx) in enumerate(filtered):
         position_weight = 1.0 - 0.5 * (idx / max(1, total - 1))
         # Store with underscores replaced by spaces for readability
         display_word = word.replace("_", " ")
         weighted[display_word] = max(weighted.get(display_word, 0.0), position_weight)
 
-    # Bi-grams from adjacent non-stop words within 3 original word positions
+    # Bi-grams from adjacent non-stop words within the same clause, gap <= 2 original word positions
     for i in range(len(filtered) - 1):
-        w1, p1 = filtered[i]
-        w2, p2 = filtered[i + 1]
-        if p2 - p1 <= 3:
+        w1, p1, c1 = filtered[i]
+        w2, p2, c2 = filtered[i + 1]
+        if c1 == c2 and p2 - p1 <= 2:
             dw1 = w1.replace("_", " ")
             dw2 = w2.replace("_", " ")
             bigram = f"{dw1} {dw2}"
