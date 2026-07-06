@@ -603,12 +603,12 @@ _STOP_WORDS_CONVERSATIONAL_PL: frozenset[str] = frozenset(
 )
 
 # Combined stop words for backward compatibility
+# STOP_WORDS_VI is deliberately excluded here: several of its ASCII-only entries
+# (e.g. "ai", "em") collide with real English/Polish vocabulary and were silently
+# deleting them from every "auto"-mode extraction. The explicit "vi" branch of
+# _get_stop_words() below still returns STOP_WORDS_VI unchanged.
 STOP_WORDS: frozenset[str] = (
-    STOP_WORDS_EN
-    | STOP_WORDS_VI
-    | _STOP_WORDS_CONVERSATIONAL_EN
-    | STOP_WORDS_PL
-    | _STOP_WORDS_CONVERSATIONAL_PL
+    STOP_WORDS_EN | _STOP_WORDS_CONVERSATIONAL_EN | STOP_WORDS_PL | _STOP_WORDS_CONVERSATIONAL_PL
 )
 
 # Vietnamese diacritical character pattern (unique to Vietnamese, not French)
