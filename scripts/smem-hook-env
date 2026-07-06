@@ -1,0 +1,30 @@
+#!/usr/bin/env bash
+# smem-hook-env — LOCAL ops helper (NOT part of the shipped surreal_memory package).
+#
+# Wraps a surreal-memory Claude Code hook command, sourcing the project .env first
+# so the hook process gets SURREALDB_PASS etc. Without it the hooks run with a bare
+# environment -> StorageAuthError -> silent no-op (this was the run-004 bug).
+# Secrets stay in .env per CLAUDE.md; this wrapper only exports them into the child.
+#
+# Install:
+#   cp scripts/smem-hook-env ~/.local/bin/smem-hook-env && chmod +x ~/.local/bin/smem-hook-env
+# Reference from ~/.claude/settings.json hooks, e.g.:
+#   "command": "smem-hook-env smem-hook-post-tool-use"
+#
+# .env resolution order (first match wins):
+#   1. $SMEM_ENV_FILE                (explicit override)
+#   2. <this-script-dir>/../.env     (when run straight from the repo checkout)
+#   3. ~/repos/surreal-memory/.env   (default checkout location on this machine)
+set -a
+_smem_env=""
+if [ -n "${SMEM_ENV_FILE:-}" ]; then
+  _smem_env="$SMEM_ENV_FILE"
+else
+  _here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+  for _cand in "$_here/../.env" "$HOME/repos/surreal-memory/.env"; do
+    if [ -f "$_cand" ]; then _smem_env="$_cand"; break; fi
+  done
+fi
+[ -n "$_smem_env" ] && [ -f "$_smem_env" ] && . "$_smem_env"
+set +a
+exec "$@"

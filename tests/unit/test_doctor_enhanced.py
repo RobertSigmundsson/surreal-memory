@@ -47,6 +47,79 @@ class TestCheckHooks:
             assert result["status"] == OK
             assert "3/3" in result["detail"]
 
+    def test_wrapper_referenced_but_missing_on_path(self, tmp_path: Path) -> None:
+        """Hooks wired through smem-hook-env warn if the wrapper is not on PATH."""
+        settings = {
+            "hooks": {
+                "PreCompact": [
+                    {
+                        "hooks": [
+                            {"type": "command", "command": "smem-hook-env smem-hook-pre-compact"}
+                        ]
+                    }
+                ],
+                "Stop": [
+                    {"hooks": [{"type": "command", "command": "smem-hook-env smem-hook-stop"}]}
+                ],
+                "PostToolUse": [
+                    {
+                        "hooks": [
+                            {"type": "command", "command": "smem-hook-env smem-hook-post-tool-use"}
+                        ]
+                    }
+                ],
+            }
+        }
+        settings_path = tmp_path / ".claude" / "settings.json"
+        settings_path.parent.mkdir(parents=True)
+        settings_path.write_text(json.dumps(settings), encoding="utf-8")
+
+        with (
+            patch("surreal_memory.cli.doctor.Path.home", return_value=tmp_path),
+            patch("surreal_memory.cli.doctor.shutil.which", return_value=None),
+        ):
+            result = _check_hooks()
+            assert result["status"] == WARN
+            assert "smem-hook-env" in result["detail"]
+
+    def test_wrapper_referenced_and_present(self, tmp_path: Path) -> None:
+        """Hooks wired through smem-hook-env pass when the wrapper resolves on PATH."""
+        settings = {
+            "hooks": {
+                "PreCompact": [
+                    {
+                        "hooks": [
+                            {"type": "command", "command": "smem-hook-env smem-hook-pre-compact"}
+                        ]
+                    }
+                ],
+                "Stop": [
+                    {"hooks": [{"type": "command", "command": "smem-hook-env smem-hook-stop"}]}
+                ],
+                "PostToolUse": [
+                    {
+                        "hooks": [
+                            {"type": "command", "command": "smem-hook-env smem-hook-post-tool-use"}
+                        ]
+                    }
+                ],
+            }
+        }
+        settings_path = tmp_path / ".claude" / "settings.json"
+        settings_path.parent.mkdir(parents=True)
+        settings_path.write_text(json.dumps(settings), encoding="utf-8")
+
+        with (
+            patch("surreal_memory.cli.doctor.Path.home", return_value=tmp_path),
+            patch(
+                "surreal_memory.cli.doctor.shutil.which",
+                return_value="/home/user/.local/bin/smem-hook-env",
+            ),
+        ):
+            result = _check_hooks()
+            assert result["status"] == OK
+            assert "3/3" in result["detail"]
+
     def test_missing_hooks(self, tmp_path: Path) -> None:
         settings = {
             "hooks": {

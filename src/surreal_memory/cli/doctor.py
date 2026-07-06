@@ -720,6 +720,27 @@ def _check_hooks() -> dict[str, Any]:
                     found.append(event)
                     break
 
+    # If hooks are wired through the smem-hook-env wrapper, that wrapper must be
+    # resolvable on PATH — otherwise every hook fails with "command not found"
+    # (regression seen when the local wrapper script went missing).
+    uses_wrapper = any(
+        "smem-hook-env" in hook.get("command", "")
+        for event in expected
+        for entry in hooks_section.get(event, [])
+        for hook in entry.get("hooks", [])
+    )
+    if uses_wrapper and shutil.which("smem-hook-env") is None:
+        return {
+            "name": "Hooks",
+            "status": WARN,
+            "detail": "hooks call 'smem-hook-env' but it is not on PATH (hooks will fail)",
+            "fix": (
+                "Install it: cp scripts/smem-hook-env ~/.local/bin/ "
+                "&& chmod +x ~/.local/bin/smem-hook-env"
+            ),
+            "fixable": False,
+        }
+
     if len(found) == len(expected):
         return {
             "name": "Hooks",
