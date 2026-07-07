@@ -143,9 +143,22 @@ def _build_dynamic_action(
             f"(current: {ratio:.1f} synapses/neuron, target: 3.0+)."
         )
     elif component == "diversity":
+        # Diversity is Shannon entropy over synapse types (distribution balance),
+        # normalised against _EXPECTED_SYNAPSE_TYPES common types. A brain can use
+        # MORE than that baseline yet still score low when the mix is skewed, so
+        # never claim "{used} of {expected}" when used >= expected (that read as
+        # the contradictory "16 of 8 expected synapse types used").
+        expected = DiagnosticsEngine._EXPECTED_SYNAPSE_TYPES
+        if types_used < expected:
+            return (
+                f"Use varied memory types — only {types_used} of {expected} common "
+                "synapse types used. Try: 'X caused Y', 'after A then B', "
+                "'X is related to Y'."
+            )
         return (
-            f"Use varied memory types — only {types_used} of 8 expected synapse types used. "
-            "Try: 'X caused Y', 'after A then B', 'X is related to Y'."
+            f"Balance your synapse types — {types_used} types are in use but "
+            "unevenly distributed, so a few relations dominate. Vary phrasing: "
+            "'X caused Y', 'after A then B', 'X is related to Y'."
         )
     elif component == "freshness":
         fresh_count = int(freshness * max(fiber_count, 1))
