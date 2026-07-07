@@ -165,3 +165,50 @@ class TestBuildMcpEnv:
         env = build_mcp_env()
         for k, v in env.items():
             assert isinstance(v, str), f"Key {k!r} has non-string value {v!r}"
+
+
+class TestParseServerVersion:
+    """parse_server_version tolerates the surrealdb- prefix (RUN-005 U4)."""
+
+    def test_strips_surrealdb_prefix(self):
+        from surreal_memory.storage.surrealdb.connection import parse_server_version
+
+        assert parse_server_version("surrealdb-3.2.0") == (3, 2, 0)
+
+    def test_plain_version(self):
+        from surreal_memory.storage.surrealdb.connection import parse_server_version
+
+        assert parse_server_version("3.2.10") == (3, 2, 10)
+
+    def test_unparsable_returns_none(self):
+        from surreal_memory.storage.surrealdb.connection import parse_server_version
+
+        assert parse_server_version("nightly") is None
+        assert parse_server_version("") is None
+
+    def test_min_server_version_is_3_2_0(self):
+        from surreal_memory.storage.surrealdb.connection import MIN_SERVER_VERSION
+
+        assert MIN_SERVER_VERSION == (3, 2, 0)
+
+    def test_ordering_gate(self):
+        from surreal_memory.storage.surrealdb.connection import (
+            MIN_SERVER_VERSION,
+            parse_server_version,
+        )
+
+        assert parse_server_version("surrealdb-3.1.1") < MIN_SERVER_VERSION
+        assert parse_server_version("surrealdb-3.2.0") >= MIN_SERVER_VERSION
+        assert parse_server_version("surrealdb-3.2.1") >= MIN_SERVER_VERSION
+
+
+class TestStorageVersionError:
+    """StorageVersionError carries an actionable upgrade hint, no secrets."""
+
+    def test_message_and_hint(self):
+        from surreal_memory.storage.surrealdb.connection import StorageVersionError
+
+        err = StorageVersionError("SurrealDB 3.1.1 is too old", hint="Upgrade the image")
+        assert "too old" in str(err)
+        assert "Upgrade the image" in str(err)
+        assert err.hint == "Upgrade the image"

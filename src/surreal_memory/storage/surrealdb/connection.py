@@ -9,6 +9,7 @@ Single source of truth for:
 from __future__ import annotations
 
 import os
+import re
 from dataclasses import dataclass
 
 DEFAULT_URL = "http://localhost:8001"
@@ -23,6 +24,26 @@ AUTH_HINT = (
 )
 DEFAULT_NS = "surreal_memory"
 DEFAULT_DB = "default"
+
+
+# Minimum SurrealDB server version required (v2.6.0+): the synapse table is a
+# native RELATION and internal GQL path search needs 3.2.0's ISO GQL. The
+# synapse->RELATE auto-migration also gates on this.
+MIN_SERVER_VERSION = (3, 2, 0)
+
+
+def parse_server_version(raw: str) -> tuple[int, int, int] | None:
+    """Parse a SurrealDB version string into a (major, minor, patch) tuple.
+
+    Tolerates the ``surrealdb-`` prefix the HTTP ``/version`` endpoint / SDK
+    ``version()`` return (e.g. ``surrealdb-3.2.0`` -> ``(3, 2, 0)``). Returns None
+    when no ``X.Y.Z`` can be found, so callers can warn-and-continue rather than
+    hard-fail on an unrecognised build string.
+    """
+    match = re.search(r"(\d+)\.(\d+)\.(\d+)", str(raw))
+    if not match:
+        return None
+    return (int(match.group(1)), int(match.group(2)), int(match.group(3)))
 
 
 @dataclass(frozen=True)
@@ -53,6 +74,24 @@ class StorageAuthError(Exception):
     Distinct from token-expiry 401 errors handled by _is_auth_error in store.py.
     Carries an actionable hint so MCP clients surface the root cause instead of
     a generic -32000 failure.
+    """
+
+    def __init__(self, message: str, hint: str = "") -> None:
+        super().__init__(message)
+        self.hint = hint
+
+    def __str__(self) -> str:
+        base = super().__str__()
+        return f"{base} {self.hint}".strip()
+
+
+class StorageVersionError(Exception):
+    """Raised when the connected SurrealDB server is older than MIN_SERVER_VERSION.
+
+    Carries an actionable upgrade hint (message + hint in English, no secrets) so
+    the failure surfaces the root cause instead of a downstream schema/migration
+    error. Only raised on a CONFIRMED old version — an unparsable/failed version
+    probe warns and continues.
     """
 
     def __init__(self, message: str, hint: str = "") -> None:

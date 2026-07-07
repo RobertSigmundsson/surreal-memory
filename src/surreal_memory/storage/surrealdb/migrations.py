@@ -31,18 +31,20 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
-import re
 import time
 import uuid
 from typing import Any
 
+from surreal_memory.storage.surrealdb.connection import (
+    MIN_SERVER_VERSION,
+    parse_server_version,
+)
 from surreal_memory.storage.surrealdb.schema import SCHEMA_VERSION, SYNAPSE_V8_DDL
 
 logger = logging.getLogger(__name__)
 
 TARGET_VERSION = SCHEMA_VERSION  # 8
 SOURCE_VERSION = TARGET_VERSION - 1  # 7 (flat synapse table)
-MIN_SERVER_VERSION = (3, 2, 0)
 
 BACKUP_TABLE = "synapse_migration_backup"
 BATCH_SIZE = 500
@@ -270,21 +272,13 @@ async def _page(conn: Any, table: str, after: Any | None, batch: int) -> list[di
 # --------------------------------------------------------------------------- #
 # Version gate (defensive; store.initialize() also gates before ensure_schema)
 # --------------------------------------------------------------------------- #
-def _parse_version(raw: str) -> tuple[int, int, int] | None:
-    """Parse a version like ``surrealdb-3.2.0`` / ``3.2.0`` -> (3, 2, 0)."""
-    match = re.search(r"(\d+)\.(\d+)\.(\d+)", str(raw))
-    if not match:
-        return None
-    return (int(match.group(1)), int(match.group(2)), int(match.group(3)))
-
-
 async def _check_server_version(conn: Any) -> None:
     try:
         raw = await conn.version()
     except Exception:
         logger.warning("Could not read SurrealDB version before migration; proceeding.")
         return
-    parsed = _parse_version(str(raw))
+    parsed = parse_server_version(str(raw))
     if parsed is not None and parsed < MIN_SERVER_VERSION:
         raise MigrationError(
             "synapse->RELATE migration requires SurrealDB >= 3.2.0 but the server reports "

@@ -301,14 +301,18 @@ class SurrealDBStorage(
         self._reauth_lock = asyncio.Lock()
 
     async def initialize(self) -> None:
-        """Connect to SurrealDB and apply schema."""
+        """Connect to SurrealDB, gate on server version, apply schema + migrations."""
         from surrealdb import AsyncSurreal
 
         from surreal_memory.storage.surrealdb.connection import (
             AUTH_HINT,
+            MIN_SERVER_VERSION,
             StorageAuthError,
+            StorageVersionError,
             is_credential_error,
+            parse_server_version,
         )
+        from surreal_memory.storage.surrealdb.migrations import apply_migrations
 
         self._conn = AsyncSurreal(self._url)
         try:
@@ -321,7 +325,31 @@ class SurrealDBStorage(
                 ) from exc
             raise
         await self._conn.use(self._namespace, self._database)
+
+        # Hard version gate (>= 3.2.0): the synapse RELATION schema and the
+        # auto-migration below require SurrealDB 3.2.0. A failed/unparsable probe
+        # warns and continues; only a CONFIRMED old version hard-fails.
+        try:
+            raw_version = await self._conn.version()
+        except Exception:
+            logger.warning("Could not read SurrealDB version; skipping version gate.")
+            raw_version = None
+        if raw_version is not None:
+            parsed = parse_server_version(str(raw_version))
+            if parsed is not None and parsed < MIN_SERVER_VERSION:
+                min_str = ".".join(str(p) for p in MIN_SERVER_VERSION)
+                raise StorageVersionError(
+                    f"SurrealDB {raw_version} is too old; surreal-memory requires >= {min_str}.",
+                    hint=(
+                        "Upgrade the image: docker compose -f docker-compose.surrealdb.yml pull "
+                        "&& docker compose -f docker-compose.surrealdb.yml up -d (the "
+                        "surrealdb_data volume is preserved — back it up first)."
+                    ),
+                )
+
         await ensure_schema(self._conn, self._embedding_dim)
+        # Auto-run the synapse->RELATE migration on first connect after upgrade.
+        await apply_migrations(self._conn)
         logger.info(
             "SurrealDB connected: %s ns=%s db=%s",
             self._url,

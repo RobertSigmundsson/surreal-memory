@@ -935,24 +935,48 @@ def doctor(
         bool,
         typer.Option("--dev", help="Include source checkout and contributor tooling checks"),
     ] = False,
+    synapse_migration: Annotated[
+        str | None,
+        typer.Option(
+            "--synapse-migration",
+            help="Manage the synapse->RELATE migration: status | retry | purge-backup",
+        ),
+    ] = None,
 ) -> None:
     """Run system health diagnostics.
 
     Checks Python version, config, brain, dependencies, embedding provider,
-    schema version, MCP config, hooks, dedup, surface, and CLI tools.
+    schema version, SurrealDB version, MCP config, hooks, dedup, surface, and CLI tools.
 
     Use --fix to automatically remediate fixable issues.
     Use --dev to check contributor setup in a source checkout.
+    Use --synapse-migration to inspect/resume/clean up the SurrealDB synapse->RELATE migration.
 
     Examples:
-        smem doctor          # Run all checks
-        smem doctor --fix    # Auto-fix what's possible
-        smem doctor --dev    # Include contributor setup checks
-        smem doctor --json   # Machine-readable output
+        smem doctor                              # Run all checks
+        smem doctor --fix                        # Auto-fix what's possible
+        smem doctor --dev                        # Include contributor setup checks
+        smem doctor --json                       # Machine-readable output
+        smem doctor --synapse-migration status   # Show migration state
+        smem doctor --synapse-migration retry    # Resume a partial/failed migration
+        smem doctor --synapse-migration purge-backup  # Drop the migration backup table
     """
     import json as json_mod
 
-    from surreal_memory.cli.doctor import run_doctor
+    from surreal_memory.cli.doctor import run_doctor, run_synapse_migration_command
+
+    if synapse_migration is not None:
+        try:
+            run_synapse_migration_command(synapse_migration, json_output=json_output)
+        except ValueError as exc:
+            typer.secho(str(exc), fg=typer.colors.RED)
+            raise typer.Exit(2) from exc
+        except Exception as exc:
+            # Covers StorageAuthError / MigrationError (incl. MigrationLockError) and any
+            # connectivity failure from status/retry/purge-backup against a live SurrealDB.
+            typer.secho(f"synapse-migration failed: {exc}", fg=typer.colors.RED)
+            raise typer.Exit(1) from exc
+        return
 
     result = run_doctor(json_output=json_output, fix=fix, dev=dev)
 

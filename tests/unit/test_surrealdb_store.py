@@ -138,3 +138,85 @@ class TestDefaultPasswordDry:
 
         s = SurrealDBStorage()
         assert s._password == "envpass"  # noqa: S105
+
+
+class TestInitializeVersionGate:
+    """store.initialize() hard-gates on SurrealDB >= 3.2.0 (RUN-005 U4)."""
+
+    @pytest.mark.asyncio
+    async def test_rejects_confirmed_old_server(self):
+        from surreal_memory.storage.surrealdb.connection import StorageVersionError
+        from surreal_memory.storage.surrealdb.store import SurrealDBStorage
+
+        mock_conn = AsyncMock()
+        mock_conn.signin.return_value = None
+        mock_conn.use.return_value = None
+        mock_conn.version.return_value = "surrealdb-3.1.1"
+
+        storage = SurrealDBStorage()
+        with patch("surrealdb.AsyncSurreal", return_value=mock_conn, create=True):
+            with pytest.raises(StorageVersionError) as exc:
+                await storage.initialize()
+        assert "3.2.0" in str(exc.value)
+        # gate fires BEFORE schema/migration
+        mock_conn.query.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_accepts_current_server(self):
+        from surreal_memory.storage.surrealdb.store import SurrealDBStorage
+
+        mock_conn = AsyncMock()
+        mock_conn.signin.return_value = None
+        mock_conn.use.return_value = None
+        mock_conn.version.return_value = "surrealdb-3.2.0"
+
+        storage = SurrealDBStorage()
+        with (
+            patch("surrealdb.AsyncSurreal", return_value=mock_conn, create=True),
+            patch("surreal_memory.storage.surrealdb.store.ensure_schema", new_callable=AsyncMock),
+            patch(
+                "surreal_memory.storage.surrealdb.migrations.apply_migrations",
+                new_callable=AsyncMock,
+            ),
+        ):
+            await storage.initialize()  # must not raise
+
+    @pytest.mark.asyncio
+    async def test_continues_on_unparsable_version(self):
+        from surreal_memory.storage.surrealdb.store import SurrealDBStorage
+
+        mock_conn = AsyncMock()
+        mock_conn.signin.return_value = None
+        mock_conn.use.return_value = None
+        mock_conn.version.return_value = "weird-build-string"
+
+        storage = SurrealDBStorage()
+        with (
+            patch("surrealdb.AsyncSurreal", return_value=mock_conn, create=True),
+            patch("surreal_memory.storage.surrealdb.store.ensure_schema", new_callable=AsyncMock),
+            patch(
+                "surreal_memory.storage.surrealdb.migrations.apply_migrations",
+                new_callable=AsyncMock,
+            ),
+        ):
+            await storage.initialize()  # unparsable → warn + continue, no raise
+
+    @pytest.mark.asyncio
+    async def test_continues_when_version_probe_fails(self):
+        from surreal_memory.storage.surrealdb.store import SurrealDBStorage
+
+        mock_conn = AsyncMock()
+        mock_conn.signin.return_value = None
+        mock_conn.use.return_value = None
+        mock_conn.version.side_effect = RuntimeError("no version endpoint")
+
+        storage = SurrealDBStorage()
+        with (
+            patch("surrealdb.AsyncSurreal", return_value=mock_conn, create=True),
+            patch("surreal_memory.storage.surrealdb.store.ensure_schema", new_callable=AsyncMock),
+            patch(
+                "surreal_memory.storage.surrealdb.migrations.apply_migrations",
+                new_callable=AsyncMock,
+            ),
+        ):
+            await storage.initialize()  # probe failure → warn + continue, no raise

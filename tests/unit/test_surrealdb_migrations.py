@@ -226,9 +226,11 @@ class TestVersionGate:
         await M._check_server_version(conn)  # no raise
 
     def test_parse_version_strips_prefix(self):
-        assert M._parse_version("surrealdb-3.2.0") == (3, 2, 0)
-        assert M._parse_version("3.2.10") == (3, 2, 10)
-        assert M._parse_version("nope") is None
+        from surreal_memory.storage.surrealdb.connection import parse_server_version
+
+        assert parse_server_version("surrealdb-3.2.0") == (3, 2, 0)
+        assert parse_server_version("3.2.10") == (3, 2, 10)
+        assert parse_server_version("nope") is None
 
 
 # --------------------------------------------------------------------------- #

@@ -41,6 +41,7 @@ _CHECK_TIERS: dict[str, str] = {
     "Schema version": TIER_CORE,
     "CLI tools": TIER_CORE,
     "SurrealDB connection": TIER_CORE,
+    "SurrealDB version": TIER_CORE,
     "Embedding provider": TIER_RECOMMENDED,
     "MCP env completeness": TIER_RECOMMENDED,
     "MCP configuration": TIER_RECOMMENDED,
@@ -89,6 +90,7 @@ def run_doctor(
     checks.append(_check_config_freshness())
     checks.append(_check_cli_tools())
     checks.append(_check_surrealdb_connection())
+    checks.append(_check_surrealdb_version())
     checks.append(_check_mcp_env_completeness())
     checks.append(_check_pro_plugin())
     if dev:
@@ -1083,6 +1085,152 @@ def _check_surrealdb_connection() -> dict[str, Any]:
             "detail": f"could not reach SurrealDB: {type(exc).__name__}",
             "fix": "Ensure SurrealDB is running and SURREALDB_URL is correct",
         }
+
+
+def _run_surrealdb_version_probe() -> str:
+    """Sign in to SurrealDB and return the raw server version string.
+
+    Raises on connectivity/auth failure so the caller can WARN.
+    """
+    import asyncio
+
+    from surrealdb import AsyncSurreal
+
+    from surreal_memory.storage.surrealdb.connection import SurrealSettings
+
+    async def _probe() -> str:
+        settings = SurrealSettings.from_env()
+        conn = AsyncSurreal(settings.url)
+        await conn.signin({"username": settings.user, "password": settings.password})
+        return str(await asyncio.wait_for(conn.version(), timeout=5))
+
+    return run_async(_probe())
+
+
+def _check_surrealdb_version() -> dict[str, Any]:
+    """Check the SurrealDB server is >= MIN_SERVER_VERSION (TIER_CORE for surrealdb).
+
+    SKIP when the surrealdb backend is not active; WARN on unreachable/unparsable
+    version; FAIL on a confirmed too-old server; OK otherwise.
+    """
+    import os
+
+    from surreal_memory.storage.surrealdb.connection import (
+        MIN_SERVER_VERSION,
+        parse_server_version,
+    )
+
+    if os.environ.get("SURREAL_MEMORY_STORAGE") != "surrealdb":
+        try:
+            from surreal_memory.unified_config import get_config
+
+            if get_config(reload=True).storage_backend != "surrealdb":
+                return {
+                    "name": "SurrealDB version",
+                    "status": SKIP,
+                    "detail": "surrealdb backend not active",
+                }
+        except Exception:
+            return {
+                "name": "SurrealDB version",
+                "status": SKIP,
+                "detail": "storage backend could not be determined",
+            }
+
+    min_str = ".".join(str(p) for p in MIN_SERVER_VERSION)
+    try:
+        raw = _run_surrealdb_version_probe()
+    except Exception as exc:
+        return {
+            "name": "SurrealDB version",
+            "status": WARN,
+            "detail": f"could not read version: {type(exc).__name__}",
+            "fix": "Ensure SurrealDB is running and SURREALDB_URL is correct",
+        }
+
+    parsed = parse_server_version(raw)
+    if parsed is None:
+        return {
+            "name": "SurrealDB version",
+            "status": WARN,
+            "detail": f"unrecognised version string '{raw}'",
+        }
+    if parsed < MIN_SERVER_VERSION:
+        return {
+            "name": "SurrealDB version",
+            "status": FAIL,
+            "detail": f"{raw} is older than the required {min_str}",
+            "fix": (
+                "Upgrade: docker compose -f docker-compose.surrealdb.yml pull && "
+                "docker compose -f docker-compose.surrealdb.yml up -d "
+                "(the surrealdb_data volume is preserved — back it up first)"
+            ),
+        }
+    return {
+        "name": "SurrealDB version",
+        "status": OK,
+        "detail": f"{raw} (>= {min_str})",
+    }
+
+
+def run_synapse_migration_command(action: str, *, json_output: bool = False) -> dict[str, Any]:
+    """Handle ``smem doctor --synapse-migration {status|retry|purge-backup}``.
+
+    - status: report schema_meta:version, the migration state, and backup row count.
+    - retry: re-run apply_migrations (resumes a partial/failed synapse->RELATE migration).
+    - purge-backup: drop the synapse_migration_backup table (post-migration cleanup).
+    """
+    valid = {"status", "retry", "purge-backup"}
+    if action not in valid:
+        raise ValueError(f"--synapse-migration must be one of {sorted(valid)}, got {action!r}")
+
+    import json as json_mod
+
+    from surrealdb import AsyncSurreal
+
+    from surreal_memory.storage.surrealdb import migrations as migrations_mod
+    from surreal_memory.storage.surrealdb.connection import SurrealSettings
+
+    async def _run() -> dict[str, Any]:
+        settings = SurrealSettings.from_env()
+        conn = AsyncSurreal(settings.url)
+        await conn.signin({"username": settings.user, "password": settings.password})
+        await conn.use(settings.namespace, settings.database)
+
+        if action == "status":
+            version = await migrations_mod._read_stamped_version(conn)
+            state = await migrations_mod._get_state(conn)
+            backup_rows = await migrations_mod._count(conn, migrations_mod.BACKUP_TABLE)
+            return {
+                "action": "status",
+                "schema_version": version,
+                "migration_state": state,
+                "backup_rows": backup_rows,
+            }
+        if action == "retry":
+            final = await migrations_mod.apply_migrations(conn)
+            return {"action": "retry", "schema_version": final}
+        # purge-backup
+        await conn.query(f"REMOVE TABLE IF EXISTS {migrations_mod.BACKUP_TABLE}")
+        return {"action": "purge-backup", "dropped": migrations_mod.BACKUP_TABLE}
+
+    result = run_async(_run())
+
+    if json_output:
+        print(json_mod.dumps(result, indent=2, default=str))
+    elif action == "status":
+        state = result.get("migration_state") or {}
+        phase = state.get("phase", "n/a") if isinstance(state, dict) else "n/a"
+        print(f"synapse->RELATE migration: schema_version={result['schema_version']} phase={phase}")
+        print(f"  backup rows: {result['backup_rows']} (table {migrations_mod.BACKUP_TABLE})")
+    elif action == "retry":
+        print(
+            f"synapse->RELATE migration re-run complete: schema_version={result['schema_version']}"
+        )
+    else:
+        print(f"Dropped migration backup table: {result['dropped']}")
+
+    return result
 
 
 def _check_mcp_env_completeness() -> dict[str, Any]:

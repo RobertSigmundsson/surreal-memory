@@ -6,6 +6,8 @@ import json
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from surreal_memory.cli.doctor import (
     FAIL,
     OK,
@@ -327,6 +329,7 @@ class TestRunDoctorIntegration:
     @patch("surreal_memory.cli.doctor._check_dedup")
     @patch("surreal_memory.cli.doctor._check_hooks")
     @patch("surreal_memory.cli.doctor._check_cli_tools")
+    @patch("surreal_memory.cli.doctor._check_surrealdb_version")
     @patch("surreal_memory.cli.doctor._check_mcp_env_completeness")
     @patch("surreal_memory.cli.doctor._check_surrealdb_connection")
     @patch("surreal_memory.cli.doctor._check_mcp_connection")
@@ -342,8 +345,9 @@ class TestRunDoctorIntegration:
             mock.return_value = {"name": "test", "status": OK, "detail": "ok"}
 
         result = run_doctor(json_output=True)
-        assert result["total"] == 16  # 14 original + SurrealDB connection + MCP env completeness
-        assert result["passed"] == 16
+        # 14 original + SurrealDB connection + SurrealDB version + MCP env completeness
+        assert result["total"] == 17
+        assert result["passed"] == 17
 
     def test_quickstart_url_defined(self) -> None:
         assert "quickstart" in QUICKSTART_URL
@@ -396,6 +400,72 @@ class TestCheckSurrealdbConnection:
             result = _check_surrealdb_connection()
 
         assert result["status"] == "warn"
+
+
+class TestCheckSurrealdbVersion:
+    """_check_surrealdb_version() — new TIER_CORE gate for SurrealDB >= 3.2.0."""
+
+    def test_skip_when_storage_is_not_surrealdb(self, monkeypatch):
+        from surreal_memory.cli.doctor import _check_surrealdb_version
+
+        monkeypatch.setenv("SURREAL_MEMORY_STORAGE", "sqlite")
+        assert _check_surrealdb_version()["status"] == "skip"
+
+    def test_ok_when_current(self, monkeypatch):
+        from surreal_memory.cli.doctor import _check_surrealdb_version
+
+        monkeypatch.setenv("SURREAL_MEMORY_STORAGE", "surrealdb")
+        with patch(
+            "surreal_memory.cli.doctor._run_surrealdb_version_probe",
+            return_value="surrealdb-3.2.0",
+        ):
+            result = _check_surrealdb_version()
+        assert result["status"] == "ok"
+        assert "3.2.0" in result["detail"]
+
+    def test_fail_when_too_old(self, monkeypatch):
+        from surreal_memory.cli.doctor import _check_surrealdb_version
+
+        monkeypatch.setenv("SURREAL_MEMORY_STORAGE", "surrealdb")
+        with patch(
+            "surreal_memory.cli.doctor._run_surrealdb_version_probe",
+            return_value="surrealdb-3.1.1",
+        ):
+            result = _check_surrealdb_version()
+        assert result["status"] == "fail"
+        assert "fix" in result
+
+    def test_warn_when_probe_fails(self, monkeypatch):
+        from surreal_memory.cli.doctor import _check_surrealdb_version
+
+        monkeypatch.setenv("SURREAL_MEMORY_STORAGE", "surrealdb")
+        with patch(
+            "surreal_memory.cli.doctor._run_surrealdb_version_probe",
+            side_effect=RuntimeError("unreachable"),
+        ):
+            result = _check_surrealdb_version()
+        assert result["status"] == "warn"
+
+    def test_warn_when_version_unparsable(self, monkeypatch):
+        from surreal_memory.cli.doctor import _check_surrealdb_version
+
+        monkeypatch.setenv("SURREAL_MEMORY_STORAGE", "surrealdb")
+        with patch(
+            "surreal_memory.cli.doctor._run_surrealdb_version_probe",
+            return_value="nightly-build",
+        ):
+            result = _check_surrealdb_version()
+        assert result["status"] == "warn"
+
+
+class TestSynapseMigrationCommand:
+    """smem doctor --synapse-migration {status|retry|purge-backup}."""
+
+    def test_rejects_invalid_action(self):
+        from surreal_memory.cli.doctor import run_synapse_migration_command
+
+        with pytest.raises(ValueError):
+            run_synapse_migration_command("bogus")
 
 
 class TestCheckMcpEnvCompleteness:
