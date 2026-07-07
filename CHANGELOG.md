@@ -7,6 +7,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.6.0] — 2026-07-07
+
+### BREAKING
+
+- **Requires SurrealDB ≥ 3.2.0.** `store.initialize()` now hard-fails with a clear upgrade
+  hint (`StorageVersionError`) when it detects an older server. **Back up the
+  `surrealdb_data` volume before upgrading.**
+- **The `synapse` graph auto-migrates to native RELATE edges on first connect** after the
+  upgrade: the flat `source_id`/`target_id` columns become the built-in `in`/`out` edge
+  endpoints. Existing synapse ids, `fiber.synapse_ids`, `change_log` entries and the Merkle
+  root are preserved. The pre-migration rows are kept in a `synapse_migration_backup` table
+  for rollback (clean up later with `smem doctor --synapse-migration purge-backup`).
+
+### Added
+
+- GQL-accelerated `get_path` shortest-path with an automatic BFS fallback — uses SurrealDB
+  3.2's internal ISO GQL when the server exposes it (optional capability flags), and falls
+  back to BFS otherwise.
+- `smem doctor` **SurrealDB version check** (TIER_CORE; FAILs when the server is < 3.2.0).
+- `smem doctor --synapse-migration {status|retry|purge-backup}` to inspect, resume, or
+  clean up the synapse→RELATE migration.
+
+### Changed
+
+- `docker-compose.surrealdb.yml` now runs `surrealdb/surrealdb:v3.2.0` with
+  `--allow-experimental gql --allow-eval-query`. The datastore path must be given **before**
+  the capability flags (the multi-valued `--allow-eval-query` would otherwise consume it).
+
+### Known behaviour
+
+- During the *converting* phase of the migration on a very large brain, synapse reads return
+  empty until conversion completes (rows are paged in batches of 500). This window is brief
+  for typical brains and the migration is crash-resumable.
+- After the upgrade, external writers that insert **flat** rows (`source_id`/`target_id`)
+  directly into the `synapse` table will fail — `synapse` is now a native RELATION and
+  requires `in`/`out` edge endpoints (such writes were already violating the schema).
+
 ## [2.5.0] — 2026-06-23
 
 Storage-agnostic improvements ported from upstream

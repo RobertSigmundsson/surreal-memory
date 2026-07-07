@@ -8,6 +8,10 @@ This guide covers the advanced features that become available when using Surreal
 
 ## 1. Install with SurrealDB
 
+> **Requires SurrealDB ≥ 3.2.0.** Upgrading an existing deployment? Back up the
+> `surrealdb_data` volume first — the `synapse` graph auto-migrates to native RELATE edges
+> on the first connect after the upgrade.
+
 ```bash
 pip install surreal-memory[surrealdb]
 ```

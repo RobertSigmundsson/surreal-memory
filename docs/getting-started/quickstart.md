@@ -19,6 +19,11 @@ No license key. No paid tier. Everything runs locally.
 
 ## 0. Setup
 
+!!! warning "Requires SurrealDB ≥ 3.2.0"
+    Surreal-Memory requires **SurrealDB 3.2.0 or newer** (the bundled compose file already uses
+    it). If you are **upgrading** an existing deployment, back up the `surrealdb_data` volume
+    first — the `synapse` graph auto-migrates to native RELATE edges on first connect.
+
 ### Docker (Recommended)
 
 Start SurrealDB with the provided compose file:

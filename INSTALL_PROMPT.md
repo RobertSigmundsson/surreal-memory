@@ -18,6 +18,14 @@ Claude Code will execute each step, ask for your API keys, and verify the full s
 
 You are performing a complete setup of **Surreal-Memory** on this machine. Surreal-Memory is a self-hostable neural graph memory system for AI agents, backed by SurrealDB (document + graph + vector in one database). Follow every step below, in order. Do not skip steps or assume something is already done — verify each one.
 
+> **SurrealDB ≥ 3.2.0 is required.** The bundled `docker-compose.surrealdb.yml` already uses
+> `surrealdb/surrealdb:v3.2.0`. If this machine already runs an **older** SurrealDB for
+> Surreal-Memory, the upgrade is in-place: **back up the `surrealdb_data` volume first**, then
+> `docker compose -f docker-compose.surrealdb.yml pull && docker compose -f docker-compose.surrealdb.yml up -d`.
+> On the first connect after the upgrade the `synapse` graph auto-migrates to native RELATE
+> edges (synapse ids, fibers and the Merkle root are preserved; pre-migration rows are kept in
+> a `synapse_migration_backup` table).
+
 ---
 
 ### Step 0 — Collect Required Values
