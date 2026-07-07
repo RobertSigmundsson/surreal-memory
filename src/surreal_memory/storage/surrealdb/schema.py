@@ -21,7 +21,7 @@ DEFINE FIELD brain_id        ON neuron TYPE string;
 DEFINE FIELD type            ON neuron TYPE string;
 DEFINE FIELD content         ON neuron TYPE string;
 DEFINE FIELD content_hash    ON neuron TYPE int DEFAULT 0;
-DEFINE FIELD metadata        ON neuron TYPE object DEFAULT {};
+DEFINE FIELD metadata        ON neuron TYPE object FLEXIBLE DEFAULT {};
 DEFINE FIELD embedding_vec   ON neuron TYPE option<array<float>>;
 DEFINE FIELD ephemeral       ON neuron TYPE bool DEFAULT false;
 DEFINE FIELD created_at      ON neuron TYPE datetime DEFAULT time::now();
@@ -81,7 +81,7 @@ DEFINE FIELD summary         ON fiber TYPE option<string>;
 DEFINE FIELD essence         ON fiber TYPE option<string>;
 DEFINE FIELD auto_tags       ON fiber TYPE array<string> DEFAULT [];
 DEFINE FIELD agent_tags      ON fiber TYPE array<string> DEFAULT [];
-DEFINE FIELD metadata        ON fiber TYPE object DEFAULT {};
+DEFINE FIELD metadata        ON fiber TYPE object FLEXIBLE DEFAULT {};
 DEFINE FIELD compression_tier ON fiber TYPE int DEFAULT 0;
 DEFINE FIELD pinned           ON fiber TYPE bool DEFAULT false;
 DEFINE FIELD created_at       ON fiber TYPE datetime DEFAULT time::now();
@@ -93,8 +93,8 @@ DEFINE INDEX idx_fiber_anchor ON fiber FIELDS brain_id, anchor_neuron_id;
 DEFINE TABLE brain SCHEMAFULL;
 DEFINE FIELD id          ON brain TYPE string;
 DEFINE FIELD name        ON brain TYPE string;
-DEFINE FIELD config      ON brain TYPE object DEFAULT {};
-DEFINE FIELD metadata    ON brain TYPE object DEFAULT {};
+DEFINE FIELD config      ON brain TYPE object FLEXIBLE DEFAULT {};
+DEFINE FIELD metadata    ON brain TYPE object FLEXIBLE DEFAULT {};
 DEFINE FIELD created_at  ON brain TYPE datetime DEFAULT time::now();
 DEFINE FIELD updated_at  ON brain TYPE datetime DEFAULT time::now();
 -- Removed unique index on name - multiple brains can have same name
@@ -145,7 +145,7 @@ DEFINE FIELD source        ON typed_memory TYPE option<string>;
 DEFINE FIELD project_id    ON typed_memory TYPE option<string>;
 DEFINE FIELD expires_at    ON typed_memory TYPE option<datetime>;
 DEFINE FIELD tier          ON typed_memory TYPE string DEFAULT 'warm';
-DEFINE FIELD metadata      ON typed_memory TYPE object DEFAULT {};
+DEFINE FIELD metadata      ON typed_memory TYPE object FLEXIBLE DEFAULT {};
 DEFINE FIELD created_at    ON typed_memory TYPE datetime DEFAULT time::now();
 DEFINE FIELD updated_at    ON typed_memory TYPE datetime DEFAULT time::now();
 DEFINE INDEX idx_typed_brain ON typed_memory FIELDS brain_id;
@@ -171,7 +171,7 @@ DEFINE FIELD effective_date ON source TYPE option<datetime>;
 DEFINE FIELD expires_at     ON source TYPE option<datetime>;
 DEFINE FIELD status         ON source TYPE string DEFAULT 'active';
 DEFINE FIELD file_hash      ON source TYPE string DEFAULT '';
-DEFINE FIELD metadata       ON source TYPE object DEFAULT {};
+DEFINE FIELD metadata       ON source TYPE object FLEXIBLE DEFAULT {};
 DEFINE FIELD created_at     ON source TYPE datetime DEFAULT time::now();
 DEFINE FIELD updated_at     ON source TYPE datetime DEFAULT time::now();
 DEFINE INDEX idx_source_brain ON source FIELDS brain_id;
@@ -190,7 +190,7 @@ DEFINE FIELD created_at         ON alerts TYPE datetime DEFAULT time::now();
 DEFINE FIELD seen_at            ON alerts TYPE option<datetime>;
 DEFINE FIELD acknowledged_at    ON alerts TYPE option<datetime>;
 DEFINE FIELD resolved_at        ON alerts TYPE option<datetime>;
-DEFINE FIELD metadata           ON alerts TYPE object DEFAULT {};
+DEFINE FIELD metadata           ON alerts TYPE object FLEXIBLE DEFAULT {};
 DEFINE INDEX idx_alerts_brain   ON alerts FIELDS brain_id;
 DEFINE INDEX idx_alerts_status  ON alerts FIELDS brain_id, status;
 
@@ -277,7 +277,7 @@ DEFINE FIELD fiber_count     ON brain_versions TYPE int DEFAULT 0;
 DEFINE FIELD snapshot_hash   ON brain_versions TYPE string DEFAULT '';
 DEFINE FIELD snapshot_data   ON brain_versions TYPE string DEFAULT '';
 DEFINE FIELD created_at      ON brain_versions TYPE datetime DEFAULT time::now();
-DEFINE FIELD metadata        ON brain_versions TYPE object DEFAULT {};
+DEFINE FIELD metadata        ON brain_versions TYPE object FLEXIBLE DEFAULT {};
 DEFINE INDEX idx_versions_brain  ON brain_versions FIELDS brain_id;
 DEFINE INDEX idx_versions_number ON brain_versions FIELDS brain_id, version_number;
 
@@ -403,7 +403,12 @@ SYNAPSE_V8_DDL: list[str] = [
     "DEFINE FIELD type ON synapse TYPE string",
     "DEFINE FIELD weight ON synapse TYPE float DEFAULT 1.0",
     "DEFINE FIELD direction ON synapse TYPE string DEFAULT 'forward'",
-    "DEFINE FIELD metadata ON synapse TYPE object DEFAULT {}",
+    # FLEXIBLE is REQUIRED: synapse metadata carries arbitrary nested keys
+    # (e.g. {"_dedup": true}). On a SCHEMAFULL table a plain `TYPE object` field
+    # rejects any undefined nested key ("Found field 'metadata._dedup', but no
+    # such field exists"), which silently skipped every synapse with non-empty
+    # metadata during the v7->v8 migration. FLEXIBLE (after TYPE) allows nested keys.
+    "DEFINE FIELD metadata ON synapse TYPE object FLEXIBLE DEFAULT {}",
     "DEFINE FIELD created_at ON synapse TYPE datetime DEFAULT time::now()",
     "DEFINE FIELD last_activated ON synapse TYPE option<datetime>",
     "DEFINE FIELD reinforced_count ON synapse TYPE int DEFAULT 0",

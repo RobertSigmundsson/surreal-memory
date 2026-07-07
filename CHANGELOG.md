@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.6.1] — 2026-07-07
+
+### Fixed
+
+- **CRITICAL: the v7→v8 synapse migration silently dropped every synapse with
+  non-empty `metadata`.** The v8 `synapse` RELATION table is `SCHEMAFULL`, but its
+  `metadata` field was defined as a plain `TYPE object`, which rejects arbitrary
+  nested keys (e.g. `{"_dedup": true}`). On a real database the migration therefore
+  skipped the majority of edges as "data loss" and `store.initialize()` aborted at
+  the verification step. The field is now `TYPE object FLEXIBLE`, so nested metadata
+  is preserved and the migration completes losslessly. Originals are always kept in
+  `synapse_migration_backup` and the pre-migration data was never modified, so **no
+  data was lost** — but a 2.6.0 upgrade could not complete. **Upgrade to 2.6.1
+  before migrating an existing database.**
+- The migration's `converting` phase now always rebuilds the RELATION table from the
+  complete backup on entry (including on resume), so a migration interrupted by the
+  above bug recovers every row instead of resuming past the ones it skipped.
+- **The same `SCHEMAFULL` + plain-`TYPE object` gap affected every table with a
+  `metadata`/`config` object field on a *fresh* database** — `neuron`, `fiber`,
+  `brain` (config + metadata), `typed_memory`, `source`, `alerts` and
+  `brain_versions`. Any write carrying a nested key (e.g. a structured `context`)
+  would have been rejected. All object fields are now `TYPE object FLEXIBLE`.
+
 ## [2.6.0] — 2026-07-07
 
 ### BREAKING
