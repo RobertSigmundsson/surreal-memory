@@ -459,8 +459,10 @@ class RecallHandler:
         # Always post-filter when there are matches so soft-forgotten (expired)
         # memories are excluded from recall immediately — without waiting for
         # consolidation cleanup (issue #36). Trust/tier filters piggyback on the
-        # same single pass.
-        needs_post_filter = bool(result.fibers_matched)
+        # same single pass. ``fibers_matched`` is a ``list[str]`` in production
+        # (RetrievalResult); guard defensively so a non-list value can never make
+        # ``list()``/iteration raise and abort recall.
+        needs_post_filter = isinstance(result.fibers_matched, list) and bool(result.fibers_matched)
         if needs_post_filter:
             original_matched = list(result.fibers_matched)
             try:
@@ -470,8 +472,10 @@ class RecallHandler:
 
                     # Expiry filter (soft-forget): a memory whose typed_memory is
                     # past its expires_at must not surface in recall, even before
-                    # consolidation deletes it (issue #36).
-                    if tm is not None and tm.is_expired:
+                    # consolidation deletes it (issue #36). ``is_expired`` is a
+                    # bool property; compare with ``is True`` so only a genuine
+                    # expiry drops the fiber (never a truthy non-bool).
+                    if tm is not None and getattr(tm, "is_expired", False) is True:
                         continue
 
                     # Trust filter
@@ -490,12 +494,12 @@ class RecallHandler:
 
                     passing_ids.add(fid)
 
-                filtered_fibers = [f for f in result.fibers_matched if f in passing_ids]
-                result = (
-                    result._replace(fibers_matched=filtered_fibers)
-                    if hasattr(result, "_replace")
-                    else result
-                )
+                filtered_fibers = [f for f in original_matched if f in passing_ids]
+                # Only rewrite the result when the filter actually dropped a
+                # fiber; leaving it untouched otherwise keeps the original result
+                # object intact (avoids needless copies / mock corruption).
+                if len(filtered_fibers) < len(original_matched) and hasattr(result, "_replace"):
+                    result = result._replace(fibers_matched=filtered_fibers)
             except Exception:
                 logger.debug("Post-filter (trust/tier) failed (non-critical)", exc_info=True)
 

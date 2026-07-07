@@ -116,9 +116,18 @@ class InMemoryCollectionsMixin:
         limit: int = 10,
         order_by: Literal["created_at", "salience", "frequency"] = "created_at",
         descending: bool = True,
+        exclude_expired: bool = False,
     ) -> list[Fiber]:
         brain_id = self._get_brain_id()
         fibers = list(self._fibers[brain_id].values())
+
+        if exclude_expired:
+            # Soft-forget (issue #36): drop fibers whose typed_memory is past its
+            # expires_at before applying the limit, mirroring the SurrealDB store.
+            typed = self._typed_memories[brain_id]
+            fibers = [
+                f for f in fibers if not ((tm := typed.get(f.id)) is not None and tm.is_expired)
+            ]
 
         sort_keys = {
             "created_at": lambda f: f.created_at,

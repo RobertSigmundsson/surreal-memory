@@ -123,12 +123,14 @@ class SharedFiberBrainMixin:
         limit: int = 10,
         order_by: Literal["created_at", "salience", "frequency"] = "created_at",
         descending: bool = True,
+        exclude_expired: bool = False,
     ) -> list[Fiber]:
         """Get fibers with ordering."""
         params = {
             "limit": limit,
             "order_by": order_by,
             "descending": descending,
+            "exclude_expired": exclude_expired,
         }
         result = await self._request("GET", "/memory/fibers", params=params)
         return [dict_to_fiber(f) for f in result.get("fibers", [])]
