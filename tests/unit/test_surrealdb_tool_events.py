@@ -16,11 +16,12 @@ from surreal_memory.storage.surrealdb.tool_events import SurrealDBToolEventsMixi
 class _ToolEventsStore(SurrealDBToolEventsMixin):
     """Routes _query by SQL fragment; records UPDATE/insert calls."""
 
-    def __init__(self, unprocessed=None, total=0, ok=0, grouped=None) -> None:
+    def __init__(self, unprocessed=None, total=0, ok=0, grouped=None, ok_grouped=None) -> None:
         self._unprocessed = unprocessed or []
         self._total = total
         self._ok = ok
         self._grouped = grouped or []
+        self._ok_grouped = ok_grouped or []
         self.updates: list[dict[str, Any]] = []
         self.inserts: list[dict[str, Any]] = []
 
@@ -46,6 +47,9 @@ class _ToolEventsStore(SurrealDBToolEventsMixin):
             return [{"c": self._ok}]
         if "count() AS c FROM tool_events WHERE brain_id = $bid GROUP ALL" in sql:
             return [{"c": self._total}]
+        # Per-tool success counts (check before the generic grouped route).
+        if "AND success = true" in sql and "GROUP BY tool_name, server_name" in sql:
+            return self._ok_grouped
         if "GROUP BY tool_name, server_name" in sql:
             return self._grouped
         return []
@@ -96,12 +100,39 @@ async def test_get_tool_stats_computes_rate_and_top_tools() -> None:
         total=4,
         ok=3,
         grouped=[
-            {"tool_name": "Read", "server_name": "", "cnt": 3},
-            {"tool_name": "Bash", "server_name": "", "cnt": 1},
+            {"tool_name": "Read", "server_name": "", "cnt": 3, "avg_ms": 12.5},
+            {"tool_name": "Bash", "server_name": "", "cnt": 1, "avg_ms": 800.0},
+        ],
+        ok_grouped=[
+            {"tool_name": "Read", "server_name": "", "ok": 2},
+            {"tool_name": "Bash", "server_name": "", "ok": 1},
         ],
     )
     stats = await store.get_tool_stats("default")
     assert stats["total_events"] == 4
     assert stats["success_rate"] == 0.75
-    assert stats["top_tools"][0]["tool_name"] == "Read"
-    assert stats["top_tools"][0]["count"] == 3
+    read = stats["top_tools"][0]
+    assert read["tool_name"] == "Read"
+    assert read["count"] == 3
+    # Per-tool fields must be present and numeric — the web UI renders "NaN%" /
+    # "NaNs" when success_rate / avg_duration_ms are missing.
+    assert read["success_rate"] == round(2 / 3, 2)
+    assert read["avg_duration_ms"] == round(12.5)  # 12 — Python banker's rounding
+    bash = stats["top_tools"][1]
+    assert bash["success_rate"] == 1.0
+    assert bash["avg_duration_ms"] == 800
+
+
+async def test_get_tool_stats_no_success_rows_is_zero_not_nan() -> None:
+    """A tool with zero successes must yield success_rate 0.0, never NaN."""
+    store = _ToolEventsStore(
+        total=2,
+        ok=0,
+        grouped=[{"tool_name": "Bash", "server_name": "", "cnt": 2, "avg_ms": 0.0}],
+        ok_grouped=[],  # no success=true rows for any tool
+    )
+    stats = await store.get_tool_stats("default")
+    tool = stats["top_tools"][0]
+    assert tool["success_rate"] == 0.0
+    assert tool["avg_duration_ms"] == 0
+    assert isinstance(tool["success_rate"], float)

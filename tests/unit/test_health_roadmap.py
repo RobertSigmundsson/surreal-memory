@@ -35,6 +35,18 @@ class TestBuildDynamicAction:
         action = _build_dynamic_action("diversity", "fallback", metrics)
         assert "3 of 8" in action
 
+    def test_diversity_action_no_contradiction_when_types_exceed_expected(self) -> None:
+        # types_used (16) exceeds the expected baseline (8). The old message read
+        # "only 16 of 8 expected synapse types used" — logically contradictory.
+        # Diversity is Shannon entropy (balance), so it must switch to a balance
+        # message rather than an impossible "N of 8" count.
+        metrics: dict[str, Any] = {"types_used": 16}
+        action = _build_dynamic_action("diversity", "fallback", metrics)
+        assert "16 of 8" not in action
+        assert "of 8" not in action  # no stale hard-coded baseline at all
+        assert "16" in action  # still references the real count
+        assert "Balance" in action or "unevenly" in action
+
     def test_freshness_action_includes_count(self) -> None:
         metrics: dict[str, Any] = {
             "freshness": 0.2,
