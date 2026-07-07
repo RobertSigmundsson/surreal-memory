@@ -241,7 +241,7 @@ class BrainConfig:
 
 ### CLI Configuration
 
-Stored in `~/.surreal-memory/config.toml`:
+Stored in `~/.surrealmemory/config.toml`:
 
 ```toml
 [brain]
@@ -262,7 +262,7 @@ api_key = ""
 ## File Structure
 
 ```
-~/.surreal-memory/
+~/.surrealmemory/
 ├── config.toml           # User configuration
 ├── brains/
 │   ├── default.db        # SQLite brain database
