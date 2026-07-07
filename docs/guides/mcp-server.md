@@ -37,7 +37,13 @@
 ## Requirements
 
 - **Python 3.11+**
+- **SurrealDB ≥ 3.2.0** — the storage backend (the bundled `docker-compose.surrealdb.yml` runs it)
 - **pip** or **uv** package manager
+
+> **Optional (internal GQL fast-path):** the compose file starts SurrealDB with
+> `--allow-experimental gql --allow-eval-query`, which lets `get_path` use SurrealDB 3.2's
+> ISO GQL shortest-path when the server exposes it. These flags are entirely optional —
+> `get_path` falls back to BFS without them.
 
 ```bash
 # Install via pip

@@ -87,6 +87,10 @@ docker compose -f docker-compose.surrealdb.yml up -d
 
 Dashboard at http://localhost:8000/ui, SurrealDB at localhost:8001.
 
+> **Requires SurrealDB ≥ 3.2.0** (the compose file uses `surrealdb/surrealdb:v3.2.0`).
+> Upgrading from an older SurrealDB? Back up the `surrealdb_data` volume first — the synapse
+> graph auto-migrates to native RELATE edges on the first connect after the upgrade.
+
 ### Manual
 
 ```bash
@@ -377,7 +381,7 @@ Surreal-Memory is built on top of [**NeuralMemory**](https://github.com/nhadautu
 
 Surreal-Memory extends it with a SurrealDB storage backend and a community plugin that makes all advanced features available for free.
 
-Equally important: this project would not exist without [**SurrealDB**](https://surrealdb.com/). The combined document + graph + vector model in a single engine is what made it possible to retire the SQLite + paid-Pro split. The shift specifically depends on the changes shipped in **SurrealDB 3.0** — without them, the storage backend in this fork would still be vaporware.
+Equally important: this project would not exist without [**SurrealDB**](https://surrealdb.com/). The combined document + graph + vector model in a single engine is what made it possible to retire the SQLite + paid-Pro split. The shift specifically depends on the changes shipped in **SurrealDB 3.x** — without them, the storage backend in this fork would still be vaporware. As of v2.6.0 the synapse graph uses native RELATE edges and internal ISO GQL, so **SurrealDB ≥ 3.2.0 is required**.
 
 > If you find Surreal-Memory useful, please also star both the [original NeuralMemory project](https://github.com/nhadaututtheky/neural-memory) and [SurrealDB](https://github.com/surrealdb/surrealdb).
 

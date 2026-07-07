@@ -163,16 +163,43 @@ def _row_to_neuron_state(row: dict[str, Any]) -> NeuronState:
     )
 
 
+def _endpoint_to_id(edge_value: Any, legacy_value: Any = None) -> str:
+    """Resolve a synapse endpoint id from the native RELATION ``in``/``out`` field.
+
+    ``in``/``out`` come back as a ``RecordID`` pointing at a neuron (``neuron:abc``).
+    Falls back to the legacy ``source_id``/``target_id`` string when the edge field
+    is absent (old fixtures / pre-migration rows). Returns the bare id with the
+    table prefix stripped and underscores denormalised back to dashes, matching
+    the ids the rest of the store speaks.
+    """
+    value = edge_value if edge_value is not None else legacy_value
+    if value is None:
+        return ""
+    part = getattr(value, "id", None)
+    if part is not None:
+        text = str(part)  # RecordID -> its identifier part
+    else:
+        text = str(value)
+        if ":" in text:
+            text = text.split(":", 1)[1]
+    return text.replace("_", "-")
+
+
 def _row_to_synapse(row: dict[str, Any]) -> Synapse:
-    """Convert a SurrealDB synapse record to Synapse."""
+    """Convert a SurrealDB synapse RELATION record to Synapse.
+
+    Endpoints live in the native ``in``/``out`` edge fields (each a ``RecordID``
+    pointing at a neuron). Falls back to the legacy ``source_id``/``target_id``
+    string fields so pre-migration fixtures still map.
+    """
 
     rid = row["id"]
     syn_id = f"{rid.table_name}:{rid.id}" if hasattr(rid, "table_name") else str(rid)
     if ":" in syn_id:
         syn_id = syn_id.split(":", 1)[1]
     syn_id = syn_id.replace("_", "-")
-    source_id = str(row.get("source_id", "")).replace("_", "-")
-    target_id = str(row.get("target_id", "")).replace("_", "-")
+    source_id = _endpoint_to_id(row.get("in"), row.get("source_id"))
+    target_id = _endpoint_to_id(row.get("out"), row.get("target_id"))
     syn = Synapse(
         id=syn_id,
         type=SynapseType(row["type"]),
@@ -237,9 +264,9 @@ class SurrealDBStorage(
 ):
     """SurrealDB-backed storage for Surreal-Memory.
 
-    Multi-model: documents (neurons), graphs (synapses linking neurons via
-    source_id/target_id), and vector search (HNSW via embedding_vec) all in
-    one database.
+    Multi-model: documents (neurons), graphs (synapses as native RELATE edges
+    linking neurons via in/out), and vector search (HNSW via embedding_vec) all
+    in one database.
 
     Usage:
         storage = SurrealDBStorage(url="http://localhost:8001", ...)
@@ -272,16 +299,28 @@ class SurrealDBStorage(
         # Serializes token re-auth so concurrent queries that all hit an
         # expired-token 401 trigger a single reconnect, not a storm.
         self._reauth_lock = asyncio.Lock()
+        # ISO GQL (SurrealDB 3.2+) capability, detected once at initialize().
+        # get_path uses a GQL SHORTEST-path fast-path when available and falls
+        # back to BFS otherwise. See _get_path_gql for the 3.2.0 scoping caveat.
+        self._gql_available = False
+        # Learn-once: after this many get_path calls where GQL yielded no usable
+        # (endpoint-verified) path, stop attempting GQL for the session so the
+        # fast-path never adds a wasted round-trip on servers where it can't help.
+        self._gql_path_misses = 0
 
     async def initialize(self) -> None:
-        """Connect to SurrealDB and apply schema."""
+        """Connect to SurrealDB, gate on server version, apply schema + migrations."""
         from surrealdb import AsyncSurreal
 
         from surreal_memory.storage.surrealdb.connection import (
             AUTH_HINT,
+            MIN_SERVER_VERSION,
             StorageAuthError,
+            StorageVersionError,
             is_credential_error,
+            parse_server_version,
         )
+        from surreal_memory.storage.surrealdb.migrations import apply_migrations
 
         self._conn = AsyncSurreal(self._url)
         try:
@@ -294,12 +333,53 @@ class SurrealDBStorage(
                 ) from exc
             raise
         await self._conn.use(self._namespace, self._database)
+
+        # Hard version gate (>= 3.2.0): the synapse RELATION schema and the
+        # auto-migration below require SurrealDB 3.2.0. A failed/unparsable probe
+        # warns and continues; only a CONFIRMED old version hard-fails.
+        try:
+            raw_version = await self._conn.version()
+        except Exception:
+            logger.warning("Could not read SurrealDB version; skipping version gate.")
+            raw_version = None
+        if raw_version is not None:
+            parsed = parse_server_version(str(raw_version))
+            if parsed is not None and parsed < MIN_SERVER_VERSION:
+                min_str = ".".join(str(p) for p in MIN_SERVER_VERSION)
+                raise StorageVersionError(
+                    f"SurrealDB {raw_version} is too old; surreal-memory requires >= {min_str}.",
+                    hint=(
+                        "Upgrade the image: docker compose -f docker-compose.surrealdb.yml pull "
+                        "&& docker compose -f docker-compose.surrealdb.yml up -d (the "
+                        "surrealdb_data volume is preserved — back it up first)."
+                    ),
+                )
+
         await ensure_schema(self._conn, self._embedding_dim)
+        # Auto-run the synapse->RELATE migration on first connect after upgrade.
+        await apply_migrations(self._conn)
+
+        # Detect ISO GQL capability (SurrealDB 3.2+) once, non-fatally (2s budget).
+        # A labeled MATCH via eval::gql succeeds only when the server was started
+        # with --allow-experimental gql AND --allow-eval-query; otherwise it raises
+        # and get_path stays on BFS. The neuron LABEL is required — an unlabeled
+        # `MATCH (n)` fails to parse even when GQL is enabled.
+        try:
+            await asyncio.wait_for(
+                self._conn.query('RETURN eval::gql("MATCH (n:neuron) RETURN n LIMIT 1")'),
+                timeout=2,
+            )
+            self._gql_available = True
+        except Exception:
+            self._gql_available = False
+            logger.debug("ISO GQL not available; get_path will use BFS.", exc_info=True)
+
         logger.info(
-            "SurrealDB connected: %s ns=%s db=%s",
+            "SurrealDB connected: %s ns=%s db=%s (gql=%s)",
             self._url,
             self._namespace,
             self._database,
+            self._gql_available,
         )
 
     async def close(self) -> None:
@@ -585,9 +665,11 @@ class SurrealDBStorage(
         brain_id = self._get_brain_id()
         sid = _to_surreal_id(neuron_id)
 
-        # Delete connected synapses first
+        # Delete connected synapses first (belt-and-braces: SurrealDB also auto-cleans
+        # edges when the neuron record is deleted). Endpoints are native in/out now.
         await self._query(
-            "DELETE synapse WHERE brain_id = $brain_id AND (source_id = $nid OR target_id = $nid)",
+            "DELETE synapse WHERE brain_id = $brain_id AND "
+            "(in = type::record('neuron', $nid) OR out = type::record('neuron', $nid))",
             brain_id=brain_id,
             nid=sid,
         )
@@ -649,6 +731,8 @@ class SurrealDBStorage(
     # ================================================================
 
     async def add_synapse(self, synapse: Synapse) -> str:
+        from surrealdb import RecordID
+
         conn = self._ensure_conn()
         brain_id = self._get_brain_id()
 
@@ -656,19 +740,22 @@ class SurrealDBStorage(
         ss = _to_surreal_id(synapse.source_id)
         st = _to_surreal_id(synapse.target_id)
 
+        # Native RELATION edge: endpoints are the built-in in/out RecordIDs. INSERT
+        # RELATION (not conn.insert, which does not work on a RELATION table) keeps
+        # the custom edge id so fiber.synapse_ids / change_log / Merkle stay stable.
         record_data: dict[str, Any] = {
-            "id": sid,
+            "id": RecordID("synapse", sid),
+            "in": RecordID("neuron", ss),
+            "out": RecordID("neuron", st),
             "brain_id": brain_id,
             "type": synapse.type.value,
-            "source_id": ss,
-            "target_id": st,
             "weight": synapse.weight,
             "direction": synapse.direction,
             "metadata": dict(synapse.metadata),
             "created_at": synapse.created_at,
             "reinforced_count": synapse.reinforced_count,
         }
-        await conn.insert("synapse", record_data)
+        await conn.query("INSERT RELATION INTO synapse $row", {"row": record_data})
 
         await self._record_change_internal("synapse", synapse.id, "insert", synapse)
         return synapse.id
@@ -697,11 +784,11 @@ class SurrealDBStorage(
         params: dict[str, Any] = {"brain_id": brain_id}
 
         if source_id is not None:
-            conditions.append("source_id = $source_id")
-            params["source_id"] = source_id
+            conditions.append("in = type::record('neuron', $source_id)")
+            params["source_id"] = _to_surreal_id(source_id)
         if target_id is not None:
-            conditions.append("target_id = $target_id")
-            params["target_id"] = target_id
+            conditions.append("out = type::record('neuron', $target_id)")
+            params["target_id"] = _to_surreal_id(target_id)
         if type is not None:
             conditions.append("type = $stype")
             params["stype"] = type.value
@@ -760,11 +847,13 @@ class SurrealDBStorage(
         params: dict[str, Any] = {"brain_id": brain_id}
 
         if direction == "out":
-            conditions.append("source_id = $nid")
+            conditions.append("in = type::record('neuron', $nid)")
         elif direction == "in":
-            conditions.append("target_id = $nid")
+            conditions.append("out = type::record('neuron', $nid)")
         else:
-            conditions.append("(source_id = $nid OR target_id = $nid)")
+            conditions.append(
+                "(in = type::record('neuron', $nid) OR out = type::record('neuron', $nid))"
+            )
         params["nid"] = _to_surreal_id(neuron_id)
 
         if synapse_types:
@@ -777,17 +866,88 @@ class SurrealDBStorage(
             params["min_weight"] = min_weight
 
         where = " AND ".join(conditions)
-        syn_rows = await self._query(f"SELECT * FROM synapse WHERE {where}", **params)
+        # Inline both endpoint neurons via the native edge links (in.*/out.*) so a
+        # single query returns the neighbour records — kills the N+1 get_neuron
+        # call that ran once per edge before the RELATION migration.
+        syn_rows = await self._query(
+            f"SELECT *, in.* AS in_neuron, out.* AS out_neuron FROM synapse WHERE {where}",
+            **params,
+        )
 
         results: list[tuple[Neuron, Synapse]] = []
         for sr in syn_rows:
             syn = _row_to_synapse(sr)
-            # Get the neighbor neuron
-            neighbor_id = syn.target_id if syn.source_id == neuron_id else syn.source_id
-            neighbor = await self.get_neuron(neighbor_id)
+            # The neighbour is the endpoint that is not the queried neuron. Use the
+            # domain helper so a row that (defensively) touches neither end is
+            # skipped rather than silently resolving to the wrong endpoint.
+            other_id = syn.other_end(neuron_id)
+            if other_id is None:
+                continue
+            neighbor_row = (
+                sr.get("out_neuron") if other_id == syn.target_id else sr.get("in_neuron")
+            )
+            neighbor = _row_to_neuron(neighbor_row) if neighbor_row else None
+            if neighbor is None:
+                # Orphan endpoint or inline missing — fall back to a direct fetch.
+                neighbor = await self.get_neuron(other_id)
             if neighbor is not None:
                 results.append((neighbor, syn))
         return results
+
+    @property
+    def gql_available(self) -> bool:
+        """True when the server exposes ISO GQL (detected at initialize())."""
+        return self._gql_available
+
+    async def _get_path_gql(
+        self,
+        source_id: str,
+        target_id: str,
+        max_hops: int,
+        bidirectional: bool,
+    ) -> list[tuple[Neuron, Synapse]] | None:
+        """GQL SHORTEST-path fast-path over synapse edges (source -> target).
+
+        Returns the path as ``[(Neuron, Synapse), ...]`` or ``None`` when GQL does
+        not yield a verified source->target path (so get_path falls back to BFS).
+
+        SurrealDB 3.2.0 caveat: the experimental ISO GQL dialect (eval::gql) cannot
+        anchor/filter a MATCH node by its record id — string compares don't match a
+        RecordID and casts/functions/param binding are unsupported. We still issue
+        the correctly-scoped query (ids are `[A-Za-z0-9_]`-sanitised, safe to inline)
+        and VERIFY the returned path's endpoints in Python, returning None if they
+        don't connect source->target. Today that verification fails whenever id
+        scoping is unavailable, so BFS handles the lookup; the fast-path activates
+        automatically if a future SurrealDB makes GQL node-id scoping work.
+        """
+        src = _to_surreal_id(source_id)
+        tgt = _to_surreal_id(target_id)
+        arrow = "-[:synapse]-" if bidirectional else "-[:synapse]->"
+        gql = (
+            f'MATCH p = SHORTEST 1 (s:neuron {{id:"{src}"}})'
+            f'{arrow}{{1,{max_hops}}}(t:neuron {{id:"{tgt}"}}) RETURN p'
+        )
+        rows = await self._query("RETURN eval::gql($gql)", gql=gql)
+        path_seq = rows[0].get("p") if rows and isinstance(rows[0], dict) else None
+        if not path_seq or not isinstance(path_seq, list):
+            return None
+
+        # The path alternates node, edge, node, ...; edges sit at odd indices.
+        result: list[tuple[Neuron, Synapse]] = []
+        for i in range(1, len(path_seq), 2):
+            edge_row = path_seq[i]
+            node_row = path_seq[i + 1] if i + 1 < len(path_seq) else None
+            if not isinstance(edge_row, dict) or not isinstance(node_row, dict):
+                return None
+            result.append((_row_to_neuron(node_row), _row_to_synapse(edge_row)))
+
+        # Verify the path actually connects source_id -> target_id.
+        if not result or result[-1][0].id != target_id:
+            return None
+        first_edge = result[0][1]
+        if source_id not in (first_edge.source_id, first_edge.target_id):
+            return None
+        return result
 
     async def get_path(
         self,
@@ -796,7 +956,12 @@ class SurrealDBStorage(
         max_hops: int = 4,
         bidirectional: bool = False,
     ) -> list[tuple[Neuron, Synapse]] | None:
-        """BFS path finding between two neurons via synapses."""
+        """Path finding between two neurons via synapses.
+
+        Uses a GQL SHORTEST-path fast-path when the server exposes ISO GQL and it
+        yields an endpoint-verified path; otherwise (and on any GQL failure) uses
+        the universal BFS fallback.
+        """
         if source_id == target_id:
             src = await self.get_neuron(source_id)
             return (
@@ -805,6 +970,24 @@ class SurrealDBStorage(
                 else None
             )
 
+        # GQL SHORTEST-path fast-path (endpoint-verified) when available.
+        if self._gql_available:
+            try:
+                gql_path = await self._get_path_gql(source_id, target_id, max_hops, bidirectional)
+            except Exception:
+                gql_path = None
+                logger.debug("GQL path lookup failed; falling back to BFS.", exc_info=True)
+            if gql_path is not None:
+                self._gql_path_misses = 0
+                return gql_path
+            # GQL produced no usable path — after repeated misses stop trying so the
+            # fast-path never keeps adding a wasted round-trip where it cannot help.
+            self._gql_path_misses += 1
+            if self._gql_path_misses >= 3:
+                self._gql_available = False
+                logger.debug("Disabling GQL path fast-path after repeated misses.")
+
+        # BFS (universal fallback).
         visited: set[str] = {source_id}
         queue: list[tuple[str, list[tuple[Neuron, Synapse]]]] = [(source_id, [])]
 
