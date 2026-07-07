@@ -971,11 +971,23 @@ class SurrealDBStorage(
         limit: int = 10,
         order_by: Literal["created_at", "salience", "frequency"] = "created_at",
         descending: bool = True,
+        exclude_expired: bool = False,
     ) -> list[Fiber]:
         brain_id = self._get_brain_id()
         order_dir = "DESC" if descending else "ASC"
+        # When requested, drop fibers whose typed_memory is past its expires_at
+        # (soft-forgotten) so they leave recall immediately, without waiting for
+        # consolidation cleanup (issue #36).
+        expired_clause = (
+            " AND id NOT IN (SELECT VALUE fiber_id FROM typed_memory "
+            "WHERE brain_id = $brain_id AND expires_at != NONE "
+            "AND expires_at <= time::now())"
+            if exclude_expired
+            else ""
+        )
         rows = await self._query(
-            f"SELECT * FROM fiber WHERE brain_id = $brain_id ORDER BY {order_by} {order_dir} LIMIT {int(limit)}",
+            f"SELECT * FROM fiber WHERE brain_id = $brain_id{expired_clause} "
+            f"ORDER BY {order_by} {order_dir} LIMIT {int(limit)}",
             brain_id=brain_id,
         )
         return [_row_to_fiber(r) for r in rows]

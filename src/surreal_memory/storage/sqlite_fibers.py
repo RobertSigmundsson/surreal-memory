@@ -511,6 +511,7 @@ class SQLiteFiberMixin:
         limit: int = 10,
         order_by: Literal["created_at", "salience", "frequency"] = "created_at",
         descending: bool = True,
+        exclude_expired: bool = False,
     ) -> list[Fiber]:
         limit = min(limit, 1000)
         conn = self._ensure_read_conn()
@@ -520,8 +521,25 @@ class SQLiteFiberMixin:
         _allowed_order = {"created_at", "salience", "frequency"}
         if order_by not in _allowed_order:
             order_by = "created_at"
-        query = f"SELECT * FROM fibers WHERE brain_id = ? ORDER BY {order_by} {order_dir} LIMIT ?"
 
-        async with conn.execute(query, (brain_id, limit)) as cursor:
+        params: list[Any] = [brain_id]
+        # Soft-forget (issue #36): drop fibers whose typed_memory is past its
+        # expires_at before the limit is applied, mirroring the SurrealDB store.
+        # expires_at is persisted as an ISO-8601 string, so a lexicographic
+        # comparison against the current UTC timestamp is chronologically correct.
+        expired_clause = ""
+        if exclude_expired:
+            expired_clause = (
+                " AND id NOT IN (SELECT fiber_id FROM typed_memories "
+                "WHERE brain_id = ? AND expires_at IS NOT NULL AND expires_at <= ?)"
+            )
+            params.extend([brain_id, utcnow().isoformat()])
+        params.append(limit)
+        query = (
+            f"SELECT * FROM fibers WHERE brain_id = ?{expired_clause} "
+            f"ORDER BY {order_by} {order_dir} LIMIT ?"
+        )
+
+        async with conn.execute(query, params) as cursor:
             rows = await cursor.fetchall()
             return [row_to_fiber(row) for row in rows]

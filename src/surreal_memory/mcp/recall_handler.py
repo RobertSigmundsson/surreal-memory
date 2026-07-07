@@ -20,6 +20,59 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+async def _rebuild_context_for_fibers(
+    result: Any,
+    fiber_ids: list[str],
+    storage: Any,
+    *,
+    max_tokens: int,
+    brain_id: str,
+    clean_for_prompt: bool,
+) -> Any:
+    """Rebuild ``result.context`` from ``fiber_ids`` via ``format_context``.
+
+    Used after post-filtering drops fibers (e.g. a soft-forgotten memory) so the
+    answer prose reflects the surviving set instead of the pre-filter one. Falls
+    back to the original result on any issue. Pure w.r.t. the DB (read-only).
+    """
+    from surreal_memory.engine.activation import ActivationResult
+    from surreal_memory.engine.retrieval_context import format_context
+
+    fibers_ordered: list[Any] = []
+    for fid in fiber_ids:
+        fiber = await storage.get_fiber(fid)
+        if fiber:
+            fibers_ordered.append(fiber)
+    if not fibers_ordered:
+        return result
+
+    acts: dict[str, ActivationResult] = {}
+    for co in getattr(result, "co_activations", []) or []:
+        for nid in co.neuron_ids:
+            acts.setdefault(
+                nid,
+                ActivationResult(
+                    neuron_id=nid,
+                    activation_level=co.binding_strength,
+                    hop_distance=0,
+                    path=[nid],
+                    source_anchor=nid,
+                ),
+            )
+
+    new_ctx, _ = await format_context(
+        storage=storage,
+        activations=acts,
+        fibers=fibers_ordered,
+        max_tokens=max_tokens,
+        brain_id=brain_id,
+        clean_for_prompt=clean_for_prompt,
+    )
+    if new_ctx and hasattr(result, "_replace"):
+        return result._replace(context=new_ctx)
+    return result
+
+
 async def _rerank_by_recency(fiber_ids: list[str], storage: Any) -> list[str]:
     """Re-order fiber IDs by recency (newest first).
 
@@ -403,12 +456,27 @@ class RecallHandler:
         recall_tier = args.get("tier")
         if recall_tier is not None:
             recall_tier = str(recall_tier).lower().strip()
-        needs_post_filter = (min_trust is not None or recall_tier) and result.fibers_matched
+        # Always post-filter when there are matches so soft-forgotten (expired)
+        # memories are excluded from recall immediately — without waiting for
+        # consolidation cleanup (issue #36). Trust/tier filters piggyback on the
+        # same single pass. ``fibers_matched`` is a ``list[str]`` in production
+        # (RetrievalResult); guard defensively so a non-list value can never make
+        # ``list()``/iteration raise and abort recall.
+        needs_post_filter = isinstance(result.fibers_matched, list) and bool(result.fibers_matched)
         if needs_post_filter:
+            original_matched = list(result.fibers_matched)
             try:
                 passing_ids: set[str] = set()
                 for fid in result.fibers_matched:
                     tm = await storage.get_typed_memory(fid)
+
+                    # Expiry filter (soft-forget): a memory whose typed_memory is
+                    # past its expires_at must not surface in recall, even before
+                    # consolidation deletes it (issue #36). ``is_expired`` is a
+                    # bool property; compare with ``is True`` so only a genuine
+                    # expiry drops the fiber (never a truthy non-bool).
+                    if tm is not None and getattr(tm, "is_expired", False) is True:
+                        continue
 
                     # Trust filter
                     if min_trust is not None:
@@ -426,14 +494,34 @@ class RecallHandler:
 
                     passing_ids.add(fid)
 
-                filtered_fibers = [f for f in result.fibers_matched if f in passing_ids]
-                result = (
-                    result._replace(fibers_matched=filtered_fibers)
-                    if hasattr(result, "_replace")
-                    else result
-                )
+                filtered_fibers = [f for f in original_matched if f in passing_ids]
+                # Only rewrite the result when the filter actually dropped a
+                # fiber; leaving it untouched otherwise keeps the original result
+                # object intact (avoids needless copies / mock corruption).
+                if len(filtered_fibers) < len(original_matched) and hasattr(result, "_replace"):
+                    result = result._replace(fibers_matched=filtered_fibers)
             except Exception:
                 logger.debug("Post-filter (trust/tier) failed (non-critical)", exc_info=True)
+
+            # If the filter dropped anything (e.g. a soft-forgotten memory) and no
+            # later stage rebuilds the answer text, regenerate context now so the
+            # excluded memory can't linger in the returned prose (issue #36).
+            fibers_were_dropped = len(result.fibers_matched) < len(original_matched)
+            will_rebuild_later = bool(args.get("prefer_recent")) or (
+                args.get("recall_token_budget") is not None
+            )
+            if fibers_were_dropped and recall_mode != "exact" and not will_rebuild_later:
+                try:
+                    result = await _rebuild_context_for_fibers(
+                        result,
+                        list(result.fibers_matched),
+                        storage,
+                        max_tokens=max_tokens,
+                        brain_id=brain_id,
+                        clean_for_prompt=clean_for_prompt,
+                    )
+                except Exception:
+                    logger.debug("Context rebuild after filter failed", exc_info=True)
 
         # Optional prefer_recent re-rank (agent-ergonomics).
         # Reorders surviving fibers newest-first AND rebuilds result.context so
@@ -822,7 +910,9 @@ class RecallHandler:
         limit = min(args.get("limit", 10), 200)
         fresh_only = args.get("fresh_only", False)
 
-        fibers = await storage.get_fibers(limit=limit * 2 if fresh_only else limit)
+        fibers = await storage.get_fibers(
+            limit=limit * 2 if fresh_only else limit, exclude_expired=True
+        )
         if not fibers:
             result: dict[str, Any] = {"context": "No memories stored yet.", "count": 0}
             onboarding = await self._check_onboarding()
