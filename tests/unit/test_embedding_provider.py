@@ -177,7 +177,11 @@ class TestCosineSimilarity:
         v1 = await provider.embed("first text")
         v2 = await provider.embed("second text")
         sim = await provider.similarity(v1, v2)
-        assert -1.0 <= sim <= 1.0
+        # Cosine similarity is mathematically in [-1, 1], but a dot product of
+        # near-parallel unit vectors can round to 1.0000000000000002. The mock
+        # embeds from a per-process-randomised hash(), so the vectors differ each
+        # run; without this float epsilon the range check is flaky across CI runs.
+        assert -1.0 - 1e-9 <= sim <= 1.0 + 1e-9
 
     @pytest.mark.asyncio
     async def test_self_similarity(self) -> None:
