@@ -228,9 +228,10 @@ class SurrealDBSourcesMixin:
         brain_id = self._get_brain_id()
         rows = await self._query(
             "SELECT count() AS cnt FROM synapse"
-            " WHERE brain_id = $brain_id AND source_id = $source_id AND type = 'source_of'"
+            " WHERE brain_id = $brain_id AND in = type::record('neuron', $source_id)"
+            " AND type = 'source_of'"
             " GROUP ALL",
             brain_id=brain_id,
-            source_id=source_id,
+            source_id=_to_surreal_id(source_id),
         )
         return int(rows[0]["cnt"]) if rows else 0
