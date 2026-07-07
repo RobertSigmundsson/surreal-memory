@@ -7,7 +7,7 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 
 SCHEMA_SQL = """
 -- ============================================================
@@ -54,25 +54,13 @@ DEFINE FIELD homeostatic_target   ON neuron_state TYPE float DEFAULT 0.5;
 DEFINE FIELD created_at        ON neuron_state TYPE datetime DEFAULT time::now();
 DEFINE INDEX idx_state_neuron  ON neuron_state FIELDS brain_id, neuron_id UNIQUE;
 
--- Synapses (graph edges between neurons)
--- Edge endpoints live in source_id/target_id (the fields the store reads and
--- writes); they are declared here so the schema matches what is persisted, and
--- the source/target indexes below cover the columns lookups actually use.
-DEFINE TABLE synapse SCHEMAFULL;
-DEFINE FIELD id           ON synapse TYPE string;
-DEFINE FIELD brain_id     ON synapse TYPE string DEFAULT 'default';
-DEFINE FIELD type         ON synapse TYPE string;
-DEFINE FIELD source_id    ON synapse TYPE string;
-DEFINE FIELD target_id    ON synapse TYPE string;
-DEFINE FIELD weight       ON synapse TYPE float DEFAULT 1.0;
-DEFINE FIELD direction    ON synapse TYPE string DEFAULT 'forward';
-DEFINE FIELD metadata     ON synapse TYPE object DEFAULT {};
-DEFINE FIELD created_at   ON synapse TYPE datetime DEFAULT time::now();
-DEFINE FIELD last_activated    ON synapse TYPE option<datetime>;
-DEFINE FIELD reinforced_count  ON synapse TYPE int DEFAULT 0;
-DEFINE INDEX idx_synapse_brain ON synapse FIELDS brain_id;
-DEFINE INDEX idx_synapse_source ON synapse FIELDS brain_id, source_id;
-DEFINE INDEX idx_synapse_target ON synapse FIELDS brain_id, target_id;
+-- Synapses are native RELATION edges as of schema v8. Their DDL lives in the
+-- SYNAPSE_V8_DDL list below (single source of truth) and is applied both by
+-- ensure_schema() and by the synapse->RELATE migration (migrations.py). Edge
+-- endpoints live in the built-in `in`/`out` fields, not source_id/target_id.
+
+-- Schema migration metadata: version stamp + migration lock + migration state.
+DEFINE TABLE schema_meta SCHEMALESS;
 
 -- Fibers (memory clusters / signal pathways)
 DEFINE TABLE fiber SCHEMAFULL;
@@ -402,21 +390,50 @@ DEFINE INDEX idx_tevt_time    ON tool_events FIELDS brain_id, created_at;
 """
 
 
+# Native RELATION edge DDL for the synapse table (schema v8). Single source of
+# truth shared by ensure_schema() (fresh DBs) and the synapse->RELATE migration
+# in migrations.py (which REMOVEs the old flat table then re-applies these).
+# Endpoints are the built-in `in`/`out` edge fields; there is intentionally no
+# `id`/`source_id`/`target_id` FIELD (RELATION supplies id; endpoints are in/out).
+# NOT ENFORCED: orphan edges (endpoint neuron missing) are tolerated, matching
+# the pre-migration behaviour.
+SYNAPSE_V8_DDL: list[str] = [
+    "DEFINE TABLE synapse TYPE RELATION IN neuron OUT neuron SCHEMAFULL",
+    "DEFINE FIELD brain_id ON synapse TYPE string DEFAULT 'default'",
+    "DEFINE FIELD type ON synapse TYPE string",
+    "DEFINE FIELD weight ON synapse TYPE float DEFAULT 1.0",
+    "DEFINE FIELD direction ON synapse TYPE string DEFAULT 'forward'",
+    "DEFINE FIELD metadata ON synapse TYPE object DEFAULT {}",
+    "DEFINE FIELD created_at ON synapse TYPE datetime DEFAULT time::now()",
+    "DEFINE FIELD last_activated ON synapse TYPE option<datetime>",
+    "DEFINE FIELD reinforced_count ON synapse TYPE int DEFAULT 0",
+    "DEFINE INDEX idx_synapse_brain ON synapse FIELDS brain_id",
+    "DEFINE INDEX idx_synapse_in ON synapse FIELDS brain_id, in",
+    "DEFINE INDEX idx_synapse_out ON synapse FIELDS brain_id, out",
+    "DEFINE INDEX idx_synapse_type ON synapse FIELDS brain_id, type",
+]
+
+
 async def ensure_schema(conn: Any, embedding_dim: int = 3072) -> None:
     """Apply schema to SurrealDB. Safe to call multiple times.
 
-    The neuron embedding HNSW index dimension is parameterized by
-    ``embedding_dim`` so the vector index always matches the configured
-    embedding model (e.g. 1024 for bge-m3 via a local OpenAI-compatible
-    server, 3072 for Gemini). SurrealDB rejects vectors whose length differs
-    from the index dimension, so this MUST equal the provider's output
-    dimension.
+    The neuron embedding HNSW index dimension is parameterized by ``embedding_dim``
+    so the vector index always matches the configured embedding model (e.g. 1024
+    for bge-m3 via a local OpenAI-compatible server, 3072 for Gemini). SurrealDB
+    rejects vectors whose length differs from the index dimension, so this MUST
+    equal the provider's output dimension.
 
-    Note: a plain ``DEFINE INDEX`` errors when the index already exists (and
-    the error is swallowed below), so this does NOT change the dimension of an
-    EXISTING index — it only sets it correctly on first creation. Changing the
-    dimension of a populated index requires an explicit ``REMOVE INDEX`` +
-    re-``DEFINE`` migration.
+    Applies the monolithic SCHEMA_SQL first, then the parameterized neuron HNSW
+    index, then the native-RELATION synapse DDL (SYNAPSE_V8_DDL). On an existing
+    v7 database the flat ``synapse`` table still exists, so ``DEFINE TABLE synapse
+    TYPE RELATION`` raises ``AlreadyExistsError`` here and is swallowed — the old
+    table survives until ``apply_migrations`` (migrations.py) converts it. On a
+    fresh database the RELATION table is created directly.
+
+    Note: a plain ``DEFINE INDEX`` errors when the index already exists (swallowed
+    below), so this does NOT change the dimension of an EXISTING index — it only
+    sets it on first creation. Changing a populated index requires an explicit
+    ``REMOVE INDEX`` + re-``DEFINE`` migration.
     """
     dim = int(embedding_dim) if embedding_dim and int(embedding_dim) > 0 else 3072
     logger.info("Applying SurrealDB schema (v%d, embedding_dim=%d)...", SCHEMA_VERSION, dim)
@@ -427,10 +444,12 @@ async def ensure_schema(conn: Any, embedding_dim: int = 3072) -> None:
         "DEFINE INDEX idx_neuron_embedding ON neuron "
         f"FIELDS embedding_vec HNSW DIMENSION {dim} DIST COSINE"
     )
+    statements.extend(SYNAPSE_V8_DDL)
     for stmt in statements:
         try:
             await conn.query(stmt + ";")
         except Exception:
-            # Index/table may already exist — that's fine
+            # Index/table may already exist (or the flat synapse table blocks the
+            # RELATION re-definition on v7) — the migration handles conversion.
             pass
     logger.info("SurrealDB schema ready (v%d)", SCHEMA_VERSION)
