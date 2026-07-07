@@ -147,26 +147,32 @@ class TestDiscoverSemanticSynapses:
         self, storage: InMemoryStorage, brain_config: BrainConfig
     ) -> None:
         """Two similar neurons should produce a SIMILAR_TO synapse."""
-        n1 = Neuron.create(type=NeuronType.CONCEPT, content="machine learning", neuron_id="n1")
-        n2 = Neuron.create(type=NeuronType.CONCEPT, content="deep learning", neuron_id="n2")
-        n3 = Neuron.create(type=NeuronType.ENTITY, content="pizza recipe", neuron_id="n3")
+        # Discovery reads the embedding STORED on each neuron
+        # (metadata["_embedding"]) and never re-embeds: n1 and n2 are very
+        # similar, n3 is different.
+        n1 = Neuron.create(
+            type=NeuronType.CONCEPT,
+            content="machine learning",
+            neuron_id="n1",
+            metadata={"_embedding": [0.9, 0.1, 0.0]},
+        )
+        n2 = Neuron.create(
+            type=NeuronType.CONCEPT,
+            content="deep learning",
+            neuron_id="n2",
+            metadata={"_embedding": [0.85, 0.15, 0.0]},  # similar to n1
+        )
+        n3 = Neuron.create(
+            type=NeuronType.ENTITY,
+            content="pizza recipe",
+            neuron_id="n3",
+            metadata={"_embedding": [0.0, 0.1, 0.9]},  # different
+        )
         await storage.add_neuron(n1)
         await storage.add_neuron(n2)
         await storage.add_neuron(n3)
 
-        # Mock embeddings: n1 and n2 are very similar, n3 is different
-        mock_provider = AsyncMock()
-        mock_provider.embed_batch.return_value = [
-            [0.9, 0.1, 0.0],  # machine learning
-            [0.85, 0.15, 0.0],  # deep learning (similar)
-            [0.0, 0.1, 0.9],  # pizza recipe (different)
-        ]
-
-        with patch(
-            "surreal_memory.engine.semantic_discovery._create_provider",
-            return_value=mock_provider,
-        ):
-            result = await discover_semantic_synapses(storage, brain_config)
+        result = await discover_semantic_synapses(storage, brain_config)
 
         assert result.neurons_embedded == 3
         assert result.synapses_created >= 1
@@ -187,8 +193,18 @@ class TestDiscoverSemanticSynapses:
         self, storage: InMemoryStorage, brain_config: BrainConfig
     ) -> None:
         """Should not create duplicate synapses."""
-        n1 = Neuron.create(type=NeuronType.CONCEPT, content="alpha", neuron_id="n1")
-        n2 = Neuron.create(type=NeuronType.CONCEPT, content="beta", neuron_id="n2")
+        n1 = Neuron.create(
+            type=NeuronType.CONCEPT,
+            content="alpha",
+            neuron_id="n1",
+            metadata={"_embedding": [1.0, 0.0]},
+        )
+        n2 = Neuron.create(
+            type=NeuronType.CONCEPT,
+            content="beta",
+            neuron_id="n2",
+            metadata={"_embedding": [0.99, 0.01]},  # very similar to n1
+        )
         await storage.add_neuron(n1)
         await storage.add_neuron(n2)
 
@@ -198,17 +214,7 @@ class TestDiscoverSemanticSynapses:
         )
         await storage.add_synapse(existing)
 
-        mock_provider = AsyncMock()
-        mock_provider.embed_batch.return_value = [
-            [1.0, 0.0],
-            [0.99, 0.01],  # Very similar
-        ]
-
-        with patch(
-            "surreal_memory.engine.semantic_discovery._create_provider",
-            return_value=mock_provider,
-        ):
-            result = await discover_semantic_synapses(storage, brain_config)
+        result = await discover_semantic_synapses(storage, brain_config)
 
         assert result.skipped_existing >= 1
         assert result.synapses_created == 0
