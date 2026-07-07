@@ -185,19 +185,40 @@ class SurrealDBToolEventsMixin:
         )
         successes = int(ok_rows[0]["c"]) if ok_rows else 0
         grouped = await self._query(
-            "SELECT tool_name, server_name, count() AS cnt FROM tool_events"
+            "SELECT tool_name, server_name, count() AS cnt,"
+            " math::mean(duration_ms) AS avg_ms FROM tool_events"
             " WHERE brain_id = $bid GROUP BY tool_name, server_name",
             bid=brain_id,
         )
+        # Per-tool success counts. `math::sum(success)` does NOT coerce a bool to
+        # 1/0 on SurrealDB (it returns 0), so count the success=true rows per
+        # group separately instead. Without success_rate/avg_duration_ms here the
+        # web UI renders "NaN%" / "NaNs" for every tool row.
+        ok_grouped = await self._query(
+            "SELECT tool_name, server_name, count() AS ok FROM tool_events"
+            " WHERE brain_id = $bid AND success = true GROUP BY tool_name, server_name",
+            bid=brain_id,
+        )
+        ok_by_key = {
+            (r.get("tool_name", ""), r.get("server_name", "")): int(r.get("ok", 0) or 0)
+            for r in ok_grouped
+        }
         grouped.sort(key=lambda r: int(r.get("cnt", 0) or 0), reverse=True)
-        top_tools = [
-            {
-                "tool_name": r.get("tool_name", ""),
-                "server_name": r.get("server_name", ""),
-                "count": int(r.get("cnt", 0) or 0),
-            }
-            for r in grouped[:20]
-        ]
+        top_tools = []
+        for r in grouped[:20]:
+            name = r.get("tool_name", "")
+            server = r.get("server_name", "")
+            cnt = int(r.get("cnt", 0) or 0)
+            ok = ok_by_key.get((name, server), 0)
+            top_tools.append(
+                {
+                    "tool_name": name,
+                    "server_name": server,
+                    "count": cnt,
+                    "success_rate": round(ok / cnt, 2) if cnt > 0 else 0.0,
+                    "avg_duration_ms": round(float(r.get("avg_ms", 0) or 0)),
+                }
+            )
         return {
             "total_events": total,
             "success_rate": round(successes / total, 2) if total > 0 else 0,
@@ -215,21 +236,42 @@ class SurrealDBToolEventsMixin:
         cutoff = utcnow() - timedelta(days=safe_days)
         rows = await self._query(
             "SELECT time::format(created_at, '%Y-%m-%d') AS day, tool_name,"
-            " count() AS cnt FROM tool_events"
+            " count() AS cnt, math::mean(duration_ms) AS avg_ms FROM tool_events"
             " WHERE brain_id = $bid AND created_at >= $cutoff"
             " GROUP BY day, tool_name",
             bid=brain_id,
             cutoff=cutoff,
         )
+        # Per (day, tool) success counts so the trend chart's success line has a
+        # real success_rate instead of NaN.
+        ok_rows = await self._query(
+            "SELECT time::format(created_at, '%Y-%m-%d') AS day, tool_name,"
+            " count() AS ok FROM tool_events"
+            " WHERE brain_id = $bid AND created_at >= $cutoff AND success = true"
+            " GROUP BY day, tool_name",
+            bid=brain_id,
+            cutoff=cutoff,
+        )
+        ok_by_key = {
+            (r.get("day", ""), r.get("tool_name", "")): int(r.get("ok", 0) or 0) for r in ok_rows
+        }
         rows.sort(
             key=lambda r: (str(r.get("day", "")), int(r.get("cnt", 0) or 0)),
             reverse=True,
         )
-        return [
-            {
-                "date": r.get("day", ""),
-                "tool_name": r.get("tool_name", ""),
-                "count": int(r.get("cnt", 0) or 0),
-            }
-            for r in rows[: min(int(limit), 50)]
-        ]
+        result: list[dict[str, Any]] = []
+        for r in rows[: min(int(limit), 50)]:
+            day = r.get("day", "")
+            name = r.get("tool_name", "")
+            cnt = int(r.get("cnt", 0) or 0)
+            ok = ok_by_key.get((day, name), 0)
+            result.append(
+                {
+                    "date": day,
+                    "tool_name": name,
+                    "count": cnt,
+                    "success_rate": round(ok / cnt, 2) if cnt > 0 else 0.0,
+                    "avg_duration_ms": round(float(r.get("avg_ms", 0) or 0)),
+                }
+            )
+        return result
