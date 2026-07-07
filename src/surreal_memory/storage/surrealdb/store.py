@@ -299,6 +299,14 @@ class SurrealDBStorage(
         # Serializes token re-auth so concurrent queries that all hit an
         # expired-token 401 trigger a single reconnect, not a storm.
         self._reauth_lock = asyncio.Lock()
+        # ISO GQL (SurrealDB 3.2+) capability, detected once at initialize().
+        # get_path uses a GQL SHORTEST-path fast-path when available and falls
+        # back to BFS otherwise. See _get_path_gql for the 3.2.0 scoping caveat.
+        self._gql_available = False
+        # Learn-once: after this many get_path calls where GQL yielded no usable
+        # (endpoint-verified) path, stop attempting GQL for the session so the
+        # fast-path never adds a wasted round-trip on servers where it can't help.
+        self._gql_path_misses = 0
 
     async def initialize(self) -> None:
         """Connect to SurrealDB, gate on server version, apply schema + migrations."""
@@ -350,11 +358,28 @@ class SurrealDBStorage(
         await ensure_schema(self._conn, self._embedding_dim)
         # Auto-run the synapse->RELATE migration on first connect after upgrade.
         await apply_migrations(self._conn)
+
+        # Detect ISO GQL capability (SurrealDB 3.2+) once, non-fatally (2s budget).
+        # A labeled MATCH via eval::gql succeeds only when the server was started
+        # with --allow-experimental gql AND --allow-eval-query; otherwise it raises
+        # and get_path stays on BFS. The neuron LABEL is required — an unlabeled
+        # `MATCH (n)` fails to parse even when GQL is enabled.
+        try:
+            await asyncio.wait_for(
+                self._conn.query('RETURN eval::gql("MATCH (n:neuron) RETURN n LIMIT 1")'),
+                timeout=2,
+            )
+            self._gql_available = True
+        except Exception:
+            self._gql_available = False
+            logger.debug("ISO GQL not available; get_path will use BFS.", exc_info=True)
+
         logger.info(
-            "SurrealDB connected: %s ns=%s db=%s",
+            "SurrealDB connected: %s ns=%s db=%s (gql=%s)",
             self._url,
             self._namespace,
             self._database,
+            self._gql_available,
         )
 
     async def close(self) -> None:
@@ -869,6 +894,61 @@ class SurrealDBStorage(
                 results.append((neighbor, syn))
         return results
 
+    @property
+    def gql_available(self) -> bool:
+        """True when the server exposes ISO GQL (detected at initialize())."""
+        return self._gql_available
+
+    async def _get_path_gql(
+        self,
+        source_id: str,
+        target_id: str,
+        max_hops: int,
+        bidirectional: bool,
+    ) -> list[tuple[Neuron, Synapse]] | None:
+        """GQL SHORTEST-path fast-path over synapse edges (source -> target).
+
+        Returns the path as ``[(Neuron, Synapse), ...]`` or ``None`` when GQL does
+        not yield a verified source->target path (so get_path falls back to BFS).
+
+        SurrealDB 3.2.0 caveat: the experimental ISO GQL dialect (eval::gql) cannot
+        anchor/filter a MATCH node by its record id — string compares don't match a
+        RecordID and casts/functions/param binding are unsupported. We still issue
+        the correctly-scoped query (ids are `[A-Za-z0-9_]`-sanitised, safe to inline)
+        and VERIFY the returned path's endpoints in Python, returning None if they
+        don't connect source->target. Today that verification fails whenever id
+        scoping is unavailable, so BFS handles the lookup; the fast-path activates
+        automatically if a future SurrealDB makes GQL node-id scoping work.
+        """
+        src = _to_surreal_id(source_id)
+        tgt = _to_surreal_id(target_id)
+        arrow = "-[:synapse]-" if bidirectional else "-[:synapse]->"
+        gql = (
+            f'MATCH p = SHORTEST 1 (s:neuron {{id:"{src}"}})'
+            f'{arrow}{{1,{max_hops}}}(t:neuron {{id:"{tgt}"}}) RETURN p'
+        )
+        rows = await self._query("RETURN eval::gql($gql)", gql=gql)
+        path_seq = rows[0].get("p") if rows and isinstance(rows[0], dict) else None
+        if not path_seq or not isinstance(path_seq, list):
+            return None
+
+        # The path alternates node, edge, node, ...; edges sit at odd indices.
+        result: list[tuple[Neuron, Synapse]] = []
+        for i in range(1, len(path_seq), 2):
+            edge_row = path_seq[i]
+            node_row = path_seq[i + 1] if i + 1 < len(path_seq) else None
+            if not isinstance(edge_row, dict) or not isinstance(node_row, dict):
+                return None
+            result.append((_row_to_neuron(node_row), _row_to_synapse(edge_row)))
+
+        # Verify the path actually connects source_id -> target_id.
+        if not result or result[-1][0].id != target_id:
+            return None
+        first_edge = result[0][1]
+        if source_id not in (first_edge.source_id, first_edge.target_id):
+            return None
+        return result
+
     async def get_path(
         self,
         source_id: str,
@@ -876,7 +956,12 @@ class SurrealDBStorage(
         max_hops: int = 4,
         bidirectional: bool = False,
     ) -> list[tuple[Neuron, Synapse]] | None:
-        """BFS path finding between two neurons via synapses."""
+        """Path finding between two neurons via synapses.
+
+        Uses a GQL SHORTEST-path fast-path when the server exposes ISO GQL and it
+        yields an endpoint-verified path; otherwise (and on any GQL failure) uses
+        the universal BFS fallback.
+        """
         if source_id == target_id:
             src = await self.get_neuron(source_id)
             return (
@@ -885,6 +970,24 @@ class SurrealDBStorage(
                 else None
             )
 
+        # GQL SHORTEST-path fast-path (endpoint-verified) when available.
+        if self._gql_available:
+            try:
+                gql_path = await self._get_path_gql(source_id, target_id, max_hops, bidirectional)
+            except Exception:
+                gql_path = None
+                logger.debug("GQL path lookup failed; falling back to BFS.", exc_info=True)
+            if gql_path is not None:
+                self._gql_path_misses = 0
+                return gql_path
+            # GQL produced no usable path — after repeated misses stop trying so the
+            # fast-path never keeps adding a wasted round-trip where it cannot help.
+            self._gql_path_misses += 1
+            if self._gql_path_misses >= 3:
+                self._gql_available = False
+                logger.debug("Disabling GQL path fast-path after repeated misses.")
+
+        # BFS (universal fallback).
         visited: set[str] = {source_id}
         queue: list[tuple[str, list[tuple[Neuron, Synapse]]]] = [(source_id, [])]
 
