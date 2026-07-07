@@ -25,6 +25,7 @@ from surreal_memory.storage.surrealdb.cognitive import SurrealDBCognitiveMixin
 from surreal_memory.storage.surrealdb.compression import SurrealDBCompressionMixin
 from surreal_memory.storage.surrealdb.depth_priors import SurrealDBDepthPriorsMixin
 from surreal_memory.storage.surrealdb.keyword_entity import SurrealDBKeywordEntityMixin
+from surreal_memory.storage.surrealdb.maturation import SurrealDBMaturationMixin
 from surreal_memory.storage.surrealdb.projects import SurrealDBProjectsMixin
 from surreal_memory.storage.surrealdb.review_schedules import SurrealDBReviewSchedulesMixin
 from surreal_memory.storage.surrealdb.schema import ensure_schema
@@ -225,6 +226,7 @@ class SurrealDBStorage(
     SurrealDBAlertsMixin,
     SurrealDBCognitiveMixin,
     SurrealDBReviewSchedulesMixin,
+    SurrealDBMaturationMixin,
     SurrealDBVersionsMixin,
     SurrealDBKeywordEntityMixin,
     SurrealDBCompressionMixin,
@@ -292,7 +294,7 @@ class SurrealDBStorage(
                 ) from exc
             raise
         await self._conn.use(self._namespace, self._database)
-        await ensure_schema(self._conn)
+        await ensure_schema(self._conn, self._embedding_dim)
         logger.info(
             "SurrealDB connected: %s ns=%s db=%s",
             self._url,
