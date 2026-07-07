@@ -89,15 +89,23 @@ async def _seed_v7(conn, seeder: SurrealDBStorage, brain_id: str) -> dict[str, d
         "e_self": (a, a, "related_to", 1.0),  # self-loop
         "e_orphan": (a, "missingneuron", "related_to", 1.0),  # orphan endpoint
         "e_dash": (a, d, "related_to", 2.0),  # dashed neuron id endpoint
+        "e_meta": (b, c, "alias", 1.0),  # non-empty NESTED metadata (regression guard)
     }
+    # Nested metadata keys (e.g. {"_dedup": true}) are the regression guard for the
+    # v2.6.1 FLEXIBLE fix: a SCHEMAFULL RELATION table with a plain `TYPE object`
+    # metadata field rejected undefined nested keys, so v2.6.0 silently SKIPPED every
+    # synapse with non-empty metadata. This row must survive with its metadata intact.
+    metas: dict[str, dict] = {"e_meta": {"_dedup": True, "note": {"nested": "keeps"}}}
     expected: dict[str, dict] = {}
     for sid, (src, tgt, styp, weight) in specs.items():
         ss = _to_surreal_id(src)
         st = _to_surreal_id(tgt)
+        meta = metas.get(sid, {})
         await conn.query(
             f"CREATE synapse:{sid} SET brain_id=$b, type=$t, source_id=$s, target_id=$g, "
-            "weight=$w, direction='uni', created_at=time::now(), reinforced_count=0",
-            {"b": brain_id, "t": styp, "s": ss, "g": st, "w": weight},
+            "weight=$w, direction='uni', created_at=time::now(), reinforced_count=0, "
+            "metadata=$m",
+            {"b": brain_id, "t": styp, "s": ss, "g": st, "w": weight, "m": meta},
         )
         expected[sid] = {
             "id": sid.replace("_", "-"),
@@ -105,6 +113,7 @@ async def _seed_v7(conn, seeder: SurrealDBStorage, brain_id: str) -> dict[str, d
             "target_id": st.replace("_", "-"),
             "type": styp,
             "weight": weight,
+            "metadata": meta,
         }
 
     # a fiber referencing the seeded synapse ids
@@ -164,6 +173,11 @@ async def test_v7_upgrade_preserves_count_ids_endpoints_export_and_merkle() -> N
         assert got.target_id == exp["target_id"]
         assert got.type.value == exp["type"]
         assert got.weight == exp["weight"]
+        assert got.metadata == exp["metadata"], f"metadata lost for {eid}"
+
+    # regression (v2.6.1 FLEXIBLE fix): a synapse with NESTED metadata survives with
+    # its keys intact — on v2.6.0 this row was silently skipped (count would drop).
+    assert by_id["e-meta"].metadata == {"_dedup": True, "note": {"nested": "keeps"}}
 
     # self-loop / orphan specifically survive
     assert by_id["e-self"].source_id == by_id["e-self"].target_id

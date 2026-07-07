@@ -370,22 +370,37 @@ async def _phase_copying(conn: Any, state: dict[str, Any]) -> None:
 
 
 async def _phase_converting(conn: Any, state: dict[str, Any]) -> None:
-    """Drop the flat table, (re)define the RELATION table, replay backup as edges."""
-    # Only rebuild the table on the FIRST entry to this phase (cursor is None):
-    # a resume mid-phase must NOT drop the partially-migrated edge table.
-    if not state.get("cursor"):
-        await conn.query("REMOVE TABLE IF EXISTS synapse")
-        for ddl in SYNAPSE_V8_DDL:
-            try:
-                await conn.query(ddl)
-            except Exception as exc:
-                # Tolerate only "already exists" (idempotent re-run). A real DDL
-                # error (syntax/permissions) must abort — inserting into a
-                # half-defined table would corrupt silently.
-                if not _already_exists(exc):
-                    raise
+    """Drop the flat table, (re)define the RELATION table, replay backup as edges.
 
-    after = _cursor_record(state.get("cursor"), BACKUP_TABLE)
+    Rebuilds the RELATION table from the COMPLETE backup on every entry — including
+    on a resume. Two reasons this full re-scan is correct and necessary:
+
+    * INSERT RELATION uses explicit ids, so re-inserting is idempotent (the table is
+      dropped first, so there is nothing to clash with anyway).
+    * Resuming from a saved cursor would permanently lose any row that a buggy
+      earlier build SKIPPED *behind* that cursor (e.g. every synapse with non-empty
+      ``metadata`` before the FLEXIBLE fix). Re-scanning from the start, against the
+      freshly-redefined v8 schema, is what makes those rows recoverable.
+    """
+    await conn.query("REMOVE TABLE IF EXISTS synapse")
+    for ddl in SYNAPSE_V8_DDL:
+        try:
+            await conn.query(ddl)
+        except Exception as exc:
+            # Tolerate only "already exists" (idempotent re-run). A real DDL
+            # error (syntax/permissions) must abort — inserting into a
+            # half-defined table would corrupt silently.
+            if not _already_exists(exc):
+                raise
+
+    # Fresh full pass over the backup (the source of truth); reset counters so
+    # `verifying` compares against a clean, complete conversion.
+    state["converted"] = 0
+    state["skipped"] = 0
+    state["cursor"] = None
+    await _save_state(conn, state)
+
+    after: Any | None = None
     while True:
         rows = await _page(conn, BACKUP_TABLE, after, BATCH_SIZE)
         if not rows:

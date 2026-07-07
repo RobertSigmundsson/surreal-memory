@@ -312,8 +312,10 @@ class TestLock:
 # --------------------------------------------------------------------------- #
 class TestResume:
     @pytest.mark.asyncio
-    async def test_resume_from_converting_skips_copying_and_remove(self, monkeypatch):
-        """A resume mid-converting must NOT re-copy and must NOT drop the table."""
+    async def test_resume_from_converting_rebuilds_without_recopy(self, monkeypatch):
+        """A resume mid-converting must NOT re-copy, but MUST rebuild the RELATION
+        table from the complete backup (dropping any partial/buggy conversion) so
+        rows a prior attempt skipped behind its cursor are recovered."""
         backup_rows = [
             {
                 "id": _rid(M.BACKUP_TABLE, "e0"),
@@ -347,8 +349,8 @@ class TestResume:
         assert not any("INSERT IGNORE INTO synapse_migration_backup" in s for s in sqls), (
             "must not re-copy"
         )
-        assert not any("REMOVE TABLE IF EXISTS synapse" in s for s in sqls), (
-            "must not drop table on mid-phase resume"
+        assert any("REMOVE TABLE IF EXISTS synapse" in s for s in sqls), (
+            "resume must rebuild the RELATION table from the complete backup"
         )
         assert any("INSERT RELATION INTO synapse" in s for s in sqls)
         assert any("UPSERT schema_meta:version SET version" in s for s in sqls)
