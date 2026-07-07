@@ -524,7 +524,7 @@ Edit an existing memory's type, content, or priority. Use when a memory was auto
 
 ### `smem_forget`
 
-Explicitly delete or close a specific memory. Soft delete by default (marks as expired) — a soft-forgotten memory is excluded from recall **immediately**, not just at the next consolidation. Use hard=true for permanent removal. Use for closing completed TODOs or removing outdated/incorrect memories.
+Explicitly delete or close a specific memory. Soft delete by default (marks as expired). Use hard=true for permanent removal. Use for closing completed TODOs or removing outdated/incorrect memories.
 
 | Parameter | Type | Required | Default | Description |
 |-----------|------|----------|---------|-------------|
