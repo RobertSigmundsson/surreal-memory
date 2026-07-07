@@ -91,8 +91,25 @@ async def _query(conn: Any, sql: str, params: dict[str, Any] | None = None) -> l
     return []
 
 
+def _is_missing_table(exc: Exception) -> bool:
+    """True if *exc* is SurrealDB's 'table does not exist' error (0 rows), not a
+    connectivity/auth/query failure."""
+    if type(exc).__name__ == "NotFoundError":
+        return True
+    msg = str(exc).lower()
+    return "does not exist" in msg or "no such table" in msg
+
+
 async def _count(conn: Any, table: str) -> int:
-    rows = await _query(conn, f"SELECT count() FROM {table} GROUP ALL")
+    try:
+        rows = await _query(conn, f"SELECT count() FROM {table} GROUP ALL")
+    except Exception as exc:
+        # A non-existent table has 0 rows (fresh DB / doctor-status before any
+        # migration). Only swallow that — real connection/auth/query errors must
+        # propagate so verification doesn't misreport an infra blip as data loss.
+        if _is_missing_table(exc):
+            return 0
+        raise
     if rows and isinstance(rows[0], dict):
         return int(rows[0].get("count", 0) or 0)
     return 0

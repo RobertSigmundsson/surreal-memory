@@ -10,18 +10,26 @@
 
 services:
   surrealdb:
-    image: surrealdb/surrealdb:v3.1.1
+    image: surrealdb/surrealdb:v3.2.0
     # surrealkv:///surrealdb/data/db makes storage PERSISTENT. Without a datastore
     # path `surreal start` defaults to in-memory and ALL data is lost on restart.
     # `user: root` is required because a fresh named volume is root-owned and the
     # image's default `nonroot` user cannot create the datastore directory in it.
-    command: start --user root --pass ${SURREALDB_PASS:-surrealmemory} --bind 0.0.0.0:8001 surrealkv:///surrealdb/data/db
+    #
+    # v3.2.0: the datastore path MUST come before the capability flags — the
+    # multi-valued `--allow-eval-query` would otherwise swallow the path as its
+    # value. `--allow-experimental gql` + `--allow-eval-query` enable ISO GQL
+    # (eval::gql) used internally by get_path's fast-path; `gql` is the (hidden)
+    # experimental token and eval-query is denied by default even under --allow-all.
+    command: start surrealkv:///surrealdb/data/db --user root --pass ${SURREALDB_PASS:-surrealmemory} --bind 0.0.0.0:8001 --allow-experimental gql --allow-eval-query
     user: root
     ports:
       - "8001:8001"
     volumes:
       - surrealdb_data:/surrealdb/data
     healthcheck:
+      # v3.2 adds an HTTP /ready endpoint, but the distroless image has no curl,
+      # so we keep `surreal isready` (which the binary ships and works headless).
       test: ["CMD", "/surreal", "isready", "--endpoint", "http://localhost:8001"]
       interval: 10s
       timeout: 5s
