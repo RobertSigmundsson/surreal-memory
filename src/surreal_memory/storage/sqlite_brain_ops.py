@@ -74,6 +74,13 @@ class SQLiteBrainMixin:
                         "embedding_provider": brain.config.embedding_provider,
                         "embedding_model": brain.config.embedding_model,
                         "embedding_similarity_threshold": brain.config.embedding_similarity_threshold,
+                        "reranker_enabled": brain.config.reranker_enabled,
+                        "reranker_model": brain.config.reranker_model,
+                        "reranker_overfetch_multiplier": brain.config.reranker_overfetch_multiplier,
+                        "reranker_blend_weight": brain.config.reranker_blend_weight,
+                        "reranker_min_score": brain.config.reranker_min_score,
+                        "reranker_max_candidates": brain.config.reranker_max_candidates,
+                        "reranker_endpoint": brain.config.reranker_endpoint,
                     }
                 ),
                 brain.owner_id,

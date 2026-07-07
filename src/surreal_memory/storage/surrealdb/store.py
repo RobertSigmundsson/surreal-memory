@@ -8,13 +8,14 @@ sync engine, change log, Merkle hashes, and typed memories.
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import logging
 from datetime import datetime
 from hashlib import sha256
 from typing import Any, Literal
 from uuid import uuid4
 
-from surreal_memory.core.brain import Brain, BrainSnapshot
+from surreal_memory.core.brain import Brain, BrainConfig, BrainSnapshot
 from surreal_memory.core.fiber import Fiber
 from surreal_memory.core.neuron import Neuron, NeuronState, NeuronType
 from surreal_memory.core.synapse import Direction, Synapse, SynapseType
@@ -36,6 +37,39 @@ from surreal_memory.storage.surrealdb.versions import SurrealDBVersionsMixin
 from surreal_memory.utils.timeutils import utcnow
 
 logger = logging.getLogger(__name__)
+
+
+def _serialize_brain_config(config: Any) -> dict[str, Any]:
+    """Serialize a ``BrainConfig`` dataclass to a plain dict for storage.
+
+    Persisting the full config (not just a metadata copy) is what makes the
+    per-brain retrieval knobs — including reranking — survive a round-trip.
+    """
+    try:
+        return dataclasses.asdict(config)
+    except Exception:
+        return {}
+
+
+def _deserialize_brain_config(raw: Any) -> BrainConfig:
+    """Rebuild a ``BrainConfig`` from a stored dict, dropping unknown keys.
+
+    Legacy brains stored their *metadata* in the ``config`` column (the old
+    ``save_brain`` bug), so a dict with no BrainConfig fields yields a default
+    ``BrainConfig``. Unknown/removed keys are filtered so config schema changes
+    never break load.
+    """
+    if not isinstance(raw, dict) or not raw:
+        return BrainConfig()
+    valid = {f.name for f in dataclasses.fields(BrainConfig)}
+    filtered = {k: v for k, v in raw.items() if k in valid}
+    if not filtered:
+        return BrainConfig()
+    try:
+        return BrainConfig(**filtered)
+    except Exception:
+        logger.warning("Failed to deserialize stored brain config; using defaults", exc_info=True)
+        return BrainConfig()
 
 
 def _is_auth_error(exc: Exception) -> bool:
@@ -1187,7 +1221,7 @@ class SurrealDBStorage(
         record_data: dict[str, Any] = {
             "id": brain.id,  # Use original ID to avoid underscore conversion
             "name": brain.name,
-            "config": dict(brain.metadata),
+            "config": _serialize_brain_config(brain.config),
             "metadata": dict(brain.metadata),
             "created_at": brain.created_at,
             "updated_at": brain.updated_at,
@@ -1234,6 +1268,7 @@ class SurrealDBStorage(
                         return Brain(
                             id=bid_str,
                             name=name,
+                            config=_deserialize_brain_config(r.get("config")),
                             metadata=dict(r.get("metadata") or {}),
                             created_at=_parse_datetime(r.get("created_at")) or utcnow(),
                             updated_at=_parse_datetime(r.get("updated_at")) or utcnow(),
@@ -1970,6 +2005,7 @@ class SurrealDBStorage(
         return Brain(
             id=bid,
             name=str(r.get("name", "")),
+            config=_deserialize_brain_config(r.get("config")),
             metadata=dict(r.get("metadata") or {}),
             created_at=_parse_datetime(r.get("created_at")) or utcnow(),
             updated_at=_parse_datetime(r.get("updated_at")) or utcnow(),

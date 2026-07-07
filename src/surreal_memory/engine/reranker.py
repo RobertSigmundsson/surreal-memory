@@ -10,7 +10,10 @@ Install: pip install surreal-memory[reranker]
 
 from __future__ import annotations
 
+import json
 import logging
+import os
+import urllib.request
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
@@ -36,9 +39,18 @@ def _check_cross_encoder() -> bool:
     return _CROSS_ENCODER_AVAILABLE
 
 
+def _rerank_endpoint() -> str:
+    """Base URL of an OpenAI-compatible ``/rerank`` endpoint (e.g. llama.cpp /
+    llamastash, ``http://127.0.0.1:11435/v1``). When set, reranking is served over
+    HTTP instead of loading an in-process sentence-transformers CrossEncoder — no
+    torch dependency and the model runs on the shared inference server (GPU)."""
+    return os.environ.get("SURREAL_MEMORY_RERANKER_ENDPOINT", "").strip()
+
+
 def reranker_available() -> bool:
-    """Check if reranker dependencies are installed."""
-    return _check_cross_encoder()
+    """Reranking is available when an HTTP endpoint is configured OR the local
+    sentence-transformers CrossEncoder is installed."""
+    return bool(_rerank_endpoint()) or _check_cross_encoder()
 
 
 @dataclass(frozen=True)
@@ -151,6 +163,86 @@ class CrossEncoderReranker:
         return filtered[:limit]
 
 
+class HttpReranker:
+    """Rerank over an OpenAI-compatible ``/rerank`` endpoint (llama.cpp / llamastash).
+
+    Scores (query, document) pairs via HTTP rather than loading a model in-process.
+    llama.cpp returns raw relevance logits (unbounded, commonly negative), so the
+    batch is min-max normalised *within the candidate set* — a global sigmoid would
+    collapse those logits toward 0 and erase the reranker's discrimination in the
+    blend. The blended score keeps the SA activation as a floor.
+    """
+
+    def __init__(
+        self,
+        endpoint: str,
+        model_name: str,
+        blend_weight: float = 0.7,
+        max_candidates: int = 30,
+        timeout: float = 15.0,
+    ) -> None:
+        self._endpoint = endpoint.rstrip("/")
+        self._model = model_name
+        self._blend_weight = min(max(blend_weight, 0.0), 1.0)
+        self._max_candidates = min(max_candidates, 100)
+        self._timeout = timeout
+
+    def _raw_scores(self, query: str, documents: list[str]) -> list[float]:
+        payload = json.dumps({"model": self._model, "query": query, "documents": documents}).encode(
+            "utf-8"
+        )
+        req = urllib.request.Request(  # noqa: S310 - fixed local llamastash endpoint
+            f"{self._endpoint}/rerank",
+            data=payload,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=self._timeout) as resp:  # noqa: S310
+            data = json.loads(resp.read().decode("utf-8"))
+        by_index = {int(r["index"]): float(r["relevance_score"]) for r in data.get("results", [])}
+        return [by_index.get(i, float("-inf")) for i in range(len(documents))]
+
+    def rerank(
+        self,
+        query: str,
+        candidates: list[tuple[str, str, float]],
+        limit: int,
+    ) -> list[RerankedResult]:
+        if not candidates:
+            return []
+        candidates = candidates[: self._max_candidates]
+        documents = [content for _, content, _ in candidates]
+        raw = self._raw_scores(query, documents)
+        norm = _minmax(raw)
+        sa_weight = 1.0 - self._blend_weight
+        results: list[RerankedResult] = []
+        for (neuron_id, _, activation), norm_score, raw_score in zip(
+            candidates, norm, raw, strict=True
+        ):
+            blended = self._blend_weight * norm_score + sa_weight * activation
+            results.append(
+                RerankedResult(
+                    neuron_id=neuron_id,
+                    activation_level=activation,
+                    rerank_score=float(raw_score),
+                    blended_score=blended,
+                )
+            )
+        results.sort(key=lambda r: r.blended_score, reverse=True)
+        return results[:limit]
+
+
+def _minmax(scores: list[float]) -> list[float]:
+    """Min-max normalise to [0, 1] within the batch; missing scores map to 0."""
+    finite = [s for s in scores if s != float("-inf")]
+    if not finite:
+        return [0.0 for _ in scores]
+    lo, hi = min(finite), max(finite)
+    if hi <= lo:
+        return [1.0 if s != float("-inf") else 0.0 for s in scores]
+    return [((s - lo) / (hi - lo)) if s != float("-inf") else 0.0 for s in scores]
+
+
 def _sigmoid(x: float) -> float:
     """Sigmoid function mapping any real number to [0, 1]."""
     import math
@@ -173,22 +265,38 @@ def rerank_activations(
     min_score: float = 0.15,
     max_candidates: int = 30,
     limit: int = 50,
+    endpoint: str | None = None,
 ) -> dict[str, ActivationResult]:
     """Convenience function: rerank activations and return updated dict.
 
     Replaces activation_level with blended_score for reranked neurons.
     Non-reranked neurons (below limit) are dropped.
+
+    ``endpoint`` selects HTTP reranking over an OpenAI-compatible ``/rerank``
+    server (e.g. llamastash). When ``None``/empty, falls back to the
+    ``SURREAL_MEMORY_RERANKER_ENDPOINT`` env var, then to an in-process
+    sentence-transformers CrossEncoder.
     """
-    if not reranker_available():
+    resolved_endpoint = (endpoint or "").strip() or _rerank_endpoint()
+    if not resolved_endpoint and not _check_cross_encoder():
         logger.debug("Reranker not available, returning activations unchanged")
         return activations
 
-    reranker = CrossEncoderReranker(
-        model_name=model_name,
-        blend_weight=blend_weight,
-        min_score=min_score,
-        max_candidates=max_candidates,
-    )
+    reranker: Any
+    if resolved_endpoint:
+        reranker = HttpReranker(
+            endpoint=resolved_endpoint,
+            model_name=model_name,
+            blend_weight=blend_weight,
+            max_candidates=max_candidates,
+        )
+    else:
+        reranker = CrossEncoderReranker(
+            model_name=model_name,
+            blend_weight=blend_weight,
+            min_score=min_score,
+            max_candidates=max_candidates,
+        )
 
     # Build candidate list from activations
     candidates: list[tuple[str, str, float]] = []
@@ -203,7 +311,12 @@ def rerank_activations(
     # Sort by activation level descending (over-fetch from top)
     candidates.sort(key=lambda c: c[2], reverse=True)
 
-    reranked = reranker.rerank(query, candidates, limit)
+    try:
+        reranked = reranker.rerank(query, candidates, limit)
+    except Exception:
+        # Reranking must never break recall — fall back to the SA ordering.
+        logger.warning("Reranking failed; returning activations unchanged", exc_info=True)
+        return activations
 
     # Build new activations dict with blended scores
     from dataclasses import replace as dc_replace

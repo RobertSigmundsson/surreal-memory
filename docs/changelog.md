@@ -12,6 +12,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.7.0] — 2026-07-07
+
+### Added
+
+- **Cross-encoder reranking is now a fully wired, config-driven recall stage.**
+  Spreading activation over-fetches candidates, which are then reranked by a
+  cross-encoder scoring `(query, memory)` relevance; the final ordering blends the
+  reranker score with the activation level (`blend_weight`, default `0.7`). Enable
+  it in `config.toml`:
+
+  ```toml
+  [reranker]
+  enabled = true
+  endpoint = "http://127.0.0.1:11435/v1"   # OpenAI-compatible /rerank (e.g. llamastash)
+  model_name = "BAAI/bge-reranker-v2-m3"
+  blend_weight = 0.7
+  ```
+
+- **HTTP reranking over an OpenAI-compatible `/rerank` server** (`HttpReranker`).
+  The new `[reranker].endpoint` runs the cross-encoder on a shared inference server
+  (e.g. llamastash / llama.cpp on GPU) instead of loading an in-process
+  sentence-transformers model — reranking then needs no `torch` dependency. When
+  the endpoint is unset it falls back to the `SURREAL_MEMORY_RERANKER_ENDPOINT`
+  env var, then to a local `CrossEncoder`. Raw llama.cpp relevance logits are
+  min-max normalised within the candidate set before blending. Reranking never
+  breaks recall: any error falls back to the spreading-activation ordering.
+
+### Fixed
+
+- **Per-brain `BrainConfig` was never persisted.** `save_brain` stored a copy of the
+  brain *metadata* in the `config` column, and `get_brain`/`find_brain_by_name` never
+  loaded it, so every brain came back with a **default** config. This made the
+  reranker — and any non-default per-brain retrieval knob — dead code. The full
+  `BrainConfig` is now serialised on save and restored on load (unknown keys are
+  dropped for forward/backward compatibility; legacy pre-2.7.0 rows that stored
+  metadata in the `config` column fall back to defaults). `config.toml [reranker]` is
+  also layered onto already-stored brains on connect, so enabling reranking takes
+  effect without recreating a brain.
+
 ## [2.6.1] — 2026-07-07
 
 ### Fixed
