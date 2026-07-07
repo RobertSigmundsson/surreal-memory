@@ -127,6 +127,9 @@ class BrainConfig:
     reranker_blend_weight: float = 0.7  # Reranker weight (SA gets 1 - this)
     reranker_min_score: float = 0.15
     reranker_max_candidates: int = 30  # Safety cap on overfetch
+    reranker_endpoint: str = (
+        ""  # OpenAI-compatible /rerank base URL (llamastash); empty = in-process CrossEncoder
+    )
     # Temporal binding (session-level auto-linking)
     temporal_binding_enabled: bool = True
     temporal_binding_window_seconds: float = 300.0  # 5-minute window

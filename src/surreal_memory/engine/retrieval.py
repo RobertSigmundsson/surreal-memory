@@ -500,7 +500,11 @@ class ReflexPipeline:
             try:
                 from surreal_memory.engine.reranker import reranker_available
 
-                if reranker_available():
+                # The config endpoint (config.toml [reranker].endpoint) makes
+                # reranking available even when neither the env endpoint nor an
+                # in-process CrossEncoder is present, so gate on it explicitly.
+                config_endpoint = (self._config.reranker_endpoint or "").strip()
+                if config_endpoint or reranker_available():
                     from surreal_memory.engine.reranker import rerank_activations
 
                     # Fetch content for top candidates
@@ -527,6 +531,7 @@ class ReflexPipeline:
                             min_score=self._config.reranker_min_score,
                             max_candidates=self._config.reranker_max_candidates,
                             limit=50,
+                            endpoint=self._config.reranker_endpoint,
                         )
                         logger.debug(
                             "Reranked %d → %d activations",

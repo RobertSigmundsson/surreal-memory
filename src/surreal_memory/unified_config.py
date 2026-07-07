@@ -39,6 +39,11 @@ _SYNC_ID_MAX_LEN = 128
 # Valid TOML string value: alphanumeric, hyphens, underscores, dots, slashes, spaces
 _TOML_SAFE_STRING = re.compile(r"^[a-zA-Z0-9_\-\./ ]*$")
 _TOML_STR_MAX_LEN = 128
+# URL charset (RFC 3986 gen-/sub-delims + unreserved + %), minus quotes,
+# backslash, apostrophe and whitespace — so it can't break out of a TOML
+# double-quoted basic string. Used for endpoint URLs which need ':' '?' '&' etc.
+_TOML_SAFE_URL = re.compile(r"^[a-zA-Z0-9\-._~:/?#\[\]@!$&()*+,;=%]*$")
+_TOML_URL_MAX_LEN = 256
 
 
 def get_surrealmemory_dir() -> Path:
@@ -341,12 +346,17 @@ class BrainSettings:
             extras=extras,
         )
 
-    def to_brain_config_kwargs(self, embedding: EmbeddingSettings | None = None) -> dict[str, Any]:
+    def to_brain_config_kwargs(
+        self,
+        embedding: EmbeddingSettings | None = None,
+        reranker: Any = None,
+    ) -> dict[str, Any]:
         """Build kwargs for ``core.brain.BrainConfig`` from this settings instance.
 
-        Combines the explicit BrainSettings fields, embedding-derived fields, and
-        any ``extras`` keys that match a real BrainConfig field name. Unknown
-        extras are dropped so ``BrainConfig(**kwargs)`` is safe.
+        Combines the explicit BrainSettings fields, embedding-derived fields,
+        reranker-derived fields (from ``config.toml [reranker]``), and any
+        ``extras`` keys that match a real BrainConfig field name. Unknown extras
+        are dropped so ``BrainConfig(**kwargs)`` is safe.
         """
         from surreal_memory.core.brain import BrainConfig
 
@@ -368,6 +378,8 @@ class BrainSettings:
                     "embedding_similarity_threshold": embedding.similarity_threshold,
                 }
             )
+        if reranker is not None:
+            kwargs.update(reranker_brain_config_overrides(reranker))
         for key, value in self.extras.items():
             if key in valid_fields and key not in kwargs:
                 kwargs[key] = value
@@ -897,6 +909,22 @@ def _sanitize_toml_str(value: str) -> str:
     return cleaned
 
 
+def _sanitize_toml_url(value: str) -> str:
+    """Sanitize a URL for safe TOML serialization (double-quoted basic string).
+
+    Unlike :func:`_sanitize_toml_str`, this permits URL characters (``:`` ``?``
+    ``&`` ``%`` …) while still rejecting quotes, backslashes, whitespace and
+    control characters that could break out of the string or inject TOML. Values
+    that are too long or contain any unsafe character return ``""`` (rejected,
+    never silently truncated to a broken URL)."""
+    if not isinstance(value, str):
+        return ""
+    cleaned = value.strip()
+    if len(cleaned) > _TOML_URL_MAX_LEN or not _TOML_SAFE_URL.match(cleaned):
+        return ""
+    return cleaned
+
+
 _ISO_DATETIME_PATTERN = re.compile(r"^[0-9T:\-\+Z\. ]*$")
 
 
@@ -1163,6 +1191,9 @@ class RerankerConfig:
     blend_weight: float = 0.7  # Reranker weight (SA gets 1 - this)
     min_score: float = 0.15
     max_candidates: int = 30  # Safety cap on overfetch
+    # OpenAI-compatible /rerank base URL (e.g. llamastash "http://127.0.0.1:11435/v1").
+    # When set, reranking is served over HTTP (no in-process torch/CrossEncoder).
+    endpoint: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -1172,6 +1203,7 @@ class RerankerConfig:
             "blend_weight": self.blend_weight,
             "min_score": self.min_score,
             "max_candidates": self.max_candidates,
+            "endpoint": self.endpoint,
         }
 
     @classmethod
@@ -1183,7 +1215,27 @@ class RerankerConfig:
             blend_weight=float(data.get("blend_weight", 0.7)),
             min_score=float(data.get("min_score", 0.15)),
             max_candidates=int(data.get("max_candidates", 30)),
+            endpoint=str(data.get("endpoint", "")),
         )
+
+
+def reranker_brain_config_overrides(reranker: RerankerConfig) -> dict[str, Any]:
+    """Map ``config.toml [reranker]`` onto the ``BrainConfig.reranker_*`` fields.
+
+    The retrieval pipeline reads reranking knobs from the per-brain
+    ``BrainConfig``, so this bridges the app-level ``RerankerConfig`` onto those
+    fields. Used both when creating a brain and when layering config over an
+    already-stored brain (:func:`_migrate_brain_runtime_config`).
+    """
+    return {
+        "reranker_enabled": reranker.enabled,
+        "reranker_model": reranker.model_name,
+        "reranker_overfetch_multiplier": reranker.overfetch_multiplier,
+        "reranker_blend_weight": reranker.blend_weight,
+        "reranker_min_score": reranker.min_score,
+        "reranker_max_candidates": reranker.max_candidates,
+        "reranker_endpoint": reranker.endpoint,
+    }
 
 
 @dataclass(frozen=True)
@@ -1655,6 +1707,8 @@ class UnifiedConfig:
             f"blend_weight = {self.reranker.blend_weight}",
             f"min_score = {self.reranker.min_score}",
             f"max_candidates = {self.reranker.max_candidates}",
+            "# OpenAI-compatible /rerank base URL (e.g. llamastash); empty = in-process CrossEncoder",
+            f'endpoint = "{_sanitize_toml_url(self.reranker.endpoint)}"',
             "",
             "# Auto-tier promotion/demotion (Pro feature)",
             "[tiers]",
@@ -2077,6 +2131,11 @@ async def _migrate_brain_runtime_config(
     """
     try:
         overrides = config.brain.runtime_overrides()
+        # Also layer config.toml [reranker] onto the stored brain so reranking is
+        # driven by app config (issue: reranker BrainConfig fields were never
+        # persisted, so the feature was dead code). Always applied; the diff check
+        # below no-ops when the stored brain already matches.
+        overrides.update(reranker_brain_config_overrides(config.reranker))
         if not overrides:
             return
 
@@ -2148,7 +2207,9 @@ async def _get_sqlite_storage(
         if brain is None:
             from surreal_memory.core.brain import BrainConfig
 
-            brain_config = BrainConfig(**config.brain.to_brain_config_kwargs(config.embedding))
+            brain_config = BrainConfig(
+                **config.brain.to_brain_config_kwargs(config.embedding, config.reranker)
+            )
             brain = Brain.create(name=name, config=brain_config, brain_id=name)
             await storage.save_brain(brain)
         else:

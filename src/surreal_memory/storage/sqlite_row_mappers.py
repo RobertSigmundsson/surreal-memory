@@ -259,6 +259,13 @@ def row_to_brain(row: aiosqlite.Row) -> Brain:
         fidelity_summary_threshold=config_data.get("fidelity_summary_threshold", 0.3),
         fidelity_essence_threshold=config_data.get("fidelity_essence_threshold", 0.1),
         essence_generator=config_data.get("essence_generator", "extractive"),
+        reranker_enabled=config_data.get("reranker_enabled", False),
+        reranker_model=config_data.get("reranker_model", "BAAI/bge-reranker-v2-m3"),
+        reranker_overfetch_multiplier=config_data.get("reranker_overfetch_multiplier", 3),
+        reranker_blend_weight=config_data.get("reranker_blend_weight", 0.7),
+        reranker_min_score=config_data.get("reranker_min_score", 0.15),
+        reranker_max_candidates=config_data.get("reranker_max_candidates", 30),
+        reranker_endpoint=config_data.get("reranker_endpoint", ""),
     )
 
     return Brain(
