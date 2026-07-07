@@ -394,6 +394,7 @@ smem doctor [OPTIONS]
 | `--json / -j` | boolean | No | `False` | Output as JSON |
 | `--fix` | boolean | No | `False` | Auto-fix available issues |
 | `--dev` | boolean | No | `False` | Include source checkout and contributor tooling checks |
+| `--synapse-migration` | text | No | — | Manage the synapse->RELATE migration: status \| retry \| purge-backup |
 
 ### `smem dashboard`
 

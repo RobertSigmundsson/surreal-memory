@@ -218,6 +218,22 @@ These synapses allow spreading activation to traverse semantic connections durin
 - **0.6**: Moderate — catches more cross-language matches. Good starting point for multilingual.
 - **0.5**: Aggressive — more noise but catches loose associations.
 
+### Embedding Dimension
+
+The vector index (`idx_neuron_embedding`, HNSW) is built to a fixed **dimension** that must match your
+embedding provider's output (e.g. `all-MiniLM-L6-v2` = 384, `text-embedding-004`/`nomic-embed-text` = 768,
+`text-embedding-3-small` = 1536, `gemini-embedding-001`/`text-embedding-3-large` = 3072). By default the
+dimension is **auto-derived** from the active provider, so you normally set nothing.
+
+```toml
+[embedding]
+dimension = 0   # 0 = auto-derive from the provider (recommended)
+```
+
+Or via env: `SURREAL_MEMORY_EMBEDDING_DIMENSION=0`. Pin a non-zero value only if you deliberately want a
+fixed index dimension — a value that disagrees with the model's real output dimension silently breaks
+semantic search (the index and the stored vectors no longer match).
+
 ### Changing Provider Mid-Session
 
 You can change providers at any time. However, existing `SIMILAR_TO` synapses created by semantic discovery were computed with the old provider's embeddings. Run `smem consolidate` after switching to recompute with the new provider.
