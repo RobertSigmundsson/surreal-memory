@@ -565,8 +565,12 @@ def consolidate(
             typer.echo("(dry run - no changes will be saved)")
 
         storage = await get_storage(config, brain_name=brain_name)
-        brain_obj = await storage.get_brain(brain_name)
-        brain_id = brain_obj.id if brain_obj else brain_name
+        # Neurons/synapses are keyed by brain_id == the brain NAME. The brain
+        # record's ``id`` is a legacy UUID that does NOT match the stored
+        # brain_id, so using it here made consolidation operate on an empty
+        # brain (zero rows matched → every strategy reported 0). Always run
+        # against the name.
+        brain_id = brain_name
 
         cons_config = ConsolidationConfig(
             prune_weight_threshold=prune_threshold,

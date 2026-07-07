@@ -74,7 +74,9 @@ class SurrealDBCompressionMixin:
             fiber_id=fiber_id,
         )
         if existing:
-            await conn.merge(f"compression_backups:{sid}", record_data)
+            # Merge by existing record id (not recomputed sid) — survives a brain
+            # rename where the id keeps the old brain prefix (else silent no-op).
+            await conn.merge(existing[0]["id"], record_data)
         else:
             insert_data = dict(record_data)
             insert_data["id"] = sid
@@ -186,7 +188,9 @@ class SurrealDBCompressionMixin:
             neuron_id=neuron_id,
         )
         if existing:
-            await conn.merge(f"neuron_snapshots:{sid}", record_data)
+            # Merge by existing record id (not recomputed sid) — survives a brain
+            # rename where the id keeps the old brain prefix (else silent no-op).
+            await conn.merge(existing[0]["id"], record_data)
         else:
             insert_data = dict(record_data)
             insert_data["id"] = sid

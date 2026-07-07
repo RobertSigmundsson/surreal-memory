@@ -970,6 +970,11 @@ async def update_sync_config(
 
     updated = dc_replace(config, sync=new_sync)
     updated.save()
+    from surreal_memory.unified_config import set_config
+
+    set_config(
+        updated
+    )  # refresh cached get_config() singleton so this process serves fresh sync config
 
     api_key_display = "(not set)"
     if new_sync.api_key and len(new_sync.api_key) >= 12:
@@ -1067,6 +1072,9 @@ async def update_config(body: ConfigUpdateRequest) -> dict[str, Any]:
 
     updated = dc_replace(config, embedding=new_embedding)
     updated.save()
+    from surreal_memory.unified_config import set_config
+
+    set_config(updated)  # refresh cached get_config() singleton
 
     return {"status": "updated", "embedding": new_embedding.to_dict()}
 

@@ -79,7 +79,11 @@ class SurrealDBReviewSchedulesMixin:
             fiber_id=schedule.fiber_id,
         )
         if existing:
-            await conn.merge(f"review_schedules:{sid}", record_data)
+            # Merge by the EXISTING record id, not the recomputed sid: a brain
+            # rename updates the brain_id FIELD but not the record id, so the id
+            # may still carry the old brain prefix. Recomputing the sid here would
+            # target a non-existent record and the update would silently no-op.
+            await conn.merge(existing[0]["id"], record_data)
         else:
             insert_data = dict(record_data)
             insert_data["id"] = sid
