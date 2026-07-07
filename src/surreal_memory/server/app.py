@@ -574,25 +574,47 @@ def create_app(
         limit: int = Query(default=500, ge=1, le=2000),
         offset: int = Query(default=0, ge=0),
     ) -> dict[str, Any]:
-        """Get graph data for visualization with pagination."""
+        """Get graph data for visualization (edge-first).
+
+        Pick the most-connected neurons as the node budget, then keep only edges
+        whose BOTH endpoints are in that dense set. This guarantees every returned
+        edge renders. The previous approach sampled an arbitrary ``ORDER BY id``
+        node slice and kept only edges with both endpoints in it — with thousands
+        of neurons the intersection survival rate is ~1%, so ~25k edges collapsed
+        to a couple dozen and the graph looked empty.
+        """
         capped_limit = min(limit, 2000)
+        edge_cap = 4000
 
-        # Fetch paginated neurons (offset + limit + 1 to detect if more exist)
-        all_neurons = await storage.find_neurons(limit=offset + capped_limit)
-        total_neurons = len(all_neurons)
-        paginated = all_neurons[offset : offset + capped_limit]
-
-        # Fetch synapses with a capped limit
         synapses = await storage.get_all_synapses()
-        capped_synapses = synapses[:2000] if len(synapses) > 2000 else synapses
         total_synapses = len(synapses)
-        fibers = await storage.get_fibers(limit=1000)
 
-        # Build neuron ID set for filtering synapses to visible nodes
-        neuron_ids = {n.id for n in paginated}
+        # Degree count → rank neurons by connectivity, take the densest core.
+        degree: dict[str, int] = {}
+        for s in synapses:
+            degree[s.source_id] = degree.get(s.source_id, 0) + 1
+            degree[s.target_id] = degree.get(s.target_id, 0) + 1
+        ranked_ids = sorted(degree, key=lambda nid: degree[nid], reverse=True)
+        selected_ids = set(ranked_ids[offset : offset + capped_limit])
+
+        # Edge-first: keep edges with both endpoints in the dense set (cap payload).
         visible_synapses = [
-            s for s in capped_synapses if s.source_id in neuron_ids and s.target_id in neuron_ids
-        ]
+            s for s in synapses if s.source_id in selected_ids and s.target_id in selected_ids
+        ][:edge_cap]
+
+        # Nodes = every endpoint the visible edges reference, plus the selected core.
+        endpoint_ids = {s.source_id for s in visible_synapses} | {
+            s.target_id for s in visible_synapses
+        }
+        node_ids = endpoint_ids | selected_ids
+
+        # No id-batch store method exists; index all neurons in Python (~4.6k is fine).
+        all_neurons = await storage.find_neurons(limit=100000)
+        by_id = {n.id: n for n in all_neurons}
+        neurons = [by_id[nid] for nid in node_ids if nid in by_id]
+        total_neurons = len(degree) or len(all_neurons)
+
+        fibers = await storage.get_fibers(limit=1000)
 
         return {
             "neurons": [
@@ -602,7 +624,7 @@ def create_app(
                     "content": n.content or "",
                     "metadata": n.metadata or {},
                 }
-                for n in paginated
+                for n in neurons
             ],
             "synapses": [
                 {
@@ -626,7 +648,7 @@ def create_app(
             "total_neurons": total_neurons,
             "total_synapses": total_synapses,
             "stats": {
-                "neuron_count": len(paginated),
+                "neuron_count": len(neurons),
                 "synapse_count": len(visible_synapses),
                 "fiber_count": len(fibers),
             },
