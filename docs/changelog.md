@@ -33,12 +33,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `smem doctor` **SurrealDB version check** (TIER_CORE; FAILs when the server is < 3.2.0).
 - `smem doctor --synapse-migration {status|retry|purge-backup}` to inspect, resume, or
   clean up the synapse→RELATE migration.
+- **Parametric embedding dimension** — the HNSW vector index (`idx_neuron_embedding`) is now built to
+  match the embedding provider's output dimension. New `SURREAL_MEMORY_EMBEDDING_DIMENSION` env /
+  `[embedding].dimension` config (`0` = auto-derive, the default). Fixes silently-broken semantic search
+  when the index dimension disagreed with the model.
+- **SurrealDB maturation storage** — maturation stages now persist on the SurrealDB backend (previously a
+  base no-op), so long-lived memories report their real semantic maturity instead of 0%.
 
 ### Changed
 
 - `docker-compose.surrealdb.yml` now runs `surrealdb/surrealdb:v3.2.0` with
   `--allow-experimental gql --allow-eval-query`. The datastore path must be given **before**
   the capability flags (the multi-valued `--allow-eval-query` would otherwise consume it).
+
+### Performance
+
+- **Semantic discovery** now ranks candidate pairs over each neuron's **stored** embedding instead of
+  re-embedding on every run (vectorised top-K with a pure-python fallback) and raises the candidate caps —
+  much cheaper and surfaces far more cross-domain links.
+- **Edge-first graph selection** on the dashboard graph endpoint picks the most-connected nodes and keeps
+  an edge only when both endpoints survive (`edge_cap=4000`), fixing the near-empty graph that
+  node-capping by id produced.
+
+### Fixed
+
+- **Soft `forget` is excluded from recall immediately.** A soft-forgotten memory (expired `typed_memory`)
+  no longer resurfaces in recall until the next consolidation — recall post-filters expired fibers and
+  rebuilds the answer context from the survivors.
+- **Config-cache refresh** — the REST process picks up new sync/embedding config after `set_config(...)`
+  without a restart.
+- **Rename-safe persistence** — cognitive/compression/review-schedule upserts and `consolidate` now target
+  the current brain id after a rename instead of silently no-op'ing against a stale id.
 
 ### Known behaviour
 
