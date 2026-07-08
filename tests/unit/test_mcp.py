@@ -8,7 +8,7 @@ import pytest
 
 from surreal_memory.mcp.auto_capture import analyze_text_for_memories
 from surreal_memory.mcp.server import MCPServer, create_mcp_server, handle_message
-from surreal_memory.unified_config import ToolTierConfig
+from surreal_memory.unified_config import ToolTierConfig, WriteGateConfig
 
 
 class TestMCPServer:
@@ -22,6 +22,7 @@ class TestMCPServer:
         with patch("surreal_memory.mcp.server.get_config") as mock_get_config:
             mock_get_config.return_value = MagicMock(
                 current_brain="test-brain",
+                write_gate=WriteGateConfig(enabled=False),
                 get_brain_db_path=MagicMock(return_value="/tmp/test-brain.db"),
                 tool_tier=ToolTierConfig(tier="full"),
                 response=ResponseConfig(),
@@ -33,6 +34,7 @@ class TestMCPServer:
         with patch("surreal_memory.mcp.server.get_config") as mock_get_config:
             mock_get_config.return_value = MagicMock(
                 current_brain="test-brain",
+                write_gate=WriteGateConfig(enabled=False),
                 get_brain_db_path=MagicMock(return_value="/tmp/test-brain.db"),
                 tool_tier=ToolTierConfig(tier="full"),
             )
@@ -215,13 +217,15 @@ class TestMCPToolCalls:
         from surreal_memory.unified_config import ResponseConfig
 
         with patch("surreal_memory.mcp.server.get_config") as mock_get_config:
+            # Real WriteGateConfig (default mode="off") so the gate resolves via
+            # effective_mode/effective_auto_mode instead of a truthy MagicMock.
             cfg = MagicMock(
                 current_brain="test-brain",
+                write_gate=WriteGateConfig(enabled=False),
                 get_brain_db_path=MagicMock(return_value="/tmp/test-brain.db"),
                 tool_tier=ToolTierConfig(tier="full"),
                 response=ResponseConfig(),
             )
-            cfg.write_gate.enabled = False
             mock_get_config.return_value = cfg
             return MCPServer()
 
@@ -521,6 +525,7 @@ class TestMCPToolCalls:
         with patch("surreal_memory.mcp.server.get_config") as mock_get_config:
             mock_get_config.return_value = MagicMock(
                 current_brain="test-brain",
+                write_gate=WriteGateConfig(enabled=False),
                 get_brain_db_path=MagicMock(return_value="/tmp/test-brain.db"),
                 auto=mock_auto_config,
             )
@@ -878,6 +883,7 @@ class TestMCPErrorPaths:
         with patch("surreal_memory.mcp.server.get_config") as mock_get_config:
             mock_get_config.return_value = MagicMock(
                 current_brain="test-brain",
+                write_gate=WriteGateConfig(enabled=False),
                 get_brain_db_path=MagicMock(return_value="/tmp/test-brain.db"),
                 auto=MagicMock(enabled=False),
             )
@@ -1025,6 +1031,7 @@ class TestMCPProtocol:
         with patch("surreal_memory.mcp.server.get_config") as mock_get_config:
             mock_get_config.return_value = MagicMock(
                 current_brain="test-brain",
+                write_gate=WriteGateConfig(enabled=False),
                 get_brain_db_path=MagicMock(return_value="/tmp/test-brain.db"),
                 tool_tier=ToolTierConfig(tier="full"),
                 response=ResponseConfig(),
@@ -1186,6 +1193,7 @@ class TestMCPResources:
         with patch("surreal_memory.mcp.server.get_config") as mock_get_config:
             mock_get_config.return_value = MagicMock(
                 current_brain="test-brain",
+                write_gate=WriteGateConfig(enabled=False),
                 get_brain_db_path=MagicMock(return_value="/tmp/test-brain.db"),
                 tool_tier=ToolTierConfig(tier="full"),
                 response=ResponseConfig(),
@@ -1281,6 +1289,7 @@ class TestMCPStorage:
         with patch("surreal_memory.mcp.server.get_config") as mock_get_config:
             mock_get_config.return_value = MagicMock(
                 current_brain="test-brain",
+                write_gate=WriteGateConfig(enabled=False),
                 get_brain_db_path=MagicMock(return_value="/tmp/test-brain.db"),
                 tool_tier=ToolTierConfig(tier="full"),
             )
@@ -1430,6 +1439,7 @@ class TestPassiveCapture:
         with patch("surreal_memory.mcp.server.get_config") as mock_get_config:
             mock_get_config.return_value = MagicMock(
                 current_brain="test-brain",
+                write_gate=WriteGateConfig(enabled=False),
                 get_brain_db_path=MagicMock(return_value="/tmp/test-brain.db"),
                 auto=mock_auto_config,
             )
@@ -1567,6 +1577,7 @@ class TestMCPEternal:
         with patch("surreal_memory.mcp.server.get_config") as mock_get_config:
             mock_get_config.return_value = MagicMock(
                 current_brain="test-brain",
+                write_gate=WriteGateConfig(enabled=False),
                 get_brain_db_path=MagicMock(return_value="/tmp/test-brain.db"),
                 eternal=mock_eternal_config,
                 auto=mock_auto_config,
@@ -1871,6 +1882,7 @@ class TestMCPImport:
         with patch("surreal_memory.mcp.server.get_config") as mock_get_config:
             mock_get_config.return_value = MagicMock(
                 current_brain="test-brain",
+                write_gate=WriteGateConfig(enabled=False),
                 get_brain_db_path=MagicMock(return_value="/tmp/test-brain.db"),
                 tool_tier=ToolTierConfig(tier="full"),
                 response=ResponseConfig(),
@@ -2049,6 +2061,7 @@ class TestMCPAutoExtended:
         with patch("surreal_memory.mcp.server.get_config") as mock_get_config:
             mock_get_config.return_value = MagicMock(
                 current_brain="test-brain",
+                write_gate=WriteGateConfig(enabled=False),
                 get_brain_db_path=MagicMock(return_value="/tmp/test-brain.db"),
                 auto=mock_auto_config,
                 eternal=mock_eternal_config,
@@ -2157,6 +2170,7 @@ class TestMCPContextExtended:
         with patch("surreal_memory.mcp.server.get_config") as mock_get_config:
             mock_get_config.return_value = MagicMock(
                 current_brain="test-brain",
+                write_gate=WriteGateConfig(enabled=False),
                 get_brain_db_path=MagicMock(return_value="/tmp/test-brain.db"),
                 tool_tier=ToolTierConfig(tier="full"),
                 response=ResponseConfig(),
@@ -2276,6 +2290,7 @@ class TestMCPRecallExtended:
         with patch("surreal_memory.mcp.server.get_config") as mock_get_config:
             mock_get_config.return_value = MagicMock(
                 current_brain="test-brain",
+                write_gate=WriteGateConfig(enabled=False),
                 get_brain_db_path=MagicMock(return_value="/tmp/test-brain.db"),
                 auto=mock_auto_config,
                 eternal=mock_eternal_config,
@@ -2404,6 +2419,7 @@ class TestMCPMiscErrors:
         with patch("surreal_memory.mcp.server.get_config") as mock_get_config:
             mock_get_config.return_value = MagicMock(
                 current_brain="test-brain",
+                write_gate=WriteGateConfig(enabled=False),
                 get_brain_db_path=MagicMock(return_value="/tmp/test-brain.db"),
                 eternal=mock_eternal_config,
             )
@@ -2516,6 +2532,7 @@ class TestMCPFireTrigger:
         with patch("surreal_memory.mcp.server.get_config") as mock_get_config:
             mock_get_config.return_value = MagicMock(
                 current_brain="test-brain",
+                write_gate=WriteGateConfig(enabled=False),
                 get_brain_db_path=MagicMock(return_value="/tmp/test-brain.db"),
                 eternal=mock_eternal_config,
                 auto=mock_auto_config,
@@ -2570,6 +2587,7 @@ class TestMCPInputValidation:
         with patch("surreal_memory.mcp.server.get_config") as mock_get_config:
             mock_get_config.return_value = MagicMock(
                 current_brain="test-brain",
+                write_gate=WriteGateConfig(enabled=False),
                 get_brain_db_path=MagicMock(return_value="/tmp/test-brain.db"),
                 auto=MagicMock(enabled=True, min_confidence=0.7),
                 eternal=MagicMock(enabled=False),
