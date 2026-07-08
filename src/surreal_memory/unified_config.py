@@ -441,16 +441,44 @@ class WriteGateConfig:
     Addresses GitHub Issue #95: write-gate to improve brain purity.
     """
 
-    enabled: bool = False  # opt-in, backward compat
+    enabled: bool = False  # opt-in, backward compat (True == enforce)
+    mode: str = "off"  # off | shadow | enforce. Overrides `enabled` when not "off".
+    # Per-intent override for auto-captures (intent=auto ONLY; summaries and
+    # turns keep `mode`). "" = inherit `mode`. Lets junk auto-captures be
+    # ENFORCED while interactive writes stay in shadow — a global enforce is
+    # known to false-reject real turn/summary content.
+    auto_capture_mode: str = ""  # "" (inherit) | off | shadow | enforce
     min_length: int = 30  # reject content shorter than this
     min_quality_score: int = 3  # reject score below this (0-10 scale)
     auto_capture_min_score: int = 5  # stricter threshold for passive captures
     max_content_length: int = 2000  # reject wall-of-text above this
     reject_generic_filler: bool = True  # reject "done", "ok", "completed" etc.
 
+    @property
+    def effective_mode(self) -> str:
+        """Resolve the operating mode. `mode` wins; otherwise fall back to the
+        legacy `enabled` bool (True -> enforce, False -> off)."""
+        m = (self.mode or "off").strip().lower()
+        if m in ("shadow", "enforce"):
+            return m
+        if m == "off" and self.enabled:
+            return "enforce"
+        return "off"
+
+    @property
+    def effective_auto_mode(self) -> str:
+        """Resolve the mode for auto-captures (intent=auto). A valid
+        `auto_capture_mode` wins; otherwise inherit `effective_mode`."""
+        m = (self.auto_capture_mode or "").strip().lower()
+        if m in ("off", "shadow", "enforce"):
+            return m
+        return self.effective_mode
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "enabled": self.enabled,
+            "mode": self.mode,
+            "auto_capture_mode": self.auto_capture_mode,
             "min_length": self.min_length,
             "min_quality_score": self.min_quality_score,
             "auto_capture_min_score": self.auto_capture_min_score,
@@ -462,6 +490,8 @@ class WriteGateConfig:
     def from_dict(cls, data: dict[str, Any]) -> WriteGateConfig:
         return cls(
             enabled=bool(data.get("enabled", False)),
+            mode=str(data.get("mode", "off")),
+            auto_capture_mode=str(data.get("auto_capture_mode", "")),
             min_length=int(data.get("min_length", 30)),
             min_quality_score=int(data.get("min_quality_score", 3)),
             auto_capture_min_score=int(data.get("auto_capture_min_score", 5)),
@@ -1915,6 +1945,8 @@ class UnifiedConfig:
             "# Write gate (quality enforcement before storage)",
             "[write_gate]",
             f"enabled = {'true' if self.write_gate.enabled else 'false'}",
+            f'mode = "{self.write_gate.mode}"',
+            f'auto_capture_mode = "{self.write_gate.auto_capture_mode}"',
             f"min_length = {self.write_gate.min_length}",
             f"min_quality_score = {self.write_gate.min_quality_score}",
             f"auto_capture_min_score = {self.write_gate.auto_capture_min_score}",
