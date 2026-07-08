@@ -376,16 +376,19 @@ async def capture_text(text: str, project_name: str | None = None) -> dict[str, 
         auto_redact_severity = config.safety.auto_redact_min_severity
         saved: list[str] = []
 
-        # Write gate check for stop hook (auto-capture path)
+        # Write gate check for stop hook (auto-capture path). SHADOW logs the
+        # decision to gate_decision without blocking; ENFORCE rejects. The
+        # stop hook is intent=auto, so it resolves auto_capture_mode.
         write_gate_cfg = config.write_gate
-        gate_enabled = write_gate_cfg.enabled
+        gate_mode = write_gate_cfg.effective_auto_mode
 
         for item in eligible:
             try:
                 content = item["content"]
 
-                # Apply write gate if enabled (uses auto_capture threshold)
-                if gate_enabled:
+                # Apply write gate unless off (uses auto_capture threshold)
+                if gate_mode != "off":
+                    from surreal_memory.engine.gate_telemetry import log_gate_decision
                     from surreal_memory.engine.quality_scorer import check_write_gate
 
                     gate_result = check_write_gate(
@@ -393,8 +396,18 @@ async def capture_text(text: str, project_name: str | None = None) -> dict[str, 
                         gate_config=write_gate_cfg,
                         is_auto_capture=True,
                         memory_type=item.get("type"),
+                        tags=list(base_tags),
                     )
-                    if gate_result.rejected:
+                    await log_gate_decision(
+                        storage,
+                        intent="auto",
+                        accepted=not gate_result.rejected,
+                        reason=gate_result.rejection_reason or "accept",
+                        score=gate_result.score,
+                        mode=gate_mode,
+                        content=content,
+                    )
+                    if gate_mode == "enforce" and gate_result.rejected:
                         logger.debug(
                             "Stop hook write gate rejected: %s",
                             gate_result.rejection_reason,
@@ -440,16 +453,28 @@ async def capture_text(text: str, project_name: str | None = None) -> dict[str, 
             summary = _extract_session_summary(text)
             if summary and len(summary) > 30:
                 # Apply write gate to session summary too
-                if gate_enabled:
+                if gate_mode != "off":
+                    from surreal_memory.engine.gate_telemetry import log_gate_decision
                     from surreal_memory.engine.quality_scorer import check_write_gate
 
+                    summary_gate_tags = list(set(base_tags) | {"session_summary"})
                     gate_result = check_write_gate(
                         summary,
                         gate_config=write_gate_cfg,
                         is_auto_capture=True,
                         memory_type="context",
+                        tags=summary_gate_tags,
                     )
-                    if gate_result.rejected:
+                    await log_gate_decision(
+                        storage,
+                        intent="auto",
+                        accepted=not gate_result.rejected,
+                        reason=gate_result.rejection_reason or "accept",
+                        score=gate_result.score,
+                        mode=gate_mode,
+                        content=summary,
+                    )
+                    if gate_mode == "enforce" and gate_result.rejected:
                         logger.debug(
                             "Stop hook session summary rejected: %s",
                             gate_result.rejection_reason,
