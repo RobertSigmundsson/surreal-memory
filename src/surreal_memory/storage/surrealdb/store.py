@@ -131,6 +131,32 @@ def _brain_literal(brain_id: str) -> str:
     return f'"{brain_id}"'
 
 
+def _safe_brain_id(brain_id: str) -> str:
+    """Validate a brain id before it is inlined raw into a record id / SurQL.
+
+    Brain ids legitimately contain '.' and '-' (e.g. 'my-brain.v2'), so unlike
+    neuron ids they are NOT folded through _to_surreal_id. This is the
+    store-layer choke point that makes the "no un-sanitised id reaches the
+    engine" guarantee literally true: it fail-closed REJECTS any id carrying a
+    quote / brace / paren / semicolon / whitespace / backtick / control char
+    that could break out of the ``brain:{id}`` / ``device:{brain_id}_{did}``
+    record literal or the raw ``UPDATE brain:{id} SET ...`` statement. Mirrors
+    the REST ``_BRAIN_ID_PATTERN`` (``[A-Za-z0-9_.-]``, <=128) so the guarantee
+    no longer depends on the REST layer having validated first.
+    """
+    if (
+        not isinstance(brain_id, str)
+        or not brain_id
+        or len(brain_id) > 128
+        or any(
+            not ("a" <= c <= "z" or "A" <= c <= "Z" or "0" <= c <= "9" or c in "_.-")
+            for c in brain_id
+        )
+    ):
+        raise ValueError(f"unsafe brain id: {brain_id!r}")
+    return brain_id
+
+
 def _from_surreal_id(surreal_id: str) -> str:
     """Extract the original ID from a SurrealDB record ID like 'neuron:abc_def'."""
     if ":" in surreal_id:
@@ -481,7 +507,10 @@ class SurrealDBStorage(
     def _get_brain_id(self) -> str:
         if self._current_brain_id is None:
             raise ValueError("No brain context set. Call set_brain() first.")
-        return self._current_brain_id
+        # Store-layer choke point: the returned id is inlined raw into
+        # ``device:{brain_id}_{did}`` record literals (register/get/update/delete
+        # device) — fail-closed reject a hostile id so it can never break out.
+        return _safe_brain_id(self._current_brain_id)
 
     def _ensure_conn(self) -> Any:
         if self._conn is None:
@@ -1300,6 +1329,10 @@ class SurrealDBStorage(
 
     async def save_brain(self, brain: Brain) -> None:
         conn = self._ensure_conn()
+        # brain.id is inlined raw into ``merge("brain:{id}")`` and the fallback
+        # ``UPDATE brain:{id} SET ...`` statement below — fail-closed reject a
+        # hostile id at the store layer (not just the REST route).
+        _safe_brain_id(brain.id)
 
         record_data: dict[str, Any] = {
             "id": brain.id,  # Use original ID to avoid underscore conversion
@@ -2307,7 +2340,10 @@ class SurrealDBStorage(
         )
         count = 0
         for r in rows:
-            nid = str(r.get("id", "")).split(":")[-1]
+            # Re-sanitise the id read back from the DB rather than trusting the
+            # write-path invariant (defence in depth): _to_surreal_id strips the
+            # table prefix and folds, so ``neuron:{nid}`` stays a safe literal.
+            nid = _to_surreal_id(str(r.get("id", "")))
             try:
                 await self._conn.delete(f"neuron:{nid}")
                 count += 1

@@ -267,3 +267,39 @@ class TestToSurrealIdSanitization:
 
         for ch in '"' + "'" + "{}()[]<>;:/*\\`= \t\n":
             assert ch not in _to_surreal_id(f"a{ch}b")
+
+
+class TestSafeBrainId:
+    """_safe_brain_id fail-closed rejects breakout chars while allowing the
+    legitimate brain-id charset ``[A-Za-z0-9_.-]`` (brain ids are inlined raw
+    into ``brain:{id}`` / ``device:{brain_id}_{did}`` / raw ``UPDATE brain:{id}``
+    and must NOT be folded, so this is a reject-not-fold guard)."""
+
+    def test_valid_brain_ids_pass_unchanged(self):
+        from surreal_memory.storage.surrealdb.store import _safe_brain_id
+
+        for v in ["uruboros", "my-brain.v2", "a_b.c-d", "A1", "x" * 128]:
+            assert _safe_brain_id(v) == v
+
+    def test_hostile_brain_ids_rejected(self):
+        import pytest
+
+        from surreal_memory.storage.surrealdb.store import _safe_brain_id
+
+        hostile = [
+            'x"} REMOVE TABLE neuron; --',
+            "brain:evil",
+            "a b",
+            "x)",
+            "y{1}",
+            "semi;colon",
+            "back`tick",
+            "star*glob",
+            "",
+            "x" * 129,
+            "nul\x00l",
+            "rtl‮override",
+        ]
+        for payload in hostile:
+            with pytest.raises(ValueError):
+                _safe_brain_id(payload)
