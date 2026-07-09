@@ -11,6 +11,7 @@ _VALID_PROVIDERS = (
     "openrouter",
     "gemini",
     "ollama",
+    "bge_m3",
     "auto",
     "",
 )
