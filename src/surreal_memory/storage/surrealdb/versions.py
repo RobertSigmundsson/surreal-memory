@@ -11,15 +11,12 @@ from datetime import datetime
 from typing import Any
 
 from surreal_memory.engine.brain_versioning import BrainVersion
+from surreal_memory.storage.surrealdb._ids import _to_surreal_id
 from surreal_memory.utils.timeutils import utcnow
 
 logger = logging.getLogger(__name__)
 
 _MAX_LIST_LIMIT = 100
-
-
-def _to_surreal_id(record_id: str) -> str:
-    return record_id.replace("-", "_")
 
 
 def _parse_datetime(val: Any) -> datetime | None:

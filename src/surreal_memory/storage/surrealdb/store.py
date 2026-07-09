@@ -21,6 +21,7 @@ from surreal_memory.core.fiber import Fiber
 from surreal_memory.core.neuron import Neuron, NeuronState, NeuronType
 from surreal_memory.core.synapse import Direction, Synapse, SynapseType
 from surreal_memory.storage.base import NeuralStorage
+from surreal_memory.storage.surrealdb._ids import _safe_brain_id, _to_surreal_id
 from surreal_memory.storage.surrealdb.activity import SurrealDBActivityMixin
 from surreal_memory.storage.surrealdb.alerts import SurrealDBAlertsMixin
 from surreal_memory.storage.surrealdb.cognitive import SurrealDBCognitiveMixin
@@ -84,33 +85,6 @@ def _is_auth_error(exc: Exception) -> bool:
         return True
     msg = str(exc).lower()
     return "401" in msg or "unauthorized" in msg
-
-
-def _to_surreal_id(record_id: str) -> str:
-    """Convert a record ID to a valid SurrealDB record name (``[A-Za-z0-9_]``).
-
-    Strips any existing table prefix (e.g. 'neuron:abc-123' -> 'abc_123')
-    to prevent doubling when the caller later prepends 'neuron:', then maps
-    every character outside ``[A-Za-z0-9_]`` to ``_``.
-
-    SECURITY (deny-by-default injection guard): the result is inlined verbatim
-    into record-id and query strings — ``neuron:{sid}`` (SurQL), the
-    ``DELETE neuron_state:state_{sid}`` statement, and the ``eval::gql``
-    SHORTEST fast-path in ``_get_path_gql`` (``{id:"{sid}"}``). Legitimate ids
-    (UUID4, content-hashes) already live in this charset once '-' is folded to
-    '_'; enforcing it here means a hostile ``source_id``/``target_id`` (e.g.
-    from the REST ``GET /neurons/{source_id}/path`` route, whose value flows
-    unresolved into ``get_path``) can never carry a ``"``, ``}``, ``)`` or
-    whitespace that breaks out of the surrounding string/record literal to
-    inject SurQL/GQL. Do NOT relax this back to a bare ``.replace('-', '_')``:
-    the old form let ``x"}) ...`` reach the GQL parser once eval was enabled.
-    """
-    if ":" in record_id:
-        record_id = record_id.rsplit(":", 1)[1]
-    return "".join(
-        c if ("a" <= c <= "z" or "A" <= c <= "Z" or "0" <= c <= "9" or c == "_") else "_"
-        for c in record_id
-    )
 
 
 _BRAIN_ID_SAFE = re.compile(r"^[a-zA-Z0-9_.\-]+$")

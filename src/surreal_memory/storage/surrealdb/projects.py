@@ -17,14 +17,9 @@ import logging
 from typing import Any
 
 from surreal_memory.core.project import Project
+from surreal_memory.storage.surrealdb._ids import _to_surreal_id
 
 logger = logging.getLogger(__name__)
-
-
-def _to_surreal_id(record_id: str) -> str:
-    if ":" in record_id:
-        record_id = record_id.rsplit(":", 1)[1]
-    return record_id.replace("-", "_")
 
 
 def _row_to_project(row: dict[str, Any]) -> Project | None:
