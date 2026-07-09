@@ -87,14 +87,30 @@ def _is_auth_error(exc: Exception) -> bool:
 
 
 def _to_surreal_id(record_id: str) -> str:
-    """Convert a record ID to a valid SurrealDB record name (alphanumeric + _-).
+    """Convert a record ID to a valid SurrealDB record name (``[A-Za-z0-9_]``).
 
     Strips any existing table prefix (e.g. 'neuron:abc-123' -> 'abc_123')
-    to prevent doubling when the caller later prepends 'neuron:'.
+    to prevent doubling when the caller later prepends 'neuron:', then maps
+    every character outside ``[A-Za-z0-9_]`` to ``_``.
+
+    SECURITY (deny-by-default injection guard): the result is inlined verbatim
+    into record-id and query strings — ``neuron:{sid}`` (SurQL), the
+    ``DELETE neuron_state:state_{sid}`` statement, and the ``eval::gql``
+    SHORTEST fast-path in ``_get_path_gql`` (``{id:"{sid}"}``). Legitimate ids
+    (UUID4, content-hashes) already live in this charset once '-' is folded to
+    '_'; enforcing it here means a hostile ``source_id``/``target_id`` (e.g.
+    from the REST ``GET /neurons/{source_id}/path`` route, whose value flows
+    unresolved into ``get_path``) can never carry a ``"``, ``}``, ``)`` or
+    whitespace that breaks out of the surrounding string/record literal to
+    inject SurQL/GQL. Do NOT relax this back to a bare ``.replace('-', '_')``:
+    the old form let ``x"}) ...`` reach the GQL parser once eval was enabled.
     """
     if ":" in record_id:
         record_id = record_id.rsplit(":", 1)[1]
-    return record_id.replace("-", "_")
+    return "".join(
+        c if ("a" <= c <= "z" or "A" <= c <= "Z" or "0" <= c <= "9" or c == "_") else "_"
+        for c in record_id
+    )
 
 
 _BRAIN_ID_SAFE = re.compile(r"^[a-zA-Z0-9_.\-]+$")
@@ -1013,8 +1029,10 @@ class SurrealDBStorage(
         SurrealDB 3.2.0 caveat: the experimental ISO GQL dialect (eval::gql) cannot
         anchor/filter a MATCH node by its record id — string compares don't match a
         RecordID and casts/functions/param binding are unsupported. We still issue
-        the correctly-scoped query (ids are `[A-Za-z0-9_]`-sanitised, safe to inline)
-        and VERIFY the returned path's endpoints in Python, returning None if they
+        the correctly-scoped query (ids are hard-`[A-Za-z0-9_]`-sanitised by
+        ``_to_surreal_id``, so a hostile source/target id cannot break out of the
+        inlined ``{id:"…"}`` string literal to inject GQL) and VERIFY the returned
+        path's endpoints in Python, returning None if they
         don't connect source->target. Today that verification fails whenever id
         scoping is unavailable, so BFS handles the lookup; the fast-path activates
         automatically if a future SurrealDB makes GQL node-id scoping work.
