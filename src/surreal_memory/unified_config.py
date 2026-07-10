@@ -131,6 +131,7 @@ class EmbeddingSettings:
         "openrouter",
         "gemini",
         "ollama",
+        "bge_m3",
         "auto",
         "",
     )
