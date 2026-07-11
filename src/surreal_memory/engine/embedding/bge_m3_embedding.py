@@ -1,7 +1,6 @@
 """BGE-M3 embedding provider (HTTP, dense, L2-normalized).
 
-Talks to a self-hosted BGE-M3 FastAPI service (e.g. on vast.ai reached via an
-SSH tunnel at http://127.0.0.1:18100):
+Talks to a self-hosted BGE-M3 FastAPI service exposed on a local endpoint:
 
     POST {base_url}/embed   body {"texts": [...]}   header Authorization: Bearer <key>
     -> {"embeddings": [[... 1024 floats ...], ...]}   (already L2-normalized)
