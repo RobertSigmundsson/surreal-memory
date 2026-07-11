@@ -426,6 +426,28 @@ SYNAPSE_V8_DDL: list[str] = [
 ]
 
 
+def _parse_schema_statements(sql: str) -> list[str]:
+    """Split a SurrealQL schema script into executable statements.
+
+    Comment LINES are stripped inside each ``;``-separated chunk. The previous
+    approach — dropping any whole chunk whose stripped text *started* with
+    ``--`` — silently discarded every statement that sits directly under an
+    explanatory comment block: all 26 ``DEFINE TABLE`` statements and, since
+    2.7.4, the ``smem_content`` FULLTEXT analyzer. Without the analyzer the
+    ``idx_neuron_content_fts`` DEFINE fails (and was swallowed below), so the
+    ``@@`` operator behind ``find_neurons`` matched nothing — keyword recall
+    was silently dead on any database relying on ``ensure_schema``.
+    """
+    statements: list[str] = []
+    for chunk in sql.split(";"):
+        stmt = "\n".join(
+            line for line in chunk.splitlines() if not line.strip().startswith("--")
+        ).strip()
+        if stmt:
+            statements.append(stmt)
+    return statements
+
+
 async def ensure_schema(conn: Any, embedding_dim: int = 3072) -> None:
     """Apply schema to SurrealDB. Safe to call multiple times.
 
@@ -449,9 +471,7 @@ async def ensure_schema(conn: Any, embedding_dim: int = 3072) -> None:
     """
     dim = int(embedding_dim) if embedding_dim and int(embedding_dim) > 0 else 3072
     logger.info("Applying SurrealDB schema (v%d, embedding_dim=%d)...", SCHEMA_VERSION, dim)
-    statements = [
-        s.strip() for s in SCHEMA_SQL.split(";") if s.strip() and not s.strip().startswith("--")
-    ]
+    statements = _parse_schema_statements(SCHEMA_SQL)
     statements.append(
         "DEFINE INDEX idx_neuron_embedding ON neuron "
         f"FIELDS embedding_vec HNSW DIMENSION {dim} DIST COSINE"
@@ -460,8 +480,16 @@ async def ensure_schema(conn: Any, embedding_dim: int = 3072) -> None:
     for stmt in statements:
         try:
             await conn.query(stmt + ";")
-        except Exception:
-            # Index/table may already exist (or the flat synapse table blocks the
-            # RELATION re-definition on v7) — the migration handles conversion.
-            pass
+        except Exception as exc:
+            # A bare DEFINE on an existing index/table raises AlreadyExists on
+            # every start (including the flat synapse table blocking the
+            # RELATION re-definition on v7 — the migration handles conversion);
+            # that stays at debug. Anything else used to vanish here — the
+            # dropped-analyzer bug hid behind this very handler — so real
+            # failures are now logged without breaking startup.
+            head = stmt.splitlines()[0][:88]
+            if "already exists" in str(exc).lower():
+                logger.debug("Schema statement skipped (already exists): %s", head)
+            else:
+                logger.warning("Schema statement failed: %s (%s)", head, exc)
     logger.info("SurrealDB schema ready (v%d)", SCHEMA_VERSION)
