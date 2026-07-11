@@ -7,6 +7,7 @@ from datetime import datetime, timedelta
 from typing import Any
 
 from surreal_memory.core.alert import Alert, AlertStatus, AlertType
+from surreal_memory.storage.surrealdb._ids import _to_surreal_id
 from surreal_memory.utils.timeutils import utcnow
 
 logger = logging.getLogger(__name__)
@@ -14,10 +15,6 @@ logger = logging.getLogger(__name__)
 _DEDUP_COOLDOWN = timedelta(hours=6)
 
 _SEVERITY_RANK = {"critical": 0, "high": 1, "medium": 2, "low": 3}
-
-
-def _to_surreal_id(record_id: str) -> str:
-    return record_id.replace("-", "_")
 
 
 def _parse_datetime(val: Any) -> datetime | None:

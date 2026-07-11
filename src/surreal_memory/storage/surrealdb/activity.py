@@ -8,13 +8,10 @@ from typing import Any
 from uuid import uuid4
 
 from surreal_memory.core.action_event import ActionEvent
+from surreal_memory.storage.surrealdb._ids import _to_surreal_id
 from surreal_memory.utils.timeutils import utcnow
 
 logger = logging.getLogger(__name__)
-
-
-def _to_surreal_id(record_id: str) -> str:
-    return record_id.replace("-", "_")
 
 
 def _parse_datetime(val: Any) -> datetime:

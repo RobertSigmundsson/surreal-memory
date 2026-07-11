@@ -21,6 +21,7 @@ from surreal_memory.core.fiber import Fiber
 from surreal_memory.core.neuron import Neuron, NeuronState, NeuronType
 from surreal_memory.core.synapse import Direction, Synapse, SynapseType
 from surreal_memory.storage.base import NeuralStorage
+from surreal_memory.storage.surrealdb._ids import _safe_brain_id, _to_surreal_id
 from surreal_memory.storage.surrealdb.activity import SurrealDBActivityMixin
 from surreal_memory.storage.surrealdb.alerts import SurrealDBAlertsMixin
 from surreal_memory.storage.surrealdb.cognitive import SurrealDBCognitiveMixin
@@ -84,17 +85,6 @@ def _is_auth_error(exc: Exception) -> bool:
         return True
     msg = str(exc).lower()
     return "401" in msg or "unauthorized" in msg
-
-
-def _to_surreal_id(record_id: str) -> str:
-    """Convert a record ID to a valid SurrealDB record name (alphanumeric + _-).
-
-    Strips any existing table prefix (e.g. 'neuron:abc-123' -> 'abc_123')
-    to prevent doubling when the caller later prepends 'neuron:'.
-    """
-    if ":" in record_id:
-        record_id = record_id.rsplit(":", 1)[1]
-    return record_id.replace("-", "_")
 
 
 _BRAIN_ID_SAFE = re.compile(r"^[a-zA-Z0-9_.\-]+$")
@@ -465,7 +455,10 @@ class SurrealDBStorage(
     def _get_brain_id(self) -> str:
         if self._current_brain_id is None:
             raise ValueError("No brain context set. Call set_brain() first.")
-        return self._current_brain_id
+        # Store-layer choke point: the returned id is inlined raw into
+        # ``device:{brain_id}_{did}`` record literals (register/get/update/delete
+        # device) — fail-closed reject a hostile id so it can never break out.
+        return _safe_brain_id(self._current_brain_id)
 
     def _ensure_conn(self) -> Any:
         if self._conn is None:
@@ -1013,8 +1006,10 @@ class SurrealDBStorage(
         SurrealDB 3.2.0 caveat: the experimental ISO GQL dialect (eval::gql) cannot
         anchor/filter a MATCH node by its record id — string compares don't match a
         RecordID and casts/functions/param binding are unsupported. We still issue
-        the correctly-scoped query (ids are `[A-Za-z0-9_]`-sanitised, safe to inline)
-        and VERIFY the returned path's endpoints in Python, returning None if they
+        the correctly-scoped query (ids are hard-`[A-Za-z0-9_]`-sanitised by
+        ``_to_surreal_id``, so a hostile source/target id cannot break out of the
+        inlined ``{id:"…"}`` string literal to inject GQL) and VERIFY the returned
+        path's endpoints in Python, returning None if they
         don't connect source->target. Today that verification fails whenever id
         scoping is unavailable, so BFS handles the lookup; the fast-path activates
         automatically if a future SurrealDB makes GQL node-id scoping work.
@@ -1282,6 +1277,10 @@ class SurrealDBStorage(
 
     async def save_brain(self, brain: Brain) -> None:
         conn = self._ensure_conn()
+        # brain.id is inlined raw into ``merge("brain:{id}")`` and the fallback
+        # ``UPDATE brain:{id} SET ...`` statement below — fail-closed reject a
+        # hostile id at the store layer (not just the REST route).
+        _safe_brain_id(brain.id)
 
         record_data: dict[str, Any] = {
             "id": brain.id,  # Use original ID to avoid underscore conversion
@@ -2289,7 +2288,10 @@ class SurrealDBStorage(
         )
         count = 0
         for r in rows:
-            nid = str(r.get("id", "")).split(":")[-1]
+            # Re-sanitise the id read back from the DB rather than trusting the
+            # write-path invariant (defence in depth): _to_surreal_id strips the
+            # table prefix and folds, so ``neuron:{nid}`` stays a safe literal.
+            nid = _to_surreal_id(str(r.get("id", "")))
             try:
                 await self._conn.delete(f"neuron:{nid}")
                 count += 1

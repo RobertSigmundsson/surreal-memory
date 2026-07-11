@@ -220,3 +220,86 @@ class TestInitializeVersionGate:
             ),
         ):
             await storage.initialize()  # probe failure → warn + continue, no raise
+
+
+class TestToSurrealIdSanitization:
+    """_to_surreal_id must enforce the documented ``[A-Za-z0-9_]`` contract.
+
+    Regression guard for the W7.3 eval/GQL injection surface: the sanitized id
+    is inlined verbatim into record-id and eval::gql query strings, so any
+    character that could break out of a string/record literal must be folded
+    to ``_``. Legit ids (UUID4, content-hashes, prefixed record ids) must be
+    preserved (modulo '-' -> '_').
+    """
+
+    def test_legit_ids_preserved(self):
+        from surreal_memory.storage.surrealdb.store import _to_surreal_id
+
+        assert _to_surreal_id("57d4c589-6a1c-490d-b0f8-6ee1a23c180b") == (
+            "57d4c589_6a1c_490d_b0f8_6ee1a23c180b"
+        )
+        assert _to_surreal_id("neuron:abc-123") == "abc_123"  # prefix stripped, '-' -> '_'
+        assert _to_surreal_id("12345") == "12345"
+        assert _to_surreal_id("plain_id") == "plain_id"
+
+    def test_output_is_always_charset_safe(self):
+        from surreal_memory.storage.surrealdb.store import _to_surreal_id
+
+        allowed = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_")
+        hostile = [
+            'x"',
+            'x"})',
+            'x"}) RETURN s //',
+            'aaa"})-[:synapse]->{1,4}(t:neuron) RETURN s //',
+            'zzz"}) RETURN (MATCH (a:neuron) RETURN a) AS leaked //',
+            "a' OR 1=1 --",
+            "id with spaces",
+            "back`tick",
+            "semi;colon",
+            "star*glob",
+        ]
+        for payload in hostile:
+            out = _to_surreal_id(payload)
+            assert set(out) <= allowed, f"{payload!r} -> {out!r} leaked a non-charset char"
+
+    def test_no_quote_or_brace_survives(self):
+        from surreal_memory.storage.surrealdb.store import _to_surreal_id
+
+        for ch in '"' + "'" + "{}()[]<>;:/*\\`= \t\n":
+            assert ch not in _to_surreal_id(f"a{ch}b")
+
+
+class TestSafeBrainId:
+    """_safe_brain_id fail-closed rejects breakout chars while allowing the
+    legitimate brain-id charset ``[A-Za-z0-9_.-]`` (brain ids are inlined raw
+    into ``brain:{id}`` / ``device:{brain_id}_{did}`` / raw ``UPDATE brain:{id}``
+    and must NOT be folded, so this is a reject-not-fold guard)."""
+
+    def test_valid_brain_ids_pass_unchanged(self):
+        from surreal_memory.storage.surrealdb.store import _safe_brain_id
+
+        for v in ["uruboros", "my-brain.v2", "a_b.c-d", "A1", "x" * 128]:
+            assert _safe_brain_id(v) == v
+
+    def test_hostile_brain_ids_rejected(self):
+        import pytest
+
+        from surreal_memory.storage.surrealdb.store import _safe_brain_id
+
+        hostile = [
+            'x"} REMOVE TABLE neuron; --',
+            "brain:evil",
+            "a b",
+            "x)",
+            "y{1}",
+            "semi;colon",
+            "back`tick",
+            "star*glob",
+            "",
+            "x" * 129,
+            "nul\x00l",
+            "rtl‮override",
+        ]
+        for payload in hostile:
+            with pytest.raises(ValueError):
+                _safe_brain_id(payload)
