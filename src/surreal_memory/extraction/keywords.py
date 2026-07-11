@@ -402,7 +402,10 @@ STOP_WORDS_PL: frozenset[str] = frozenset(
         "mi",
         "cie",
         "cię",
-        "ci",
+        # "ci" deliberately EXCLUDED: it collides with "CI" (continuous
+        # integration), which is ubiquitous in this project's dev-session
+        # content — exactly the ASCII-collision class this PR removes for
+        # Vietnamese ("ai"/"em"). See the "pod" collision note above.
         "sie",
         "się",
         "sobie",

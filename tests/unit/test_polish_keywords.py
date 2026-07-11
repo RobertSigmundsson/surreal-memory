@@ -107,3 +107,14 @@ class TestPolishLanguageHintBranch:
         pl_stop_words = _get_stop_words("pl", "")
         assert pl_stop_words >= STOP_WORDS_PL
         assert pl_stop_words >= STOP_WORDS_EN
+
+
+class TestAsciiCollisionExclusions:
+    """ASCII short-forms colliding with domain acronyms must not be filtered."""
+
+    def test_ci_survives_as_keyword_in_auto_mode(self) -> None:
+        # "ci" collides with "CI" (continuous integration), ubiquitous in this
+        # project's dev content — the same ASCII-collision class this PR removes
+        # for Vietnamese ("ai"/"em"). Guard against reintroducing it.
+        assert "ci" not in STOP_WORDS_PL
+        assert "ci" in _unigrams("Fixed CI lint failure, CI now passes cleanly")
