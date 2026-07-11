@@ -303,3 +303,44 @@ class TestSafeBrainId:
         for payload in hostile:
             with pytest.raises(ValueError):
                 _safe_brain_id(payload)
+
+
+class TestConnectionErrorDetection:
+    """_is_connection_error catches dropped-transport errors so the store
+    reconnects after a DB container restart (audit finding S-01)."""
+
+    def test_stdlib_connection_errors_detected(self):
+        from surreal_memory.storage.surrealdb.store import _is_connection_error
+
+        assert _is_connection_error(ConnectionResetError("reset"))
+        assert _is_connection_error(OSError("broken pipe"))
+
+    def test_websocket_close_messages_detected(self):
+        from surreal_memory.storage.surrealdb.store import _is_connection_error
+
+        assert _is_connection_error(Exception("received 1001 (going away)"))
+        assert _is_connection_error(Exception("websocket connection is closed"))
+        assert _is_connection_error(Exception("Connection refused"))
+
+    def test_classname_detected(self):
+        from surreal_memory.storage.surrealdb.store import _is_connection_error
+
+        class ConnectionClosedError(Exception):
+            pass
+
+        assert _is_connection_error(ConnectionClosedError("1011"))
+
+    def test_query_and_auth_errors_not_flagged(self):
+        # A syntax/query error must NOT trigger a needless reconnect.
+        from surreal_memory.storage.surrealdb.store import _is_connection_error
+
+        assert not _is_connection_error(Exception("Parse error: unexpected token"))
+        assert not _is_connection_error(ValueError("bad field value"))
+
+    def test_query_timeout_not_flagged(self):
+        # TimeoutError (== asyncio.TimeoutError since 3.11) is an OSError subclass,
+        # but a slow query hitting the HTTP transport's ClientTimeout(total=30) is a
+        # query outcome, not a dropped transport — it must NOT trigger a reconnect.
+        from surreal_memory.storage.surrealdb.store import _is_connection_error
+
+        assert not _is_connection_error(TimeoutError("query exceeded 30s"))

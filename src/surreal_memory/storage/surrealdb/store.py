@@ -105,6 +105,45 @@ def _brain_literal(brain_id: str) -> str:
     return f'"{brain_id}"'
 
 
+def _is_connection_error(exc: Exception) -> bool:
+    """True if an exception signals a dropped/closed transport rather than an
+    auth or query error.
+
+    A long-lived WebSocket connection severed by a DB container restart (backup,
+    upgrade, reboot) never returns 401, so ``_is_auth_error`` misses it. Without
+    reconnecting on this, the cached dead connection fails EVERY subsequent query
+    and the whole MCP surface returns -32000 until the process is restarted
+    (audit finding S-01).
+    """
+    # OSError covers ConnectionError/ConnectionResetError (both subclasses) and
+    # the aiohttp ClientOSError/ClientConnectorError raised during a restart
+    # window. TimeoutError (== asyncio.TimeoutError since 3.11) is ALSO an OSError
+    # subclass, but a legitimate slow-query timeout under the default HTTP
+    # transport (ClientTimeout(total=30)) is a query outcome, not a dropped
+    # transport — excluding it avoids a needless reconnect+retry that doubles
+    # latency and masks the SDK's own is_timed_out error class.
+    if isinstance(exc, OSError) and not isinstance(exc, TimeoutError):
+        return True
+    name = type(exc).__name__.lower()
+    if any(k in name for k in ("connectionclosed", "disconnect", "websocket", "transport")):
+        return True
+    msg = str(exc).lower()
+    return any(
+        s in msg
+        for s in (
+            "connection closed",
+            "connection reset",
+            "connection refused",
+            "connection lost",
+            "not connected",
+            "no connection",
+            "websocket",
+            "broken pipe",
+            "going away",
+        )
+    )
+
+
 def _from_surreal_id(surreal_id: str) -> str:
     """Extract the original ID from a SurrealDB record ID like 'neuron:abc_def'."""
     if ":" in surreal_id:
@@ -487,11 +526,15 @@ class SurrealDBStorage(
         starts returning 401 after an hour — which silently broke the dashboard
         until the container was restarted. Reconnecting on 401 keeps the cached
         connection alive without a restart.
+
+        Also reconnects on a dropped transport (WebSocket closed by a DB restart):
+        that surfaces as a connection error, not a 401, so without this the dead
+        cached connection fails every query until the process restarts (S-01).
         """
         try:
             result = await self._ensure_conn().query(sql, params)
         except Exception as exc:
-            if not _is_auth_error(exc):
+            if not (_is_auth_error(exc) or _is_connection_error(exc)):
                 raise
             async with self._reauth_lock:
                 await self._reconnect()

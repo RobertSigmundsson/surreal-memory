@@ -7,6 +7,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Auto-mode keyword/concept extraction no longer forms cross-clause bigrams or
+  drops real words.** Bigrams now require both words in the same clause (split on
+  `.,;:!?\n\r` and the em-dash) with a tightened position gap (`<= 2`). A Polish
+  stop-word set (`STOP_WORDS_PL`, diacritic + ASCII) is added so bare Polish
+  function words stop surviving as keywords. The Vietnamese stop-word set no longer
+  contributes to the auto-mode combined set — its ASCII-only entries (`ai`, `anh`,
+  `cho`, `em`, `khi`, `ra`, …) were silently deleting real English/Polish words
+  from every auto-mode extraction, and ASCII short-forms that collide with domain
+  acronyms (e.g. `ci` → "CI", continuous integration) are excluded from the Polish
+  set. Explicit-language branches (`vi`, `pl`) are unaffected.
+
+- **`SurrealDBStorage` now reconnects after a dropped transport, not only on a
+  401.** A DB container restart (backup, upgrade, reboot) severs the WebSocket and
+  surfaces as a connection error rather than an auth error, so the previous
+  retry-on-401-only path left the cached dead connection in place — every
+  subsequent query failed and long-lived clients returned `-32000` until the
+  process was restarted. `_query` now also reconnects on connection/transport
+  errors (`_is_connection_error`), using the same single-retry path; genuine query
+  errors are unaffected. Connection detection excludes `TimeoutError`, so a
+  legitimate slow-query timeout under the HTTP transport is not misread as a drop.
+
+### Security
+
+- **Hardened `_to_surreal_id` against record-id / SurQL injection.** Ids are
+  inlined into record literals and raw SurQL across the storage layer; the previous
+  sanitiser only replaced `-` with `_`, leaving quotes, braces, semicolons and
+  comment markers intact — a statement-literal breakout reachable via the REST
+  `get_path` route (and `eval::gql` when enabled). Every character outside
+  `[A-Za-z0-9_]` is now folded to `_`, a store-layer `_safe_brain_id` fail-closed
+  guard covers the dot/hyphen-bearing brain-id path, and the 13 duplicated sanitiser
+  copies are consolidated into one shared implementation so the guarantee holds
+  storage-wide. Behaviour-preserving for legitimate ids (UUID4 / content-hash).
+
 ## [2.7.4] — 2026-07-11
 
 ### Performance
