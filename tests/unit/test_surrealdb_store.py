@@ -336,3 +336,11 @@ class TestConnectionErrorDetection:
 
         assert not _is_connection_error(Exception("Parse error: unexpected token"))
         assert not _is_connection_error(ValueError("bad field value"))
+
+    def test_query_timeout_not_flagged(self):
+        # TimeoutError (== asyncio.TimeoutError since 3.11) is an OSError subclass,
+        # but a slow query hitting the HTTP transport's ClientTimeout(total=30) is a
+        # query outcome, not a dropped transport — it must NOT trigger a reconnect.
+        from surreal_memory.storage.surrealdb.store import _is_connection_error
+
+        assert not _is_connection_error(TimeoutError("query exceeded 30s"))

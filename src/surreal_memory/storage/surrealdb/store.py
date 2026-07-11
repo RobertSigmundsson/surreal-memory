@@ -115,7 +115,14 @@ def _is_connection_error(exc: Exception) -> bool:
     and the whole MCP surface returns -32000 until the process is restarted
     (audit finding S-01).
     """
-    if isinstance(exc, (ConnectionError, ConnectionResetError, OSError)):
+    # OSError covers ConnectionError/ConnectionResetError (both subclasses) and
+    # the aiohttp ClientOSError/ClientConnectorError raised during a restart
+    # window. TimeoutError (== asyncio.TimeoutError since 3.11) is ALSO an OSError
+    # subclass, but a legitimate slow-query timeout under the default HTTP
+    # transport (ClientTimeout(total=30)) is a query outcome, not a dropped
+    # transport — excluding it avoids a needless reconnect+retry that doubles
+    # latency and masks the SDK's own is_timed_out error class.
+    if isinstance(exc, OSError) and not isinstance(exc, TimeoutError):
         return True
     name = type(exc).__name__.lower()
     if any(k in name for k in ("connectionclosed", "disconnect", "websocket", "transport")):
