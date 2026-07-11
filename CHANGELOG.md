@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **`SurrealDBStorage` now reconnects after a dropped transport, not only on a
+  401.** A DB container restart (backup, upgrade, reboot) severs the WebSocket and
+  surfaces as a connection error rather than an auth error, so the previous
+  retry-on-401-only path left the cached dead connection in place — every
+  subsequent query failed and long-lived clients returned `-32000` until the
+  process was restarted. `_query` now also reconnects on connection/transport
+  errors (`_is_connection_error`), using the same single-retry path; genuine query
+  errors are unaffected. Connection detection excludes `TimeoutError`, so a
+  legitimate slow-query timeout under the HTTP transport is not misread as a drop.
+
 ## [2.7.4] — 2026-07-11
 
 ### Performance
