@@ -106,7 +106,11 @@ class TestFindNeuronsByIds:
         # An injection-shaped id must not reach the query string.
         await st.find_neurons_by_ids(["bad; DELETE neuron", "ok-1"])
         (sql,) = _queries(conn)
-        assert "DELETE" not in sql
+        # Fork semantics: the hardened single-source _to_surreal_id FOLDS every
+        # char outside [A-Za-z0-9_] to "_", so the hostile id becomes an inert
+        # record id instead of being dropped — no breakout char can survive.
+        assert "neuron:bad__DELETE_neuron" in sql
+        assert ";" not in sql and '"' not in sql and "'" not in sql
         assert "neuron:ok_1" in sql
 
     async def test_chunks_large_id_lists(self):

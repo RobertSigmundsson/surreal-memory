@@ -105,32 +105,6 @@ def _brain_literal(brain_id: str) -> str:
     return f'"{brain_id}"'
 
 
-def _safe_brain_id(brain_id: str) -> str:
-    """Validate a brain id before it is inlined raw into a record id / SurQL.
-
-    Brain ids legitimately contain '.' and '-' (e.g. 'my-brain.v2'), so unlike
-    neuron ids they are NOT folded through _to_surreal_id. This is the
-    store-layer choke point that makes the "no un-sanitised id reaches the
-    engine" guarantee literally true: it fail-closed REJECTS any id carrying a
-    quote / brace / paren / semicolon / whitespace / backtick / control char
-    that could break out of the ``brain:{id}`` / ``device:{brain_id}_{did}``
-    record literal or the raw ``UPDATE brain:{id} SET ...`` statement. Mirrors
-    the REST ``_BRAIN_ID_PATTERN`` (``[A-Za-z0-9_.-]``, <=128) so the guarantee
-    no longer depends on the REST layer having validated first.
-    """
-    if (
-        not isinstance(brain_id, str)
-        or not brain_id
-        or len(brain_id) > 128
-        or any(
-            not ("a" <= c <= "z" or "A" <= c <= "Z" or "0" <= c <= "9" or c in "_.-")
-            for c in brain_id
-        )
-    ):
-        raise ValueError(f"unsafe brain id: {brain_id!r}")
-    return brain_id
-
-
 def _from_surreal_id(surreal_id: str) -> str:
     """Extract the original ID from a SurrealDB record ID like 'neuron:abc_def'."""
     if ":" in surreal_id:
