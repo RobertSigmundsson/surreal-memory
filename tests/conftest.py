@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from collections.abc import AsyncGenerator
+import contextlib
+from collections.abc import AsyncGenerator, Generator
 from datetime import datetime
 
 import pytest
@@ -163,3 +164,42 @@ async def populated_storage(
 def reference_time() -> datetime:
     """Standard reference time for tests."""
     return datetime(2024, 2, 4, 14, 30, 0)
+
+
+@pytest.fixture(autouse=True)
+def _close_leaked_aiosqlite_connections(
+    monkeypatch: pytest.MonkeyPatch,
+) -> Generator[None, None, None]:
+    """Stop aiosqlite worker threads a test leaves behind.
+
+    aiosqlite runs every connection on a dedicated NON-daemon worker thread
+    that blocks on its queue until ``close()`` delivers the stop sentinel. A
+    fixture that initialises ``SQLiteStorage`` without closing it therefore
+    leaks a live thread, and any such thread still referenced at interpreter
+    exit is joined in ``threading._shutdown`` BEFORE the final garbage
+    collection — so a fully green run hangs forever after the summary (and the
+    stray ``RuntimeError: Event loop is closed`` warnings in the suite are the
+    same leak delivering late results onto closed per-test loops).
+
+    Track connections opened during each test and stop the stragglers at
+    teardown. ``Connection.stop()`` enqueues the sentinel without needing an
+    event loop, so this works from a synchronous fixture.
+    """
+    import aiosqlite
+
+    live: list[aiosqlite.Connection] = []
+    orig_init = aiosqlite.Connection.__init__
+
+    def tracking_init(self: aiosqlite.Connection, *args: object, **kwargs: object) -> None:
+        orig_init(self, *args, **kwargs)
+        live.append(self)
+
+    monkeypatch.setattr(aiosqlite.Connection, "__init__", tracking_init)
+    yield
+    for conn in live:
+        thread = getattr(conn, "_thread", None)
+        if thread is None or not thread.is_alive():
+            continue
+        with contextlib.suppress(Exception):
+            conn.stop()
+        thread.join(timeout=2.0)
