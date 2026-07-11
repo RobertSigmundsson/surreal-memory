@@ -155,9 +155,19 @@ def _detect_csv_row(content: str) -> StructuredContent | None:
         )
         confidence = 0.9
     else:
-        # Single row — columns unnamed
+        # Single row — columns unnamed. This is the ambiguous case that most
+        # often misfires on prose that merely contains commas, so apply a
+        # stricter bar than the header+data case.
         values = [v.strip() for v in lines[0].split(delimiter)]
         if len(values) < 3:
+            return None
+        # Prose guard (audit S-05): real headerless CSV cells are short,
+        # token-like values. A cell that reads like a sentence (long or
+        # multi-word free text) means this is prose with commas, not CSV data —
+        # storing it created spurious `col_N` entity-cell neurons that poisoned
+        # the graph. The all-text guard below is not enough: a single date or
+        # number in one cell used to slip prose through.
+        if any(len(v) > 40 or len(v.split()) > 6 for v in values):
             return None
         fields = tuple(
             StructuredField(name=f"col_{i}", value=v, field_type=_detect_field_type(v))

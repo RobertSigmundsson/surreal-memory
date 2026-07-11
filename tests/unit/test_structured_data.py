@@ -193,3 +193,24 @@ class TestVerbatimCompressionSkip:
             metadata={"_verbatim": True},
         )
         assert fiber.metadata.get("_verbatim") is True
+
+
+class TestCsvProseGuard:
+    """_detect_csv_row must not treat prose-with-commas as CSV (audit S-05:
+    such misfires created spurious col_N entity-cell neurons that poisoned the
+    graph)."""
+
+    def test_prose_with_commas_and_a_date_not_csv(self):
+        from surreal_memory.extraction.structure_detector import _detect_csv_row
+
+        prose = (
+            "Session activity: wejdz w role ekspert prompt loop enineer, "
+            "architektury systemow orkiestracji, sweep 2026-06-26"
+        )
+        assert _detect_csv_row(prose) is None
+
+    def test_short_cell_row_still_detected(self):
+        from surreal_memory.extraction.structure_detector import _detect_csv_row
+
+        # date + number + currency → genuine headerless data row, keep detecting.
+        assert _detect_csv_row("2026-01-01,500,USD") is not None
