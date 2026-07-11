@@ -78,9 +78,7 @@ _NAMED_HOSTILE_IDS = {
     "source": 'src"} ; DELETE source; SELECT * FROM typed_memory WHERE "',
 }
 
-_ALLOWED_CHARSET = set(
-    "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_"
-)
+_ALLOWED_CHARSET = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_")
 
 
 def _all_modules_under_test() -> list[str]:
@@ -122,15 +120,16 @@ class TestFuzzAcrossAllSources:
     """Fuzz `_to_surreal_id` as imported from every one of the 13 modules with
     ~20 breakout payloads; output must always be within [A-Za-z0-9_]."""
 
-    @pytest.mark.parametrize("module_path", [*_all_modules_under_test(), "surreal_memory.storage.surrealdb._ids"])
+    @pytest.mark.parametrize(
+        "module_path", [*_all_modules_under_test(), "surreal_memory.storage.surrealdb._ids"]
+    )
     @pytest.mark.parametrize("payload", _HOSTILE_PAYLOADS)
     def test_output_always_charset_safe(self, module_path, payload):
         module = importlib.import_module(module_path)
         fn = module._to_surreal_id
         out = fn(payload)
         assert set(out) <= _ALLOWED_CHARSET, (
-            f"{module_path}._to_surreal_id({payload!r}) -> {out!r} leaked a "
-            f"non-charset character"
+            f"{module_path}._to_surreal_id({payload!r}) -> {out!r} leaked a non-charset character"
         )
 
 
@@ -149,7 +148,7 @@ class TestNamedHostileBreakoutStringsFoldToInert:
             f"[{kind}] {module_path}._to_surreal_id({payload!r}) -> {out!r} "
             f"still contains breakout characters"
         )
-        for breakout_char in '"\'{}()[]<>;:/*\\`= \t\n':
+        for breakout_char in "\"'{}()[]<>;:/*\\`= \t\n":
             assert breakout_char not in out, (
                 f"[{kind}] {module_path}: {breakout_char!r} survived "
                 f"sanitisation of {payload!r} -> {out!r}"
