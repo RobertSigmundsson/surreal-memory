@@ -40,9 +40,26 @@ class TestStopWords:
     """Tests for language-aware stop word selection."""
 
     def test_combined_stop_words(self) -> None:
-        from surreal_memory.extraction.keywords import _STOP_WORDS_CONVERSATIONAL_EN
+        # STOP_WORDS_VI removed from the union (symmetric reversal of the earlier
+        # Polish stopword fix, same discipline, opposite direction): 9 ASCII-only
+        # VI entries ("ai", "em", among them) collide with real English/Polish
+        # vocabulary and were silently deleting it from every "auto"-mode
+        # extraction. The explicit "vi" branch of _get_stop_words (pinned by
+        # test_get_stop_words_vi below) still returns STOP_WORDS_VI unchanged —
+        # only the combined "auto" union drops it.
+        from surreal_memory.extraction.keywords import (
+            _STOP_WORDS_CONVERSATIONAL_EN,
+            _STOP_WORDS_CONVERSATIONAL_PL,
+            STOP_WORDS_PL,
+        )
 
-        assert STOP_WORDS == STOP_WORDS_EN | STOP_WORDS_VI | _STOP_WORDS_CONVERSATIONAL_EN
+        assert STOP_WORDS == (
+            STOP_WORDS_EN
+            | _STOP_WORDS_CONVERSATIONAL_EN
+            | STOP_WORDS_PL
+            | _STOP_WORDS_CONVERSATIONAL_PL
+        )
+        assert not (STOP_WORDS & STOP_WORDS_VI)
 
     def test_english_stop_words(self) -> None:
         assert "the" in STOP_WORDS_EN

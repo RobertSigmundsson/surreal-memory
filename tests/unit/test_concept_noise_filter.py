@@ -131,3 +131,38 @@ class TestConceptNoiseFilter:
         assert found, (
             f"Expected at least one meaningful concept from {meaningful}, got {concept_contents}"
         )
+
+    @pytest.mark.asyncio
+    async def test_polish_status_sentence_produces_no_fragment_concepts(
+        self, encoder: tuple[MemoryEncoder, InMemoryStorage]
+    ) -> None:
+        """Polish status-speak with clause-crossing junk should not create fragment
+        concepts (Phase 1 live-derived poisoning repro)."""
+        enc, _storage = encoder
+
+        result = await enc.encode(
+            "Sprawdzilem przez reguly czy twojej decyzji dotyczy ten branch, "
+            "i potwierdzone zostaly dwie zmiany w sesji.",
+            timestamp=datetime(2024, 2, 4, 15, 0),
+        )
+
+        concept_contents = {
+            n.content.lower() for n in result.neurons_created if n.type == NeuronType.CONCEPT
+        }
+        junk_bigrams = {
+            "reguly czy",
+            "czy twojej",
+            "decyzji dotyczy",
+            "dotyczy ten",
+            "branch potwierdzone",
+            "zostaly dwie",
+            "sprawdzilem przez",
+            "przez reguly",
+        }
+        assert not (concept_contents & junk_bigrams), (
+            f"Junk bigrams became concepts: {concept_contents & junk_bigrams}"
+        )
+        for bare_stopword in ("przez", "dotyczy"):
+            assert bare_stopword not in concept_contents, (
+                f"Bare PL stopword '{bare_stopword}' became a concept neuron"
+            )

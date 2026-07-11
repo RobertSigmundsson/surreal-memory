@@ -296,11 +296,334 @@ STOP_WORDS_VI: frozenset[str] = frozenset(
     }
 )
 
+# Polish stop words — conjunctions/particles, prepositions, pronouns,
+# auxiliary/copular verb forms, functional numerals, functional adverbs.
+# Both diacritic and ASCII forms included: live content is frequently typed
+# without diacritics (e.g. "zostaly", "reguly", "sie", "ze").
+STOP_WORDS_PL: frozenset[str] = frozenset(
+    {
+        # spójniki i partykuły (conjunctions and particles)
+        "i",
+        "a",
+        "o",
+        "u",
+        "w",
+        "z",
+        "ze",
+        "że",
+        "iz",
+        "iż",
+        "we",
+        "oraz",
+        "ale",
+        "lecz",
+        "lub",
+        "albo",
+        "ani",
+        "czy",
+        "bo",
+        "wiec",
+        "więc",
+        "czyli",
+        "jednak",
+        "przeciez",
+        "przecież",
+        "tez",
+        "też",
+        "takze",
+        "także",
+        "rowniez",
+        "również",
+        "tylko",
+        "juz",
+        "już",
+        "jeszcze",
+        "no",
+        "tak",
+        "nie",
+        "niech",
+        "by",
+        "aby",
+        "zeby",
+        "żeby",
+        "gdyby",
+        "jesli",
+        "jeśli",
+        "jezeli",
+        "jeżeli",
+        "poniewaz",
+        "ponieważ",
+        "gdyż",
+        "gdyz",
+        # przyimki (prepositions) — "pod" deliberately EXCLUDED, see collision table
+        "na",
+        "do",
+        "od",
+        "po",
+        "za",
+        "przy",
+        "dla",
+        "bez",
+        "nad",
+        "przez",
+        "przed",
+        "miedzy",
+        "między",
+        "wsrod",
+        "wśród",
+        "obok",
+        "oprocz",
+        "oprócz",
+        "podczas",
+        "wedlug",
+        "według",
+        # zaimki (pronouns, incl. inflections) — both diacritic and ASCII forms
+        "ja",
+        "ty",
+        "my",
+        "wy",
+        "on",
+        "ona",
+        "ono",
+        "oni",
+        "one",
+        "go",
+        "mu",
+        "ją",
+        "jej",
+        "jego",
+        "ich",
+        "im",
+        "nas",
+        "was",
+        "nam",
+        "wam",
+        "mnie",
+        "mi",
+        "cie",
+        "cię",
+        # "ci" deliberately EXCLUDED: it collides with "CI" (continuous
+        # integration), which is ubiquitous in this project's dev-session
+        # content — exactly the ASCII-collision class this PR removes for
+        # Vietnamese ("ai"/"em"). See the "pod" collision note above.
+        "sie",
+        "się",
+        "sobie",
+        "soba",
+        "sobą",
+        "ten",
+        "ta",
+        "to",
+        "te",
+        "tę",
+        "tego",
+        "tej",
+        "tym",
+        "tych",
+        "tamten",
+        "tamta",
+        "tamto",
+        "ktory",
+        "który",
+        "ktora",
+        "która",
+        "ktore",
+        "które",
+        "ktorego",
+        "którego",
+        "ktorej",
+        "której",
+        "ktorym",
+        "którym",
+        "ktorych",
+        "których",
+        "jaki",
+        "jaka",
+        "jakie",
+        "jak",
+        "co",
+        "cos",
+        "coś",
+        "kto",
+        "ktos",
+        "ktoś",
+        "nic",
+        "nikt",
+        "kazdy",
+        "każdy",
+        "kazda",
+        "każda",
+        "kazde",
+        "każde",
+        "wszystko",
+        "wszystkie",
+        "wszyscy",
+        "inny",
+        "inna",
+        "inne",
+        "swoj",
+        "swój",
+        "swoja",
+        "swoją",
+        "swoje",
+        "swojej",
+        "swoim",
+        "moj",
+        "mój",
+        "moja",
+        "moją",
+        "moje",
+        "mojej",
+        "moim",
+        "twoj",
+        "twój",
+        "twoja",
+        "twoją",
+        "twoje",
+        "twojej",
+        "twoim",
+        "nasz",
+        "nasza",
+        "nasze",
+        "naszej",
+        "naszym",
+        "wasz",
+        "wasza",
+        "wasze",
+        # czasowniki posiłkowe / kopuły (auxiliary & copular verb forms)
+        "jest",
+        "sa",
+        "są",
+        "byl",
+        "był",
+        "byla",
+        "była",
+        "bylo",
+        "było",
+        "byly",
+        "były",
+        "byc",
+        "być",
+        "bede",
+        "będę",
+        "bedzie",
+        "będzie",
+        "beda",
+        "będą",
+        "zostal",
+        "został",
+        "zostala",
+        "została",
+        "zostalo",
+        "zostało",
+        "zostaly",
+        "zostały",
+        "zostac",
+        "zostać",
+        "zostanie",
+        "ma",
+        "mam",
+        "masz",
+        "mamy",
+        "maja",
+        "mają",
+        "miec",
+        "mieć",
+        "mial",
+        "miał",
+        "miala",
+        "miała",
+        # liczebniki funkcyjne (numeral function words) — grounded in live junk
+        # samples "activity dwie" / "zostaly dwie" (Phase 1 §4)
+        "jeden",
+        "jedna",
+        "jedno",
+        "dwa",
+        "dwie",
+        "dwoch",
+        "dwóch",
+        "trzy",
+        "cztery",
+        "piec",
+        "pięć",
+        "kilka",
+        "wiele",
+        "pare",
+        "parę",
+        "oba",
+        "obie",
+        "obu",
+        # przysłówki funkcyjne (functional adverbs)
+        "bardzo",
+        "moze",
+        "może",
+        "mozna",
+        "można",
+        "trzeba",
+        "nalezy",
+        "należy",
+        "wlasnie",
+        "właśnie",
+        "chyba",
+        "raczej",
+        "prawie",
+        "okolo",
+        "około",
+        "tutaj",
+        "tam",
+        "gdzie",
+        "kiedy",
+        "gdy",
+        "potem",
+        "wtedy",
+        "teraz",
+        "dzis",
+        "dziś",
+        "dzisiaj",
+        "wczoraj",
+        "jutro",
+    }
+)
+
+# Status-speak verbs common in this system's PL logs — analogous to
+# _STOP_WORDS_CONVERSATIONAL_EN. Kept deliberately small and conservative.
+_STOP_WORDS_CONVERSATIONAL_PL: frozenset[str] = frozenset(
+    {
+        "dotyczy",
+        "wiem",
+        "wiesz",
+        "mysle",
+        "myślę",
+        "widze",
+        "widzę",
+        "sprawdze",
+        "sprawdzę",
+        "zrobie",
+        "zrobię",
+        "prosze",
+        "proszę",
+    }
+)
+
 # Combined stop words for backward compatibility
-STOP_WORDS: frozenset[str] = STOP_WORDS_EN | STOP_WORDS_VI | _STOP_WORDS_CONVERSATIONAL_EN
+# STOP_WORDS_VI is deliberately excluded here: several of its ASCII-only entries
+# (e.g. "ai", "em") collide with real English/Polish vocabulary and were silently
+# deleting them from every "auto"-mode extraction. The explicit "vi" branch of
+# _get_stop_words() below still returns STOP_WORDS_VI unchanged.
+STOP_WORDS: frozenset[str] = (
+    STOP_WORDS_EN | _STOP_WORDS_CONVERSATIONAL_EN | STOP_WORDS_PL | _STOP_WORDS_CONVERSATIONAL_PL
+)
 
 # Vietnamese diacritical character pattern (unique to Vietnamese, not French)
 _VI_DIACRITICS = re.compile(r"[ăâđêôơưắằẳẵặấầẩẫậếềểễệốồổỗộớờởỡợứừửữự]")
+
+# Clause boundary: bigrams never pair words that cross one of these.
+# Em-dash is included — it sets off a parenthetical/separate clause the same as a
+# comma (live-proven: "keywords.py — bigramy" otherwise lets the "py" filename
+# fragment glue onto the next clause's first word). Plain ASCII hyphen is
+# deliberately NOT included: it's mid-word in compounds like "write-gate", which
+# must still yield the useful bigram "write gate".
+_CLAUSE_BOUNDARY = re.compile(r"[.,;:!?\n\r—]+")
 
 
 def _detect_vietnamese(text: str) -> bool:
@@ -314,6 +637,13 @@ def _get_stop_words(language: str, text: str) -> frozenset[str]:
         return STOP_WORDS_VI
     if language == "en":
         return STOP_WORDS_EN | _STOP_WORDS_CONVERSATIONAL_EN
+    if language == "pl":
+        return (
+            STOP_WORDS_PL
+            | _STOP_WORDS_CONVERSATIONAL_PL
+            | STOP_WORDS_EN
+            | _STOP_WORDS_CONVERSATIONAL_EN
+        )
     # "auto" — use all
     return STOP_WORDS
 
@@ -394,11 +724,16 @@ def extract_weighted_keywords(
         if vi_tokenized is not None:
             tokenized_text = vi_tokenized
 
-    words = re.findall(r"\b[a-zA-ZÀ-ỹ]+(?:_[a-zA-ZÀ-ỹ]+)*\b", tokenized_text.lower())
+    words: list[str] = []
+    clause_of: list[int] = []
+    for clause_idx, clause in enumerate(_CLAUSE_BOUNDARY.split(tokenized_text.lower())):
+        for w in re.findall(r"\b[a-zA-ZÀ-ỹ]+(?:_[a-zA-ZÀ-ỹ]+)*\b", clause):
+            words.append(w)
+            clause_of.append(clause_idx)
 
-    # Filter to content words with original position
-    filtered: list[tuple[str, int]] = [
-        (w, i)
+    # Filter to content words with original position and clause id
+    filtered: list[tuple[str, int, int]] = [
+        (w, i, clause_of[i])
         for i, w in enumerate(words)
         if len(w.replace("_", "")) >= min_length
         and w.replace("_", " ") not in stop_words
@@ -412,17 +747,17 @@ def extract_weighted_keywords(
     weighted: dict[str, float] = {}
 
     # Unigrams with position decay (1.0 at start → 0.5 at end)
-    for idx, (word, _orig_pos) in enumerate(filtered):
+    for idx, (word, _orig_pos, _clause_idx) in enumerate(filtered):
         position_weight = 1.0 - 0.5 * (idx / max(1, total - 1))
         # Store with underscores replaced by spaces for readability
         display_word = word.replace("_", " ")
         weighted[display_word] = max(weighted.get(display_word, 0.0), position_weight)
 
-    # Bi-grams from adjacent non-stop words within 3 original word positions
+    # Bi-grams from adjacent non-stop words within the same clause, gap <= 2 original word positions
     for i in range(len(filtered) - 1):
-        w1, p1 = filtered[i]
-        w2, p2 = filtered[i + 1]
-        if p2 - p1 <= 3:
+        w1, p1, c1 = filtered[i]
+        w2, p2, c2 = filtered[i + 1]
+        if c1 == c2 and p2 - p1 <= 2:
             dw1 = w1.replace("_", " ")
             dw2 = w2.replace("_", " ")
             bigram = f"{dw1} {dw2}"
