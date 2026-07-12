@@ -471,6 +471,38 @@ class WriteGateConfig:
 
 
 @dataclass(frozen=True)
+class TraceConfig:
+    """Retrieval-trace telemetry configuration (schema v9, opt-in).
+
+    When enabled, a compact RetrievalTrace is persisted (fire-and-forget) for a
+    sampled fraction of recalls. Neutral defaults keep tracing off entirely, so
+    default recall behaviour and latency are unchanged.
+    """
+
+    enabled: bool = False  # opt-in, no traces persisted by default
+    sample_rate: float = 1.0  # fraction of recalls to trace when enabled
+    retention_days: int = 30  # prune traces older than this
+    max_traces: int = 5000  # cap total stored traces (delete-oldest)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "enabled": self.enabled,
+            "sample_rate": self.sample_rate,
+            "retention_days": self.retention_days,
+            "max_traces": self.max_traces,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> TraceConfig:
+        return cls(
+            enabled=bool(data.get("enabled", False)),
+            sample_rate=float(data.get("sample_rate", 1.0)),
+            retention_days=int(data.get("retention_days", 30)),
+            max_traces=int(data.get("max_traces", 5000)),
+        )
+
+
+@dataclass(frozen=True)
 class MaintenanceConfig:
     """Proactive brain maintenance configuration.
 
@@ -1434,6 +1466,9 @@ class UnifiedConfig:
     # Token budget retrieval
     budget: BudgetRetrievalConfig = field(default_factory=BudgetRetrievalConfig)
 
+    # Retrieval-trace telemetry (schema v9, opt-in; neutral default = off)
+    trace: TraceConfig = field(default_factory=TraceConfig)
+
     # CLI preferences
     json_output: bool = False
     default_depth: int | None = None
@@ -1530,6 +1565,7 @@ class UnifiedConfig:
             ),
             response=ResponseConfig.from_dict(data.get("response", {})),
             budget=BudgetRetrievalConfig.from_dict(data.get("budget", {})),
+            trace=TraceConfig.from_dict(data.get("trace", {})),
             json_output=data.get("cli", {}).get("json_output", False),
             default_depth=data.get("cli", {}).get("default_depth"),
             default_max_tokens=data.get("cli", {}).get("default_max_tokens", 500),
@@ -1741,6 +1777,13 @@ class UnifiedConfig:
             f"strip_hints = {'true' if self.response.strip_hints else 'false'}",
             f"content_preview_length = {self.response.content_preview_length}",
             f"auto_compact_threshold = {self.response.auto_compact_threshold}",
+            "",
+            "# Retrieval-trace telemetry (opt-in; off by default)",
+            "[trace]",
+            f"enabled = {'true' if self.trace.enabled else 'false'}",
+            f"sample_rate = {self.trace.sample_rate}",
+            f"retention_days = {self.trace.retention_days}",
+            f"max_traces = {self.trace.max_traces}",
             "",
             "# CLI preferences",
             "[cli]",

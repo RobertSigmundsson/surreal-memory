@@ -60,6 +60,7 @@ def _row_to_source(row: dict[str, Any]) -> Source:
         metadata=metadata,
         created_at=_parse_datetime(row.get("created_at")) or utcnow(),
         updated_at=_parse_datetime(row.get("updated_at")) or utcnow(),
+        trust=(float(row["trust"]) if row.get("trust") is not None else None),
     )
 
 
@@ -100,6 +101,7 @@ class SurrealDBSourcesMixin:
             "metadata": dict(source.metadata),
             "created_at": source.created_at,
             "updated_at": source.updated_at,
+            "trust": source.trust,
         }
 
         content_data = {k: v for k, v in record_data.items() if k != "id"}
@@ -120,7 +122,7 @@ class SurrealDBSourcesMixin:
     async def get_source(self, source_id: str) -> Source | None:
         brain_id = self._get_brain_id()
         rows = await self._query(
-            "SELECT * FROM source WHERE brain_id = $brain_id AND id = $sid LIMIT 1",
+            "SELECT * FROM source WHERE brain_id = $brain_id AND id = type::record('source', $sid) LIMIT 1",
             brain_id=brain_id,
             sid=_to_surreal_id(source_id),
         )
@@ -160,11 +162,12 @@ class SurrealDBSourcesMixin:
         status: str | None = None,
         version: str | None = None,
         metadata: dict[str, Any] | None = None,
+        trust: float | None = None,
     ) -> bool:
         brain_id = self._get_brain_id()
 
         rows = await self._query(
-            "SELECT id FROM source WHERE brain_id = $brain_id AND id = $sid LIMIT 1",
+            "SELECT id FROM source WHERE brain_id = $brain_id AND id = type::record('source', $sid) LIMIT 1",
             brain_id=brain_id,
             sid=_to_surreal_id(source_id),
         )
@@ -186,6 +189,8 @@ class SurrealDBSourcesMixin:
             update["version"] = version
         if metadata is not None:
             update["metadata"] = metadata
+        if trust is not None:
+            update["trust"] = trust
 
         conn = self._ensure_conn()
         sid = _to_surreal_id(source_id)
@@ -196,7 +201,7 @@ class SurrealDBSourcesMixin:
         brain_id = self._get_brain_id()
 
         rows = await self._query(
-            "SELECT id FROM source WHERE brain_id = $brain_id AND id = $sid LIMIT 1",
+            "SELECT id FROM source WHERE brain_id = $brain_id AND id = type::record('source', $sid) LIMIT 1",
             brain_id=brain_id,
             sid=_to_surreal_id(source_id),
         )

@@ -315,6 +315,22 @@ _ALL_TOOL_SCHEMAS: list[dict[str, Any]] = [
                     "type": "boolean",
                     "description": "Include full conflict details in response (default: false). When false, only has_conflicts flag and conflict_count are returned.",
                 },
+                "include_superseded": {
+                    "type": "boolean",
+                    "description": "Include superseded facts (those with valid_until set) in recall. Default false: superseded facts are hard-filtered out. Set true to see the full history. Ignored when valid_at is given (point-in-time filtering takes over).",
+                },
+                "trace": {
+                    "type": "boolean",
+                    "description": "Persist a retrieval trace for this recall and return its trace_id (telemetry — what fed the answer). Works even when trace telemetry is off globally; does not change global config. Persisted synchronously before the response returns (small added latency); on failure the response carries trace_error instead of trace_id. Not applied to cross-brain recall (when 'brains' is set).",
+                },
+                "include_uncertainty": {
+                    "type": "boolean",
+                    "description": "Attach an 'uncertainty' block summarising how much to trust the answer (contradictions, superseded facts, low confidence, soon-expiring memories, drift). Default false. Only added when there is an actual uncertainty signal.",
+                },
+                "session_id": {
+                    "type": "string",
+                    "description": "Optional session identifier stored on the retrieval trace to group recalls from one session.",
+                },
                 "warn_expiry_days": {
                     "type": "integer",
                     "minimum": 1,
@@ -396,27 +412,50 @@ _ALL_TOOL_SCHEMAS: list[dict[str, Any]] = [
     },
     {
         "name": "smem_provenance",
-        "description": "Trace provenance, verify, or approve a memory neuron. "
-        "Use 'trace' to see full provenance chain (source, stored_by, verified, approved). "
-        "Use 'verify' or 'approve' to add audit trail entries.",
+        "description": "Trace provenance / verify / approve a memory neuron, or query retrieval traces. "
+        "Use 'trace' to see a neuron's full provenance chain (source, stored_by, verified, approved, "
+        "superseded lineage). Use 'verify' or 'approve' to add audit trail entries. Use 'traces' to list "
+        "recalls that used a memory or matched a query, and 'trace_get' to fetch one full retrieval-trace record.",
         "inputSchema": {
             "type": "object",
             "properties": {
                 "action": {
                     "type": "string",
-                    "enum": ["trace", "verify", "approve"],
-                    "description": "Action: trace (view chain), verify (mark verified), approve (mark approved).",
+                    "enum": ["trace", "verify", "approve", "traces", "trace_get"],
+                    "description": "trace (neuron chain), verify, approve; traces (list retrieval traces), trace_get (one retrieval trace).",
                 },
                 "neuron_id": {
                     "type": "string",
-                    "description": "Neuron ID to trace/verify/approve.",
+                    "description": "Neuron ID to trace/verify/approve (required for those actions).",
                 },
                 "actor": {
                     "type": "string",
                     "description": "Who is performing the verification/approval (default: mcp_agent).",
                 },
+                "fiber_id": {
+                    "type": "string",
+                    "description": "action=traces: only retrieval traces whose fiber_ids contain this id.",
+                },
+                "query_contains": {
+                    "type": "string",
+                    "description": "action=traces: case-insensitive substring match on the trace query.",
+                },
+                "since": {
+                    "type": "string",
+                    "description": "action=traces: ISO datetime; only traces created at/after this time.",
+                },
+                "limit": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 100,
+                    "description": "action=traces: max traces to return (default 20).",
+                },
+                "trace_id": {
+                    "type": "string",
+                    "description": "action=trace_get: the retrieval-trace id to fetch.",
+                },
             },
-            "required": ["action", "neuron_id"],
+            "required": ["action"],
         },
     },
     {
@@ -870,6 +909,36 @@ _ALL_TOOL_SCHEMAS: list[dict[str, Any]] = [
                 },
             },
             "required": ["action"],
+        },
+    },
+    {
+        "name": "smem_uncertainty",
+        "description": "How much can you trust this brain's memories? Uncertainty diagnostics — "
+        "contradictions, low-evidence (low trust) facts, superseded facts, soon-expiring memories, and drift. "
+        "Separate from smem_conflicts (which is CRUD). Read-only. Note: low_evidence/superseded sample the "
+        "most-recent ~200 typed memories (see response 'scan.typed_scan_truncated'); contradiction count is "
+        "capped. Drift is available on SQLite backends only.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "action": {
+                    "type": "string",
+                    "enum": ["overview", "contradictions", "drift", "expiring", "low_evidence"],
+                    "description": "overview (default)=counts + contradiction_rate + samples; contradictions=list active conflicts; drift=detected drift clusters; expiring=memories expiring soon; low_evidence=low-trust memories.",
+                },
+                "within_days": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 365,
+                    "description": "Window for the 'expiring' signal / overview (default 14).",
+                },
+                "limit": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 200,
+                    "description": "Max items to return for list actions (default 10).",
+                },
+            },
         },
     },
     {
@@ -1811,20 +1880,28 @@ _ALL_TOOL_SCHEMAS: list[dict[str, Any]] = [
         "description": "Memory lifecycle management — view lifecycle states and manage compression resistance. "
         "Hot memories (accessed recently or high priority) resist compression automatically. "
         "Actions: status (distribution of lifecycle states), recover (rehydrate a compressed memory), "
-        "freeze (prevent a memory from compressing), thaw (resume normal lifecycle).",
+        "freeze (prevent a memory from compressing), thaw (resume normal lifecycle), "
+        "backfill_supersession (retroactively stamp supersession lineage on existing conflicts).",
         "inputSchema": {
             "type": "object",
             "properties": {
                 "action": {
                     "type": "string",
-                    "enum": ["status", "recover", "freeze", "thaw"],
+                    "enum": ["status", "recover", "freeze", "thaw", "backfill_supersession"],
                     "description": "status=show lifecycle distribution, recover=rehydrate compressed memory, "
-                    "freeze=prevent compression, thaw=resume normal lifecycle",
+                    "freeze=prevent compression, thaw=resume normal lifecycle, "
+                    "backfill_supersession=stamp A-side validity for already-superseded facts",
                 },
                 "id": {
                     "type": "string",
                     "description": "Neuron ID (required for recover/freeze/thaw). "
                     "For recover, fiber_id is also accepted.",
+                },
+                "limit": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 5000,
+                    "description": "Max CONTRADICTS synapses to scan for backfill_supersession (default 1000).",
                 },
             },
             "required": ["action"],

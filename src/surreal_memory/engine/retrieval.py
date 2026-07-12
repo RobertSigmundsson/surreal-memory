@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import collections
+import dataclasses
 import heapq
 import logging
 import math
@@ -74,12 +75,24 @@ if TYPE_CHECKING:
 def _fiber_valid_at(fiber: Fiber, dt: datetime) -> bool:
     """Check if a fiber is temporally valid at the given datetime.
 
-    A fiber is valid if its time window contains dt. Missing bounds
-    are treated as unbounded (open interval).
+    A fiber is valid if its event-time window contains dt. Missing bounds are
+    treated as unbounded (open interval). A ZERO-WIDTH window (time_start ==
+    time_end) is also treated as unbounded: BuildFiberStep stamps both bounds with
+    the write timestamp for every fact that has no extracted event-time range, so a
+    zero-width window carries no event-duration information to filter against — and
+    requiring dt to equal that exact microsecond would make point-in-time recall
+    impossible for the common case. Logical point-in-time (``valid_at`` over
+    supersession validity, via ``TypedMemory.is_valid_at``) governs there; only
+    fibers with a REAL interval (time_start < time_end, e.g. an extracted date
+    range) are event-time filtered here.
     """
-    if fiber.time_start is not None and fiber.time_start > dt:
+    start = fiber.time_start
+    end = fiber.time_end
+    if start is not None and end is not None and start == end:
+        return True
+    if start is not None and start > dt:
         return False
-    if fiber.time_end is not None and fiber.time_end < dt:
+    if end is not None and end < dt:
         return False
     return True
 
@@ -162,6 +175,9 @@ class ReflexPipeline:
         self._activation_caches: collections.OrderedDict[str, Any] = collections.OrderedDict()
         self._priming_metrics: collections.OrderedDict[str, Any] = collections.OrderedDict()
         self._max_session_cache = 256
+        # U2: per-fiber effective trust from the last _find_matching_fibers call
+        # (only populated when trust_weight > 0). Surfaced into result.metadata.
+        self._last_trust_map: dict[str, float] = {}
 
         # Adaptive depth selection (Bayesian priors)
         self._adaptive_selector: AdaptiveDepthSelector | None = None
@@ -652,6 +668,27 @@ class ReflexPipeline:
                 },
             },
         )
+
+        # U2: surface trust/recency calibration when active (no-op at neutral defaults).
+        _tw = max(0.0, min(1.0, self._config.trust_weight))
+        _rw = max(0.0, min(1.0, self._config.recency_weight))
+        if _tw > 0.0 and self._last_trust_map:
+            result.metadata["trust_factors"] = dict(self._last_trust_map)
+            result.metadata["trust_weight"] = _tw
+        if _rw != 1.0:
+            result.metadata["recency_weight"] = _rw
+        if result.score_breakdown is not None and (_tw > 0.0 or _rw != 1.0):
+            _top_trust = (
+                self._last_trust_map.get(result.fibers_matched[0], self._config.trust_default)
+                if result.fibers_matched and self._last_trust_map
+                else 1.0
+            )
+            _trust_factor = (1.0 - _tw) + _tw * _top_trust if _tw > 0.0 else 1.0
+            result.score_breakdown = dataclasses.replace(
+                result.score_breakdown,
+                trust_factor=_trust_factor,
+                recency_factor=_rw,
+            )
 
         # Update priming cache and metrics (non-critical)
         if session_id and _priming_result is not None:
@@ -1751,6 +1788,20 @@ class ReflexPipeline:
         fw = self._config.freshness_weight
         halflife = self._config.recency_halflife_hours
         tag_boost = self._config.tag_match_boost
+        # Clamp weights to [0,1] at point of use so a hand-edited out-of-range config
+        # can never invert/corrupt the score (the blend formulas assume [0,1]).
+        rw = max(0.0, min(1.0, self._config.recency_weight))
+        tw = max(0.0, min(1.0, self._config.trust_weight))
+        trust_default = self._config.trust_default
+
+        # Trust map (fiber_id -> effective trust) is built ONLY when trust weighting is
+        # active, so the neutral default (trust_weight=0.0) does ZERO extra storage reads.
+        # Cap = 20 top neurons x limit_per_neuron=3 = the max find_fibers_batch returns.
+        _trust_map_cap = 60
+        trust_map: dict[str, float] = {}
+        if tw > 0.0 and fibers:
+            trust_map = await self._build_trust_map(fibers[:_trust_map_cap], trust_default)
+        self._last_trust_map = trust_map
 
         def _fiber_score(fiber: Fiber) -> float:
             # --- Base quality: salience * recency * conductivity ---
@@ -1758,6 +1809,11 @@ class ReflexPipeline:
             if fiber.last_conducted:
                 hours_ago = (utcnow() - fiber.last_conducted).total_seconds() / 3600
                 recency = max(0.1, 1.0 / (1.0 + math.exp((hours_ago - halflife) / (halflife / 2))))
+
+            # U2 recency calibration (branch-guarded no-op at recency_weight=1.0):
+            # dampen the recency factor toward neutral (1.0) as recency_weight drops.
+            if rw != 1.0:
+                recency = (1.0 - rw) + rw * recency
 
             base_score = fiber.salience * recency * fiber.conductivity
 
@@ -1840,11 +1896,42 @@ class ReflexPipeline:
                         if overlap > 0.3:
                             score += overlap * 0.2
 
+            # U2 trust calibration (branch-guarded no-op at trust_weight=0.0):
+            # blend the final score toward the fiber's effective trust.
+            if tw > 0.0:
+                trust = trust_map.get(fiber.id, trust_default)
+                score *= (1.0 - tw) + tw * trust
+
             return score
 
         fibers.sort(key=_fiber_score, reverse=True)
 
         return fibers[:10]
+
+    async def _build_trust_map(self, fibers: list[Fiber], trust_default: float) -> dict[str, float]:
+        """Resolve per-fiber effective trust for scoring (batch, memoised sources).
+
+        Called only when ``trust_weight > 0``. Uses the batch typed-memory fetch (one
+        query, inline brain_id) plus a per-source cache, so trust weighting adds at
+        most one typed-memory batch read + one source read per distinct source.
+        """
+        from surreal_memory.core.source import Source
+        from surreal_memory.engine.trust import resolve_effective_trust
+
+        fiber_ids = [f.id for f in fibers]
+        tms = await self._storage.get_typed_memories_batch(fiber_ids)
+        source_cache: dict[str, Source | None] = {}
+        trust_map: dict[str, float] = {}
+        for fid in fiber_ids:
+            tm = tms.get(fid)
+            source: Source | None = None
+            if tm is not None and tm.source and tm.source.startswith("source:"):
+                src_id = tm.source[len("source:") :]
+                if src_id not in source_cache:
+                    source_cache[src_id] = await self._storage.get_source(src_id)
+                source = source_cache[src_id]
+            trust_map[fid] = resolve_effective_trust(tm, source, trust_default)
+        return trust_map
 
     async def query_with_stimulus(
         self,

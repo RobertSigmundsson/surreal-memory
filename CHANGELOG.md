@@ -7,6 +7,83 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.9.0] — Memory you can trust
+
+The trust release: memories now carry validity over time, recall stops surfacing facts
+that have been replaced by newer ones, and both the MCP tools and the dashboard can
+tell you *how much to trust an answer* — not just what the answer is.
+
+**In practice**, this is the difference between:
+
+```
+smem_remember "Alex lives in Oslo"
+smem_remember "Alex moved to Bergen"
+smem_recall "where does Alex live?"
+```
+
+Before 2.9.0, both facts could surface side by side, leaving it to the reader to guess
+which one is current. Now, recall automatically resolves this: the old fact is marked
+superseded and stays out of the default answer ("Bergen"), while remaining fully
+recoverable — either for its own sake (`include_superseded: true` returns both, with
+the timeline) or for a specific point in time (`valid_at: "2026-01-01"` recalls what was
+true back then, i.e. "Oslo"). Nothing needs to be deleted or manually corrected — the
+old fact's history is preserved, just no longer presented as current by default.
+
+### Changed
+
+- **Superseded facts are hard-filtered from recall by default** (the one intended
+  default-behaviour change in this release). When a newer fact replaces an older one,
+  the old fact's validity window is closed (`valid_until` set) and it no longer
+  surfaces in `smem_recall` by default. Three escape hatches if you need the full
+  history: `include_superseded: true` per call, the environment variable
+  `SURREAL_MEMORY_DISABLE_SUPERSEDED_FILTER` to disable the filter process-wide
+  (superseded facts still surface, just demoted in ranking), or `valid_at: "<ISO
+  timestamp>"` to recall the state of the world as of a specific moment.
+- `smem_stats` now reports `conflict_rate` (active conflicts ÷ neurons); `smem_uncertainty`
+  and the dashboard report `contradiction_rate` (active conflicts ÷ typed memories) — two
+  distinct, consistently-named metrics instead of one overloaded name.
+
+### Added
+
+- **Schema v9** — the storage schema that makes all of the above possible.
+  Migration is automatic, additive, and idempotent (SurrealDB 8→9, SQLite 38→39): it
+  only adds new fields (typed-memory `valid_from` / `valid_until` / `superseded_by`, a
+  `retrieval_trace` table, `source.trust`) and never touches or removes existing data.
+  Upgrading is a normal `pip install --upgrade`; no manual migration step is required.
+- **Trust & recency calibration** — you can now tell surreal-memory how much to trust
+  different sources, and how quickly relevance should decay with age, instead of
+  treating every memory as equally reliable and equally fresh forever. Configurable
+  `trust_weight` / `recency_weight` / `trust_default` on the brain, and a `trust` field
+  on `smem_source`; recall factors in per-source, per-source-type, and per-label trust
+  when ranking results. The defaults are neutral, so existing brains rank results
+  exactly as before until you opt in by setting a trust score somewhere.
+- **Per-fact supersession** (the mechanism behind the trust behaviour above): a hard
+  recall filter plus `valid_at` point-in-time recall plus the escape hatch described
+  above. Supersession happens automatically when you remember something that
+  contradicts an existing fact, or manually via `smem_conflicts` (`keep_new`).
+  `smem_provenance` can trace the "replaced by / replaces" lineage in both directions,
+  and `smem_lifecycle action=backfill_supersession` retroactively stamps supersession
+  onto conflicts that were resolved before this feature existed.
+- **Queryable retrieval traces** — an opt-in, off-by-default record of *why* a recall
+  returned what it did. Pass `trace: true` to `smem_recall` to get back a `trace_id`,
+  then inspect it later with `smem_provenance action=traces` / `action=trace_get`. Useful
+  for debugging "why didn't it remember X" or auditing what informed a given answer;
+  traces are pruned automatically during consolidation so they don't accumulate forever.
+- **Uncertainty surfacing** — a direct answer to "how much should I trust this?".
+  `smem_uncertainty` gives you an overview (or drills into contradictions, drift,
+  soon-expiring memories, or low-evidence facts specifically), and `smem_recall
+  include_uncertainty: true` attaches a summary of the same signals to a single recall.
+- **Dashboard**: a new **Uncertainty** page visualizing all of the above at a glance
+  (via a new `/api/dashboard/uncertainty` endpoint), and the existing Health page/report
+  now surface `conflict_rate` and `contradiction_count` alongside the brain's grade.
+
+### Fixed
+
+- SurrealDB record-id comparison: `id = $bare` never matched a `RecordID` — sources
+  (`get` / `update` / `delete_source`) now match via `type::record`.
+- SurrealDB fiber-id normalization: `get_typed_memory` and batch lookups now resolve both the
+  original (dash) and loaded (underscore) id forms, restoring recall's sources / trust map.
+
 ## [2.8.0] — 2026-07-11
 
 ### Removed

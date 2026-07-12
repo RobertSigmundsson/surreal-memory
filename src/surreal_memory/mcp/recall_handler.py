@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
+import dataclasses
 import logging
+import os
+import random
 from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
@@ -68,8 +72,8 @@ async def _rebuild_context_for_fibers(
         brain_id=brain_id,
         clean_for_prompt=clean_for_prompt,
     )
-    if new_ctx and hasattr(result, "_replace"):
-        return result._replace(context=new_ctx)
+    if new_ctx:
+        return _result_replace(result, context=new_ctx)
     return result
 
 
@@ -104,6 +108,42 @@ async def _rerank_by_recency(fiber_ids: list[str], storage: Any) -> list[str]:
     pairs = [(fid, await _ts(fid)) for fid in fiber_ids]
     pairs.sort(key=lambda p: p[1], reverse=True)
     return [p[0] for p in pairs]
+
+
+def _result_replace(result: Any, **fields: Any) -> Any:
+    """Return ``result`` with the given fields replaced.
+
+    Production ``RetrievalResult`` is a (mutable) dataclass with no ``_replace``;
+    test doubles are namedtuples or MagicMocks that DO expose ``_replace``. Handle
+    all three so post-filter mutations — dropping fibers (expiry / trust / tier /
+    supersession) AND rebuilding ``context`` so the answer prose reflects the
+    surviving set — take effect on the real result object, not only on
+    namedtuple/mock ones.
+    """
+    if dataclasses.is_dataclass(result) and not isinstance(result, type):
+        try:
+            return dataclasses.replace(result, **fields)
+        except Exception:  # pragma: no cover - defensive
+            logger.debug("dataclasses.replace failed on result", exc_info=True)
+    replace = getattr(result, "_replace", None)
+    if callable(replace):
+        try:
+            return replace(**fields)
+        except Exception:  # pragma: no cover - defensive
+            logger.debug("_replace failed on result", exc_info=True)
+    return result
+
+
+def _superseded_hard_filter_enabled() -> bool:
+    """Whether valid_until-set (superseded) facts are hard-filtered from recall.
+
+    This is the ONE intended default-behaviour change of v2.9.0. Escape hatch: set
+    SURREAL_MEMORY_DISABLE_SUPERSEDED_FILTER to a truthy value to DISABLE the hard
+    filter, in which case superseded facts still surface but are demoted 0.25x via
+    their old anchor's ``_superseded`` neuron metadata (the second line of defence).
+    """
+    raw = os.getenv("SURREAL_MEMORY_DISABLE_SUPERSEDED_FILTER", "").strip().lower()
+    return raw not in ("1", "true", "yes", "on")
 
 
 class RecallHandler:
@@ -223,7 +263,11 @@ class RecallHandler:
             _require_brain_id,
         )
 
-        # Cross-brain recall: early return if brains parameter is provided
+        # Cross-brain recall: early return if brains parameter is provided.
+        # NOTE: retrieval tracing (trace=true / sampling) is intentionally NOT applied
+        # to cross-brain recall — the merged multi-brain result has no single brain_id
+        # or RetrievalResult to attribute a trace to. Documented in the smem_recall
+        # 'trace' schema description.
         brain_names = args.get("brains")
         if brain_names and isinstance(brain_names, list) and len(brain_names) > 0:
             return await self._cross_brain_recall(args, brain_names)
@@ -319,6 +363,10 @@ class RecallHandler:
                     valid_at = valid_at.astimezone(UTC).replace(tzinfo=None)
             except (ValueError, TypeError):
                 return {"error": f"Invalid valid_at datetime: {args['valid_at']}"}
+
+        # U3: superseded facts (valid_until set) are hard-filtered from recall by
+        # default; opt back in per-call with include_superseded=true.
+        include_superseded = bool(args.get("include_superseded", False))
 
         await self.hooks.emit(HookEvent.PRE_RECALL, {"query": query, "depth": depth.value})
 
@@ -454,6 +502,7 @@ class RecallHandler:
         # same single pass. ``fibers_matched`` is a ``list[str]`` in production
         # (RetrievalResult); guard defensively so a non-list value can never make
         # ``list()``/iteration raise and abort recall.
+        superseded_excluded = 0
         needs_post_filter = isinstance(result.fibers_matched, list) and bool(result.fibers_matched)
         if needs_post_filter:
             original_matched = list(result.fibers_matched)
@@ -469,6 +518,25 @@ class RecallHandler:
                     # expiry drops the fiber (never a truthy non-bool).
                     if tm is not None and getattr(tm, "is_expired", False) is True:
                         continue
+
+                    # Supersession / point-in-time filter (U3). tm is already fetched
+                    # in this pass, so this adds ZERO extra storage reads.
+                    if tm is not None:
+                        if valid_at is not None:
+                            # point-in-time: keep only facts that were valid then
+                            # ("where did Emma live before?").
+                            if not tm.is_valid_at(valid_at):
+                                superseded_excluded += 1
+                                continue
+                        elif (
+                            isinstance(tm.valid_until, datetime)
+                            and not include_superseded
+                            and _superseded_hard_filter_enabled()
+                        ):
+                            # default: hard-filter superseded facts (the one intended
+                            # default-behaviour change). Escape hatch keeps them (demoted).
+                            superseded_excluded += 1
+                            continue
 
                     # Trust filter
                     if min_trust is not None:
@@ -490,8 +558,8 @@ class RecallHandler:
                 # Only rewrite the result when the filter actually dropped a
                 # fiber; leaving it untouched otherwise keeps the original result
                 # object intact (avoids needless copies / mock corruption).
-                if len(filtered_fibers) < len(original_matched) and hasattr(result, "_replace"):
-                    result = result._replace(fibers_matched=filtered_fibers)
+                if len(filtered_fibers) < len(original_matched):
+                    result = _result_replace(result, fibers_matched=filtered_fibers)
             except Exception:
                 logger.debug("Post-filter (trust/tier) failed (non-critical)", exc_info=True)
 
@@ -562,8 +630,8 @@ class RecallHandler:
                             brain_id=brain_id,
                             clean_for_prompt=clean_for_prompt,
                         )
-                        if new_ctx and hasattr(result, "_replace"):
-                            result = result._replace(context=new_ctx)
+                        if new_ctx:
+                            result = _result_replace(result, context=new_ctx)
             except Exception:
                 logger.debug("prefer_recent rerank failed, keeping default order", exc_info=True)
 
@@ -603,6 +671,14 @@ class RecallHandler:
                     "tags": list(tm.tags) if tm and tm.tags else [],
                     "created_at": fiber.created_at.isoformat() if fiber.created_at else None,
                 }
+                # U3: validity / supersession lineage for the caller.
+                if tm is not None:
+                    if tm.valid_from is not None:
+                        item["valid_from"] = tm.valid_from.isoformat()
+                    if tm.valid_until is not None:
+                        item["valid_until"] = tm.valid_until.isoformat()
+                    if tm.superseded_by is not None:
+                        item["superseded_by"] = tm.superseded_by
                 # Include structure metadata if present
                 structure = anchor.metadata.get("_structure") if anchor.metadata else None
                 if structure:
@@ -638,12 +714,18 @@ class RecallHandler:
         if budget_stats is not None:
             response["budget_stats"] = budget_stats
 
+        # U3: how many hits were dropped by the supersession / point-in-time filter.
+        if superseded_excluded:
+            response["superseded_excluded_count"] = superseded_excluded
+
         if result.score_breakdown is not None:
             response["score_breakdown"] = {
                 "base_activation": round(result.score_breakdown.base_activation, 4),
                 "intersection_boost": round(result.score_breakdown.intersection_boost, 4),
                 "freshness_boost": round(result.score_breakdown.freshness_boost, 4),
                 "frequency_boost": round(result.score_breakdown.frequency_boost, 4),
+                "trust_factor": round(result.score_breakdown.trust_factor, 4),
+                "recency_factor": round(result.score_breakdown.recency_factor, 4),
             }
 
         # Surface conflict info from retrieval
@@ -706,6 +788,7 @@ class RecallHandler:
                             "source_type": src.source_type.value,
                             "version": src.version,
                             "status": src.status.value,
+                            "trust": src.trust,
                         }
                 if source_map:
                     response["sources"] = source_map
@@ -821,7 +904,98 @@ class RecallHandler:
         if alert_info:
             response.update(alert_info)
 
+        # U5: opt-in uncertainty block (additive; existing has_conflicts/include_conflicts
+        # untouched). Only attached when there is an actual uncertainty signal.
+        if args.get("include_uncertainty"):
+            try:
+                from surreal_memory.engine.uncertainty_report import build_uncertainty_block
+
+                block = await build_uncertainty_block(storage, result, brain.config)
+                if block is not None:
+                    response["uncertainty"] = block
+            except Exception:
+                logger.debug("Uncertainty block build failed (non-critical)", exc_info=True)
+
+        # U4: retrieval-trace telemetry (opt-in; off by default → true no-op).
+        await self._maybe_persist_trace(response, result, query, args, brain, recall_mode, storage)
+
         return response
+
+    async def _maybe_persist_trace(
+        self,
+        response: dict[str, Any],
+        result: Any,
+        query: str,
+        args: dict[str, Any],
+        brain: Any,
+        mode: str,
+        storage: Any,
+    ) -> None:
+        """Persist a compact RetrievalTrace for this recall, when enabled.
+
+        Neutral default (trace.enabled=false) → fully skipped: no build, no task,
+        no storage call. ``trace=true`` per-call forces one trace and returns its
+        ``trace_id`` in the response WITHOUT flipping the global config (persisted
+        synchronously since the caller asked for the id). Config-enabled sampling
+        fires-and-forgets via a strong-ref'd task. Never raises — telemetry must
+        not break recall.
+        """
+        try:
+            trace_cfg = getattr(self.config, "trace", None)
+            per_call = bool(args.get("trace", False))
+            if trace_cfg is None:
+                return
+            if not per_call:
+                if not trace_cfg.enabled:
+                    return
+                if trace_cfg.sample_rate < 1.0 and random.random() >= trace_cfg.sample_rate:
+                    return
+
+            from surreal_memory.engine.trace_builder import build_retrieval_trace
+
+            config_snapshot = {
+                "trust_weight": getattr(brain.config, "trust_weight", 0.0),
+                "recency_weight": getattr(brain.config, "recency_weight", 1.0),
+                "trace_sample_rate": trace_cfg.sample_rate,
+            }
+            trace = build_retrieval_trace(
+                result,
+                query=query,
+                brain_id=str(getattr(storage, "brain_id", None) or getattr(brain, "id", "") or ""),
+                mode=mode,
+                args=args,
+                config_snapshot=config_snapshot,
+                session_id=args.get("session_id"),
+            )
+
+            if per_call:
+                # Synchronous: the caller explicitly asked for the id back, so surface
+                # a persistence failure to them rather than swallowing it silently.
+                try:
+                    await storage.add_retrieval_trace(trace)
+                    response["trace_id"] = trace.id
+                except Exception:
+                    logger.debug("Per-call retrieval trace persist failed", exc_info=True)
+                    response["trace_error"] = "trace requested but could not be persisted"
+            else:
+                # Fire-and-forget with a strong reference (avoids GC of the task).
+                tasks = getattr(self, "_trace_tasks", None)
+                if tasks is None:
+                    tasks = set()
+                    self._trace_tasks = tasks
+                task = asyncio.create_task(self._persist_trace_safe(storage, trace))
+                tasks.add(task)
+                task.add_done_callback(tasks.discard)
+        except Exception:
+            logger.debug("Retrieval trace scheduling failed (non-critical)", exc_info=True)
+
+    @staticmethod
+    async def _persist_trace_safe(storage: Any, trace: Any) -> None:
+        """Persist one trace, swallowing errors (background telemetry task)."""
+        try:
+            await storage.add_retrieval_trace(trace)
+        except Exception:
+            logger.debug("Retrieval trace persist failed (non-critical)", exc_info=True)
 
     async def _cross_brain_recall(
         self, args: dict[str, Any], brain_names: list[str]

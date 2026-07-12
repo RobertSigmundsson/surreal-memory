@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Sequence
 from datetime import datetime, timedelta
 from typing import Any
 
@@ -14,7 +15,7 @@ from surreal_memory.core.memory_types import (
     TypedMemory,
 )
 from surreal_memory.storage.sqlite_row_mappers import provenance_to_dict
-from surreal_memory.storage.surrealdb._ids import _to_surreal_id
+from surreal_memory.storage.surrealdb._ids import _safe_brain_id, _to_surreal_id
 from surreal_memory.utils.timeutils import utcnow
 
 logger = logging.getLogger(__name__)
@@ -93,6 +94,9 @@ def _row_to_typed_memory(row: dict[str, Any]) -> TypedMemory:
         trust_score=trust_score,
         source=row.get("source"),
         tier=str(row.get("tier") or "warm"),
+        valid_from=_parse_datetime(row.get("valid_from")),
+        valid_until=_parse_datetime(row.get("valid_until")),
+        superseded_by=(str(row["superseded_by"]) if row.get("superseded_by") is not None else None),
     )
 
 
@@ -135,6 +139,9 @@ class SurrealDBTypedMemoryMixin:
             "project_id": typed_memory.project_id,
             "expires_at": typed_memory.expires_at,
             "tier": typed_memory.tier,
+            "valid_from": typed_memory.valid_from,
+            "valid_until": typed_memory.valid_until,
+            "superseded_by": typed_memory.superseded_by,
             "metadata": full_metadata,
             "created_at": typed_memory.created_at,
             "updated_at": utcnow(),
@@ -159,10 +166,14 @@ class SurrealDBTypedMemoryMixin:
 
     async def get_typed_memory(self, fiber_id: str) -> TypedMemory | None:
         brain_id = self._get_brain_id()
+        # Match on the sanitized record id so BOTH the original dash uuid and the
+        # underscore record-id form resolve (a Fiber loaded from SurrealDB carries the
+        # underscore form, while typed_memory.fiber_id is stored as the dash uuid).
         rows = await self._query(
-            "SELECT * FROM typed_memory WHERE brain_id = $brain_id AND fiber_id = $fiber_id LIMIT 1",
+            "SELECT * FROM typed_memory WHERE brain_id = $brain_id "
+            "AND id = type::record('typed_memory', $sid) LIMIT 1",
             brain_id=brain_id,
-            fiber_id=fiber_id,
+            sid=_to_surreal_id(fiber_id),
         )
         if not rows:
             return None
@@ -212,6 +223,48 @@ class SurrealDBTypedMemoryMixin:
             memories = [m for m in memories if tags.issubset(m.tags)]
 
         return memories
+
+    async def get_typed_memories_batch(self, fiber_ids: Sequence[str]) -> dict[str, TypedMemory]:
+        ids = list(fiber_ids)
+        if not ids:
+            return {}
+        brain_id = self._get_brain_id()
+        # Normalise each query id to its sanitized record-id part so BOTH the dash
+        # uuid and the underscore record-id form resolve (a Fiber loaded from
+        # SurrealDB carries the underscore form; typed_memory.fiber_id is the dash
+        # uuid). Inline the validated brain_id literal so the brain_id index is used.
+        lit = f'"{_safe_brain_id(brain_id)}"'
+        sid_to_fid: dict[str, str] = {}
+        for fid in ids:
+            sid_to_fid.setdefault(_to_surreal_id(fid), fid)
+        sids = list(sid_to_fid.keys())
+        rows = await self._query(
+            f"SELECT * FROM typed_memory WHERE brain_id = {lit} AND meta::id(id) IN $sids",
+            sids=sids,
+        )
+        result: dict[str, TypedMemory] = {}
+        for r in rows:
+            tm = _row_to_typed_memory(r)
+            orig = sid_to_fid.get(_to_surreal_id(tm.fiber_id))
+            if orig is not None:
+                result[orig] = tm
+        return result
+
+    async def get_expiring_memories(
+        self, within_days: int = 7, limit: int = 200
+    ) -> list[TypedMemory]:
+        brain_id = self._get_brain_id()
+        capped = min(int(limit), 1000)
+        lit = f'"{_safe_brain_id(brain_id)}"'
+        deadline = utcnow() + timedelta(days=within_days)
+        rows = await self._query(
+            f"SELECT * FROM typed_memory WHERE brain_id = {lit} "
+            "AND expires_at IS NOT NONE AND expires_at > time::now() "
+            "AND expires_at <= $deadline "
+            f"ORDER BY expires_at ASC LIMIT {capped}",
+            deadline=deadline,
+        )
+        return [_row_to_typed_memory(r) for r in rows]
 
     async def count_typed_memories(
         self,
@@ -267,6 +320,9 @@ class SurrealDBTypedMemoryMixin:
                 "project_id": typed_memory.project_id,
                 "expires_at": typed_memory.expires_at,
                 "tier": typed_memory.tier,
+                "valid_from": typed_memory.valid_from,
+                "valid_until": typed_memory.valid_until,
+                "superseded_by": typed_memory.superseded_by,
                 "metadata": full_metadata,
                 "updated_at": utcnow(),
             },

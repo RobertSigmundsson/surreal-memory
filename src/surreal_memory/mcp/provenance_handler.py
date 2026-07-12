@@ -15,6 +15,22 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+def _parse_trust(raw: Any) -> tuple[float | None, str | None]:
+    """Parse an optional smem_source trust arg -> (value, error).
+
+    Absent/None -> (None, None). Out-of-range or non-numeric -> (None, message).
+    """
+    if raw is None:
+        return None, None
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        return None, "trust must be a number in [0.0, 1.0]"
+    if not (0.0 <= value <= 1.0):
+        return None, "trust must be in [0.0, 1.0]"
+    return value, None
+
+
 class ProvenanceHandler:
     """Mixin providing source, provenance, and show handler implementations."""
 
@@ -51,6 +67,10 @@ class ProvenanceHandler:
             raw_metadata = args.get("metadata")
             metadata = raw_metadata if isinstance(raw_metadata, dict) else {}
 
+            trust, trust_error = _parse_trust(args.get("trust"))
+            if trust_error is not None:
+                return {"error": trust_error}
+
             try:
                 source = Source.create(
                     brain_id=brain_id,
@@ -59,6 +79,7 @@ class ProvenanceHandler:
                     version=version,
                     file_hash=file_hash,
                     metadata=metadata,
+                    trust=trust,
                 )
             except ValueError:
                 return {"error": f"Invalid source_type: {args.get('source_type')}"}
@@ -68,6 +89,7 @@ class ProvenanceHandler:
                 "name": source.name,
                 "source_type": source.source_type.value,
                 "status": source.status.value,
+                "trust": source.trust,
             }
 
         if action == "list":
@@ -83,6 +105,7 @@ class ProvenanceHandler:
                         "source_type": s.source_type.value,
                         "version": s.version,
                         "status": s.status.value,
+                        "trust": s.trust,
                         "created_at": s.created_at.isoformat(),
                     }
                     for s in sources
@@ -104,6 +127,7 @@ class ProvenanceHandler:
                 "source_type": source.source_type.value,
                 "version": source.version,
                 "status": source.status.value,
+                "trust": source.trust,
                 "file_hash": source.file_hash,
                 "metadata": source.metadata,
                 "linked_neuron_count": neuron_count,
@@ -115,11 +139,17 @@ class ProvenanceHandler:
             source_id = str(args.get("source_id") or "")
             if not source_id:
                 return {"error": "source_id is required for update"}
+            trust_update: float | None = None
+            if args.get("trust") is not None:
+                trust_update, trust_error = _parse_trust(args.get("trust"))
+                if trust_error is not None:
+                    return {"error": trust_error}
             updated = await storage.update_source(
                 source_id,
                 status=args.get("status"),
                 version=args.get("version"),
                 metadata=args.get("metadata"),
+                trust=trust_update,
             )
             if not updated:
                 return {"error": f"Source '{source_id}' not found"}
@@ -151,14 +181,10 @@ class ProvenanceHandler:
     # ========== Provenance ==========
 
     async def _provenance(self, args: dict[str, Any]) -> dict[str, Any]:
-        """Trace provenance, verify, or approve a neuron."""
+        """Trace provenance / verify / approve a neuron, or query retrieval traces."""
         action = args.get("action", "")
         if not action:
-            return {"error": "action is required (trace, verify, approve)"}
-
-        neuron_id = args.get("neuron_id")
-        if not neuron_id or not isinstance(neuron_id, str):
-            return {"error": "neuron_id is required"}
+            return {"error": "action is required (trace, verify, approve, traces, trace_get)"}
 
         storage = await self.get_storage()
         try:
@@ -166,6 +192,17 @@ class ProvenanceHandler:
         except ValueError:
             logger.error("No brain configured for provenance")
             return {"error": "No brain configured"}
+
+        # Retrieval-trace telemetry queries (U4) — keyed by fiber_id / query / trace_id,
+        # NOT neuron_id, so they are dispatched before the neuron requirement below.
+        if action == "traces":
+            return await self._provenance_traces(storage, args)
+        if action == "trace_get":
+            return await self._provenance_trace_get(storage, args)
+
+        neuron_id = args.get("neuron_id")
+        if not neuron_id or not isinstance(neuron_id, str):
+            return {"error": "neuron_id is required"}
 
         # Verify neuron exists
         neuron = await storage.get_neuron(neuron_id)
@@ -187,7 +224,12 @@ class ProvenanceHandler:
                 storage, neuron_id, SynapseType.APPROVED_BY, actor
             )
 
-        return {"error": f"Unknown action: {action}. Use trace, verify, or approve."}
+        return {
+            "error": (
+                f"Unknown action: {action}. "
+                "Use trace, verify, approve (neuron), or traces, trace_get (retrieval traces)."
+            )
+        }
 
     async def _provenance_trace(self, storage: NeuralStorage, neuron_id: str) -> dict[str, Any]:
         """Trace full provenance chain for a neuron."""
@@ -233,13 +275,74 @@ class ProvenanceHandler:
                     }
                 )
 
+        # U3: supersession lineage — both directions, transitive, cycle-guarded.
+        superseded_by = await self._walk_supersedes(storage, neuron_id, forward=True)
+        supersedes = await self._walk_supersedes(storage, neuron_id, forward=False)
+        for entry in superseded_by:
+            chain.append({"type": "superseded_by", **entry})
+        for entry in supersedes:
+            chain.append({"type": "supersedes", **entry})
+
         return {
             "neuron_id": neuron_id,
             "provenance": chain,
             "has_source": any(e["type"] == "source" for e in chain),
             "is_verified": any(e["type"] == "verified" for e in chain),
             "is_approved": any(e["type"] == "approved" for e in chain),
+            "is_superseded": bool(superseded_by),
+            "supersedes_count": len(supersedes),
         }
+
+    async def _walk_supersedes(
+        self,
+        storage: NeuralStorage,
+        start_neuron_id: str,
+        *,
+        forward: bool,
+        max_depth: int = 32,
+    ) -> list[dict[str, Any]]:
+        """Walk the SUPERSEDES chain from an anchor neuron.
+
+        SUPERSEDES points new_anchor -> old_anchor. ``forward=True`` follows inbound
+        edges (who superseded this, i.e. newer facts); ``forward=False`` follows
+        outbound edges (what this superseded, i.e. older facts). A visited-set guards
+        against cycles and ``max_depth`` bounds pathological chains.
+
+        ``get_synapses`` returns no defined order, so edges are sorted by
+        (created_at, id) for a DETERMINISTIC chain across runs/backends. When a node
+        has multiple edges in one direction (e.g. a fact that superseded several
+        others) this follows the earliest one — a single representative chain.
+        """
+        out: list[dict[str, Any]] = []
+        visited: set[str] = {start_neuron_id}
+        current = start_neuron_id
+        for _ in range(max_depth):
+            if forward:
+                syns = await storage.get_synapses(target_id=current, type=SynapseType.SUPERSEDES)
+            else:
+                syns = await storage.get_synapses(source_id=current, type=SynapseType.SUPERSEDES)
+            # Filter client-side too (some backends/mocks ignore the type kwarg) and
+            # order deterministically.
+            edges = sorted(
+                (s for s in syns if s.type == SynapseType.SUPERSEDES),
+                key=lambda s: (s.created_at.isoformat() if s.created_at else "", s.id),
+            )
+            if not edges:
+                break
+            syn = edges[0]
+            nxt = syn.source_id if forward else syn.target_id
+            if nxt is None or nxt in visited:
+                break
+            out.append(
+                {
+                    "neuron_id": nxt,
+                    "reason": syn.metadata.get("reason"),
+                    "timestamp": syn.created_at.isoformat() if syn.created_at else None,
+                }
+            )
+            visited.add(nxt)
+            current = nxt
+        return out
 
     async def _provenance_add_audit(
         self,
@@ -264,6 +367,72 @@ class ProvenanceHandler:
             "actor": actor,
             "synapse_id": syn.id,
         }
+
+    # ========== Retrieval-trace queries (U4) ==========
+
+    async def _provenance_traces(
+        self, storage: NeuralStorage, args: dict[str, Any]
+    ) -> dict[str, Any]:
+        """List retrieval traces (compact) — "which recalls used memory X / matched query Y".
+
+        Filters: fiber_id (traces whose fiber_ids contain it), query_contains, since (ISO
+        datetime), limit (1..100, default 20). Returns newest-first compact records.
+        """
+        from datetime import datetime
+
+        fiber_id = args.get("fiber_id") or args.get("neuron_id")
+        query_contains = args.get("query_contains")
+        since_raw = args.get("since")
+        since = None
+        if isinstance(since_raw, str) and since_raw:
+            try:
+                since = datetime.fromisoformat(since_raw)
+                if since.tzinfo is not None:
+                    from datetime import UTC
+
+                    since = since.astimezone(UTC).replace(tzinfo=None)
+            except ValueError:
+                return {"error": f"Invalid since datetime: {since_raw}"}
+
+        try:
+            limit = max(1, min(int(args.get("limit", 20)), 100))
+        except (TypeError, ValueError):
+            limit = 20
+
+        traces = await storage.find_retrieval_traces(
+            fiber_id=fiber_id if isinstance(fiber_id, str) else None,
+            query_contains=query_contains if isinstance(query_contains, str) else None,
+            since=since,
+            limit=limit,
+        )
+        return {
+            "traces": [
+                {
+                    "id": t.id,
+                    "query": t.query,
+                    "mode": t.mode,
+                    "depth_used": t.depth_used,
+                    "confidence": t.confidence,
+                    "fiber_ids": list(t.fiber_ids),
+                    "session_id": t.session_id,
+                    "created_at": t.created_at.isoformat() if t.created_at else None,
+                }
+                for t in traces
+            ],
+            "count": len(traces),
+        }
+
+    async def _provenance_trace_get(
+        self, storage: NeuralStorage, args: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Get one full retrieval-trace record by id — "what fed answer X"."""
+        trace_id = args.get("trace_id")
+        if not trace_id or not isinstance(trace_id, str):
+            return {"error": "trace_id is required for trace_get"}
+        trace = await storage.get_retrieval_trace(trace_id)
+        if trace is None:
+            return {"error": f"Retrieval trace '{trace_id}' not found"}
+        return {"trace": trace.to_dict()}
 
     # ========== Show ==========
 
