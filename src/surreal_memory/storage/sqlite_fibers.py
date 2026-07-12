@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, Any, Literal
 
 from surreal_memory.core.fiber import Fiber
 from surreal_memory.storage.sqlite_row_mappers import row_to_fiber
+from surreal_memory.utils.geo import GeoFilter, fiber_within
 from surreal_memory.utils.timeutils import utcnow
 
 
@@ -161,6 +162,7 @@ class SQLiteFiberMixin:
         min_salience: float | None = None,
         metadata_key: str | None = None,
         limit: int = 100,
+        near: GeoFilter | None = None,
     ) -> list[Fiber]:
         limit = min(limit, 1000)
         conn = self._ensure_read_conn()
@@ -189,9 +191,26 @@ class SQLiteFiberMixin:
             query += " AND json_extract(metadata, ?) IS NOT NULL"
             params.append(f'$."{metadata_key}"')
 
-        # When tags filter is needed, fetch more rows to compensate for
-        # post-SQL filtering (tags are stored as JSON arrays)
-        fetch_limit = min(limit * 3, 3000) if tags else limit
+        if tags:
+            # Push the tag filter into SQL (AND semantics) so LIMIT applies to already
+            # tag-matched rows. Without this, a brain with more fibers than the fetch
+            # window returns an arbitrary slice and a tagged subset (e.g. a chat session)
+            # can vanish entirely. Mirrors find_fibers_batch's json_each pattern.
+            for tag in tags:
+                query += " AND EXISTS (SELECT 1 FROM json_each(tags) WHERE value = ?)"
+                params.append(tag)
+
+        if near is not None:
+            # Server-side pre-filter: drop locationless fibers. A lat/lon bbox is
+            # deliberately NOT used — a naive metres-per-degree box false-excludes true
+            # matches near the equator (meridian degree ≈ 110.6 km < the 111.3 km mean)
+            # and near the poles (longitude span blows up), and those rows would never
+            # reach the exact haversine post-filter. On a non-indexed JSON column the
+            # box saves nothing, so correctness wins: exact haversine does the bounding.
+            query += " AND json_extract(metadata, '$.location.lat') IS NOT NULL"
+
+        # When tags/near filtering happens in Python, fetch more rows to compensate.
+        fetch_limit = min(limit * 3, 3000) if (tags or near is not None) else limit
         query += " ORDER BY salience DESC LIMIT ?"
         params.append(fetch_limit)
 
@@ -202,6 +221,10 @@ class SQLiteFiberMixin:
         # Filter by tags in Python (JSON array doesn't support efficient set operations)
         if tags is not None:
             fibers = [f for f in fibers if tags.issubset(f.tags)]
+
+        # Exact geospatial hard filter (haversine) — the source of truth for `near`.
+        if near is not None:
+            fibers = [f for f in fibers if fiber_within(f, near)]
 
         return fibers[:limit]
 

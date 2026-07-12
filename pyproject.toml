@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "surreal-memory"
-version = "2.9.0"
+version = "2.10.0"
 description = "Reflex-based memory system for AI agents with SurrealDB backend — retrieval through activation, not search"
 readme = "README.md"
 license = "MIT"
@@ -78,6 +78,9 @@ graphiti = [
 llamaindex = [
     "llama-index-core>=0.10.0",
 ]
+langchain = [
+    "langchain-core>=0.3,<2",
+]
 watch = [
     "watchdog>=4.0.0",
 ]
@@ -109,7 +112,7 @@ integration = [
     "surreal-memory[chromadb,mem0]",
 ]
 all = [
-    "surreal-memory[server,surrealdb,embeddings-gemini,nlp,integration]",
+    "surreal-memory[server,surrealdb,embeddings-gemini,nlp,integration,langchain]",
 ]
 dev = [
     "pytest>=7.0",
@@ -276,6 +279,15 @@ warn_unused_ignores = false
 [[tool.mypy.overrides]]
 module = "surreal_memory.engine.doc_extractor"
 disallow_untyped_calls = false
+
+[[tool.mypy.overrides]]
+# langchain-core is an optional extra (not in [dev]); CI's Type Check job type-checks
+# this module without it installed, so BaseRetriever/BaseChatMessageHistory/BaseMessage
+# resolve as Any — same pattern as file_watcher.py's optional `watchdog` base class.
+module = "surreal_memory.adapters.langchain"
+disallow_subclassing_any = false
+warn_unused_ignores = false
+warn_return_any = false
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
