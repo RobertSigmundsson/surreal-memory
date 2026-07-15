@@ -2242,6 +2242,22 @@ class SurrealDBStorage(
             # must never abort the entity write that already succeeded.
             logger.debug("change_log bulk insert failed (%d rows)", len(records), exc_info=True)
 
+    async def record_prune_shadow(self, records: list[dict[str, Any]]) -> int:
+        """Persist prune_shadow counterfactual rows (isolated neurons our full-guard
+        KEEPS that a pinned-only policy would cut). Observability only — never deletes.
+        Returns the number of rows written."""
+        if not records:
+            return 0
+        conn = self._ensure_conn()
+        brain_id = self._get_brain_id()
+        now = utcnow()
+        rows = [
+            {"id": f"psh_{uuid4().hex[:12]}", "brain_id": brain_id, "logged_at": now, **r}
+            for r in records
+        ]
+        await conn.insert("prune_shadow", rows)
+        return len(rows)
+
     async def record_change(
         self,
         entity_type: str,

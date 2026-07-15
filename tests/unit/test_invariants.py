@@ -228,6 +228,70 @@ class TestOrphanDefinitionConsistency:
             "Unpinned orphan should still be pruned"
         )
 
+    @pytest.mark.asyncio
+    async def test_fresh_orphan_survives_prune(self, mixed_storage: InMemoryStorage) -> None:
+        """A freshly-created isolated neuron must survive prune (age grace).
+
+        Isolated single observations are valuable and have not yet had time to
+        form connections. They get the same age grace as connected-but-dead
+        neurons rather than being deleted on the first consolidation. The aged
+        fixture orphans are still pruned; only the fresh one survives.
+        """
+        fresh = Neuron.create(
+            type=NeuronType.ENTITY, content="fresh-obs", neuron_id="n-orphan-fresh"
+        )
+        await mixed_storage.add_neuron(fresh)
+
+        config = ConsolidationConfig(
+            prune_min_inactive_days=0.0,
+            prune_weight_threshold=1.0,
+            prune_isolated_neurons=True,
+        )
+        engine = ConsolidationEngine(mixed_storage, config)
+        await engine.run(strategies=[ConsolidationStrategy.PRUNE], dry_run=False)
+
+        assert await mixed_storage.get_neuron("n-orphan-fresh") is not None, (
+            "Freshly-created isolated neuron must not be pruned"
+        )
+        assert await mixed_storage.get_neuron("n-orphan-1") is None
+        assert await mixed_storage.get_neuron("n-orphan-2") is None
+
+    @pytest.mark.asyncio
+    async def test_prune_shadow_records_guarded_orphan(
+        self, mixed_storage: InMemoryStorage
+    ) -> None:
+        """F6: prune_shadow logs the isolated neuron our full-guard KEEPS that a
+        pinned-only policy would have cut — and NEVER deletes it (observability only).
+        """
+        fresh = Neuron.create(
+            type=NeuronType.ENTITY, content="fresh-shadow-obs", neuron_id="n-shadow-fresh"
+        )
+        await mixed_storage.add_neuron(fresh)
+
+        captured: list[dict[str, object]] = []
+
+        async def _spy(records: list[dict[str, object]]) -> int:
+            captured.extend(records)
+            return len(records)
+
+        mixed_storage.record_prune_shadow = _spy  # type: ignore[method-assign]
+
+        config = ConsolidationConfig(
+            prune_min_inactive_days=0.0,
+            prune_weight_threshold=1.0,
+            prune_isolated_neurons=True,
+            prune_shadow_enabled=True,
+        )
+        engine = ConsolidationEngine(mixed_storage, config)
+        await engine.run(strategies=[ConsolidationStrategy.PRUNE], dry_run=False)
+
+        recorded = [str(r.get("neuron_id", "")) for r in captured]
+        assert any("shadow-fresh" in nid for nid in recorded), (
+            "the guarded fresh orphan must be recorded in prune_shadow"
+        )
+        # observability only — the recorded neuron is NOT deleted
+        assert await mixed_storage.get_neuron("n-shadow-fresh") is not None
+
 
 # ── 2. Sanity smoke: health metrics match raw counts ─────────────
 
