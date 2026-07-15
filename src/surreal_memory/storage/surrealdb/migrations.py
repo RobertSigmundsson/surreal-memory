@@ -35,6 +35,7 @@ import time
 import uuid
 from typing import Any
 
+from surreal_memory.storage.surrealdb._ids import _to_surreal_id
 from surreal_memory.storage.surrealdb.connection import (
     MIN_SERVER_VERSION,
     parse_server_version,
@@ -121,17 +122,6 @@ def _already_exists(exc: Exception) -> bool:
     if type(exc).__name__ == "AlreadyExistsError":
         return True
     return "already exists" in str(exc).lower()
-
-
-def _sanitize_id(raw: str) -> str:
-    """Strip a table prefix and normalise dashes to underscores.
-
-    Mirrors ``store._to_surreal_id`` so migrated endpoint ids match what the
-    query layer produces (``neuron:abc-123`` / ``abc-123`` -> ``abc_123``).
-    """
-    if ":" in raw:
-        raw = raw.rsplit(":", 1)[1]
-    return raw.replace("-", "_")
 
 
 def _record_part(rid: Any) -> str:
@@ -325,8 +315,8 @@ def _to_relation_row(row: dict[str, Any]) -> dict[str, Any]:
     from surrealdb import RecordID  # lazy
 
     sid = _record_part(row["id"])
-    src = _sanitize_id(str(row.get("source_id", "")))
-    tgt = _sanitize_id(str(row.get("target_id", "")))
+    src = _to_surreal_id(str(row.get("source_id", "")))
+    tgt = _to_surreal_id(str(row.get("target_id", "")))
     relation: dict[str, Any] = {
         "id": RecordID("synapse", sid),
         "in": RecordID("neuron", src),
