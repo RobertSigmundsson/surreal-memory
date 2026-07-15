@@ -63,6 +63,11 @@ class ConsolidationConfig:
     prune_weight_threshold: float = 0.05
     prune_min_inactive_days: float = 7.0
     prune_isolated_neurons: bool = True
+    # Observability (F6): when True, log to the `prune_shadow` table which isolated
+    # neurons our full-guard KEEPS that a pinned-only policy (upstream/Toni) would have
+    # cut — a counterfactual audit of the BUG-11 orphan-prune full-guard's value. Never
+    # deletes anything.
+    prune_shadow_enabled: bool = False
     merge_overlap_threshold: float = 0.5
     merge_max_fiber_size: int = 50
     summarize_min_cluster_size: int = 3
@@ -596,6 +601,7 @@ class ConsolidationEngine:
         offset = 0
         orphan_ids: list[str] = []
         dead_ids: list[str] = []
+        shadow_saved: list[dict[str, Any]] = []
         est_batches = (len(connected_neuron_ids | fiber_neuron_ids) // batch_size) + 1
         logger.info(
             "Prune: scanning neurons in %d-row batches (~%d+ batches; embedding "
@@ -670,9 +676,27 @@ class ConsolidationEngine:
                 # never-accessed, unpinned orphans are still pruned after the grace.
                 state = states.get(neuron.id)
                 freq = state.access_frequency if state else 0
+                age_days = (reference_time - neuron.created_at).total_seconds() / 86400
+                # F6 counterfactual (observability, never deletes): an isolated (orphan)
+                # neuron saved ONLY by our full-guard (recently accessed OR still within
+                # the age grace) is one a pinned-only policy would have cut. Record it.
+                if (
+                    self._config.prune_shadow_enabled
+                    and is_orphan
+                    and (freq > 0 or age_days < dead_neuron_days)
+                ):
+                    shadow_saved.append(
+                        {
+                            "neuron_id": neuron.id,
+                            "preview": (neuron.content or "")[:120],
+                            "age_days": round(age_days, 2),
+                            "access_frequency": freq,
+                            "connections": 0,
+                            "reason": "accessed" if freq > 0 else "young",
+                        }
+                    )
                 if freq > 0:
                     continue
-                age_days = (reference_time - neuron.created_at).total_seconds() / 86400
                 if age_days < dead_neuron_days:
                     continue
 
@@ -685,6 +709,19 @@ class ConsolidationEngine:
             offset += len(batch)
             if len(batch) < batch_size:
                 break
+
+        # F6: persist the counterfactual (never deletes) — how many neurons our
+        # full-guard keeps that a pinned-only policy would have cut.
+        if self._config.prune_shadow_enabled and shadow_saved:
+            try:
+                written = await self._storage.record_prune_shadow(shadow_saved)
+                logger.info(
+                    "prune_shadow: recorded %d isolated neurons our full-guard keeps "
+                    "that a pinned-only policy would cut",
+                    written,
+                )
+            except Exception:
+                logger.debug("prune_shadow logging failed (non-fatal)", exc_info=True)
 
         all_prune_ids = orphan_ids + dead_ids
         if dead_ids:
