@@ -644,31 +644,42 @@ class ConsolidationEngine:
                 is_orphan = (
                     neuron.id not in connected_neuron_ids and neuron.id not in fiber_neuron_ids
                 )
-                if is_orphan:
-                    report.neurons_pruned += 1
-                    orphan_ids.append(neuron.id)
-                    continue
 
-                # Dead neuron: has connections but never accessed, old enough.
-                # Never applies to fiber members: reinforce() (retrieval.py) only
+                # Fiber-membership guard (v2.10.5, Toni): a neuron still in a fiber
+                # is never a dead-neuron candidate. reinforce() (retrieval.py) only
                 # bumps access_frequency for the top-10 highest-activation neurons
                 # per recall, so most neurons that are genuinely part of an
                 # actively-recalled fiber still read access_frequency == 0 forever.
                 # Without this guard, "dead" pruning deletes real memory content
                 # (measured live: 57150/63380 neuron_states were fiber members with
                 # access_frequency == 0 — nearly the whole brain was wrongly
-                # eligible). Only a neuron with NO fiber membership at all (already
-                # excluded from is_orphan above only because it still has a direct
-                # synapse connection) is a genuine dead-neuron candidate.
+                # eligible). This is neutral for orphans by definition (an orphan is
+                # not in any fiber), so it only rejects connected-but-fibered dead
+                # candidates; the age/access guards below now protect both paths.
                 if neuron.id in fiber_neuron_ids:
                     continue
+
+                # Access-frequency and age guards apply to BOTH isolated (orphan)
+                # and connected-but-dead neurons (BUG-11). An isolated neuron is NOT
+                # inherently worthless: a single observation is isolated by nature
+                # and has not yet had time to form connections. The old orphan path
+                # short-circuited above these guards and permanently deleted
+                # freshly-created or recently-accessed persistent neurons (data
+                # loss). Give isolated neurons the same age grace and access
+                # protection as connected-but-dead neurons. Genuinely old,
+                # never-accessed, unpinned orphans are still pruned after the grace.
                 state = states.get(neuron.id)
                 freq = state.access_frequency if state else 0
                 if freq > 0:
                     continue
                 age_days = (reference_time - neuron.created_at).total_seconds() / 86400
-                if age_days >= dead_neuron_days:
-                    report.neurons_pruned += 1
+                if age_days < dead_neuron_days:
+                    continue
+
+                report.neurons_pruned += 1
+                if is_orphan:
+                    orphan_ids.append(neuron.id)
+                else:
                     dead_ids.append(neuron.id)
 
             offset += len(batch)

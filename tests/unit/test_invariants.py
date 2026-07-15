@@ -12,6 +12,9 @@ Three categories:
 
 from __future__ import annotations
 
+from dataclasses import replace as dc_replace
+from datetime import timedelta
+
 import pytest
 import pytest_asyncio
 
@@ -26,6 +29,7 @@ from surreal_memory.engine.consolidation import (
 )
 from surreal_memory.engine.diagnostics import DiagnosticsEngine
 from surreal_memory.storage.memory_store import InMemoryStorage
+from surreal_memory.utils.timeutils import utcnow
 
 # ── Shared fixtures ──────────────────────────────────────────────
 
@@ -39,7 +43,8 @@ async def mixed_storage() -> InMemoryStorage:
     - n-fib-a, n-fib-b, n-fib-c: in fiber only (no synapse)
     - n-both: in both synapse and fiber
     - n-anchor: fiber anchor, has synapse
-    - n-orphan-1, n-orphan-2: truly orphaned (no synapse, no fiber)
+    - n-orphan-1, n-orphan-2: truly orphaned (no synapse, no fiber), aged
+      beyond the prune grace period so they remain prunable under the age guard
     """
     store = InMemoryStorage()
     brain = Brain.create(name="mixed", config=BrainConfig(), owner_id="test")
@@ -54,8 +59,16 @@ async def mixed_storage() -> InMemoryStorage:
         Neuron.create(type=NeuronType.SPATIAL, content="fib-c", neuron_id="n-fib-c"),
         Neuron.create(type=NeuronType.CONCEPT, content="both", neuron_id="n-both"),
         Neuron.create(type=NeuronType.ACTION, content="anchor", neuron_id="n-anchor"),
-        Neuron.create(type=NeuronType.ENTITY, content="orphan-1", neuron_id="n-orphan-1"),
-        Neuron.create(type=NeuronType.ENTITY, content="orphan-2", neuron_id="n-orphan-2"),
+        # Aged past the grace period so the age guard still allows pruning;
+        # a fresh orphan is protected (see test_fresh_orphan_survives_prune).
+        dc_replace(
+            Neuron.create(type=NeuronType.ENTITY, content="orphan-1", neuron_id="n-orphan-1"),
+            created_at=utcnow() - timedelta(days=30),
+        ),
+        dc_replace(
+            Neuron.create(type=NeuronType.ENTITY, content="orphan-2", neuron_id="n-orphan-2"),
+            created_at=utcnow() - timedelta(days=30),
+        ),
     ]
     for n in neurons:
         await store.add_neuron(n)
@@ -209,6 +222,34 @@ class TestOrphanDefinitionConsistency:
         assert await mixed_storage.get_neuron("n-orphan-2") is None, (
             "Unpinned orphan should still be pruned"
         )
+
+    @pytest.mark.asyncio
+    async def test_fresh_orphan_survives_prune(self, mixed_storage: InMemoryStorage) -> None:
+        """A freshly-created isolated neuron must survive prune (age grace).
+
+        Isolated single observations are valuable and have not yet had time to
+        form connections. They get the same age grace as connected-but-dead
+        neurons rather than being deleted on the first consolidation. The aged
+        fixture orphans are still pruned; only the fresh one survives.
+        """
+        fresh = Neuron.create(
+            type=NeuronType.ENTITY, content="fresh-obs", neuron_id="n-orphan-fresh"
+        )
+        await mixed_storage.add_neuron(fresh)
+
+        config = ConsolidationConfig(
+            prune_min_inactive_days=0.0,
+            prune_weight_threshold=1.0,
+            prune_isolated_neurons=True,
+        )
+        engine = ConsolidationEngine(mixed_storage, config)
+        await engine.run(strategies=[ConsolidationStrategy.PRUNE], dry_run=False)
+
+        assert await mixed_storage.get_neuron("n-orphan-fresh") is not None, (
+            "Freshly-created isolated neuron must not be pruned"
+        )
+        assert await mixed_storage.get_neuron("n-orphan-1") is None
+        assert await mixed_storage.get_neuron("n-orphan-2") is None
 
 
 # ── 2. Sanity smoke: health metrics match raw counts ─────────────

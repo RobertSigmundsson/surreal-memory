@@ -207,9 +207,12 @@ class TestDeadNeuronPruning:
         engine = ConsolidationEngine(storage, config)
         report = await engine.run(strategies=["prune"])
 
-        # Young neuron IS an orphan (no synapses, no fibers) so it gets pruned as orphan
-        # But it would NOT be pruned as "dead" — the orphan check catches it first
-        assert report.neurons_pruned >= 1
+        # Young neuron IS an orphan (no synapses, no fibers). The orphan path now
+        # shares the dead-neuron guards (pinned + access + age), so a neuron
+        # younger than prune_dead_neuron_days is protected, matching this test's
+        # intent: young neurons are not pruned regardless of connectivity.
+        assert report.neurons_pruned == 0
+        storage.delete_neurons_batch.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_accessed_neurons_not_pruned(self) -> None:
