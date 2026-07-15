@@ -649,7 +649,19 @@ class ConsolidationEngine:
                     orphan_ids.append(neuron.id)
                     continue
 
-                # Dead neuron: has connections but never accessed, old enough
+                # Dead neuron: has connections but never accessed, old enough.
+                # Never applies to fiber members: reinforce() (retrieval.py) only
+                # bumps access_frequency for the top-10 highest-activation neurons
+                # per recall, so most neurons that are genuinely part of an
+                # actively-recalled fiber still read access_frequency == 0 forever.
+                # Without this guard, "dead" pruning deletes real memory content
+                # (measured live: 57150/63380 neuron_states were fiber members with
+                # access_frequency == 0 — nearly the whole brain was wrongly
+                # eligible). Only a neuron with NO fiber membership at all (already
+                # excluded from is_orphan above only because it still has a direct
+                # synapse connection) is a genuine dead-neuron candidate.
+                if neuron.id in fiber_neuron_ids:
+                    continue
                 state = states.get(neuron.id)
                 freq = state.access_frequency if state else 0
                 if freq > 0:
@@ -1690,13 +1702,21 @@ class ConsolidationEngine:
             return
 
         engine = CompressionEngine(self._storage)
+        # Leave headroom under the per-strategy timeout for the initial
+        # get_fibers() scan and report assembly — compressing right up to the
+        # wire risks the outer asyncio.wait_for cancelling mid-fiber instead of
+        # returning a clean, resumable report.
+        time_budget = self._config.strategy_timeout_seconds * 0.8
         compression_report = await engine.run(
             reference_time=reference_time,
             dry_run=dry_run,
+            time_budget_seconds=time_budget,
         )
 
         report.fibers_compressed += compression_report.fibers_compressed
         report.tokens_saved += compression_report.tokens_saved
+        if compression_report.fibers_deferred:
+            report.extra["compress_fibers_deferred"] = compression_report.fibers_deferred
 
     async def _lifecycle(
         self,

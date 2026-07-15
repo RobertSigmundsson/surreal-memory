@@ -7,6 +7,88 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.10.5] — Consolidation scales, prune stops eating memories
+
+Full `smem consolidate` now finishes without per-strategy timeouts on large
+brains, session-less tool events finally build the USED_WITH tool graph, and
+a data-integrity bug in dead-neuron pruning is fixed — see the first entry
+below before relying on `prune`/`consolidate` on an existing brain.
+
+### Fixed
+
+- **`prune` no longer deletes live memory content.** Dead-neuron pruning
+  (`access_frequency == 0` + old enough) never checked fiber membership,
+  unlike orphan detection right above it in the same loop, which does.
+  `reinforce()` only bumps `access_frequency` for the top-10
+  highest-activation neurons per recall, so most neurons that are genuinely
+  part of an actively-recalled fiber read `access_frequency == 0` forever —
+  once prune's delete phase could actually complete (see the next entry),
+  this deleted real memory content instead of dead junk. Measured live:
+  57150 of 63380 neuron_states were fiber members reading
+  `access_frequency == 0` (nearly the whole brain was wrongly eligible).
+  Dead-neuron pruning now skips any neuron that belongs to a fiber, mirroring
+  the orphan-detection guard. **If you've run `consolidate` (prune or `all`)
+  non-dry-run on 2.10.0–2.10.4, check your brain's neuron/synapse counts
+  against a recent backup** — this bug could only fire once prune's delete
+  phase ran to completion, which the timeout below usually prevented, but a
+  smaller brain (or one that later grew past the point where prune was
+  timing out) could have been silently affected.
+- **`prune`'s delete phase no longer costs ~1.2s per neuron.**
+  `delete_neuron`'s synapse-cleanup query — `... WHERE brain_id = $b AND
+  (in = X OR out = X)` — doesn't hit either `idx_synapse_in`/`idx_synapse_out`
+  on SurrealDB 3.2.0: its planner falls back to a full scan across an OR of
+  two different fields regardless of whether brain_id/the record id are
+  inlined or param-bound. Splitting into two single-field DELETEs (each hits
+  its own index) measured ~5ms total instead of ~1.2s — the dominant cost
+  behind prune's 120s timeout once the read-side N+1 was fixed. Added
+  `delete_neurons_batch`/`delete_synapses_batch` to the SurrealDB backend
+  (previously SQLite-only); both are sequential, not concurrent — concurrent
+  deletes raised live `Transaction conflict` errors under SurrealDB's
+  transaction isolation, unlike concurrent reads, which are safe.
+- **`compress` no longer times out on large brains.** On a ~67k-neuron brain
+  the strategy hit the 120s per-strategy budget: `compress_fiber` made one
+  `get_synapse` round trip per synapse id per fiber (~66k across 4.2k eligible
+  fibers) and fetched synapses even for tiers that never use them. Synapses
+  are now fetched in one bounded-concurrent batch and only for the
+  ENTITY_ONLY/TEMPLATE tiers that actually render relations; neuron batch
+  fetches are bounded-concurrent too. The compression run also takes a time
+  budget (80% of the strategy timeout) and reports any remainder as
+  `fibers_deferred` instead of being cancelled mid-run — deferred fibers stay
+  eligible, so repeated runs drain the backlog in O(batch) work per run.
+  Measured live: compress 120s-timeout → 72s clean; full `smem consolidate`
+  zero timeouts. Note: on SurrealDB 3.2.0 a single `id IN [...]` query over
+  RecordIDs measured ~8x *slower* than per-id direct selects (IN-membership
+  skips the primary index), hence concurrency-shaped batching rather than an
+  IN query.
+- **Session-less tool events now form USED_WITH/EFFECTIVE_FOR synapses.**
+  `process_events` dropped every tool event with an empty `session_id` from
+  co-occurrence grouping, so on brains where tool events carry no session
+  (all of them on a hook-fed brain) the tool graph never formed — 0 USED_WITH
+  synapses. Session-less events now fold into one shared time-ordered stream
+  (the same treatment tool-habit mining already uses), still bounded by the
+  co-occurrence window. Verified live: 16 USED_WITH synapses formed from the
+  pending backlog.
+- **Test suite: deflaked the aiosqlite leak-guard pair under `pytest-xdist`**
+  (`KeyError: 'thread'` when its two cooperating tests landed on different
+  workers) by pinning them to one worker via `xdist_group` +
+  `--dist loadgroup`, and isolated two env-sensitive tests from ambient
+  `SURREAL_MEMORY_EMBEDDING_ENDPOINT`/`SURREAL_MEMORY_RERANKER_ENDPOINT`
+  developer environments.
+- **Test suite: the e2e API tests can no longer write into a configured live
+  SurrealDB.** The `client` fixture redirected `SURREAL_MEMORY_DIR` to a temp
+  dir, but a fresh config inherits `storage_backend` from the
+  `SURREAL_MEMORY_STORAGE` env var — on a dev shell exporting
+  `surrealdb` + `SURREALDB_URL`/`SURREALDB_PASS`, the suite created dozens of
+  test brains in the production DB and xdist workers aborted each other with
+  `Transaction write conflict` setup errors. The fixture now forces the
+  sqlite fixture backend, strips the live-DB env vars, and resets the cached
+  `_surrealdb_storage` singleton (which bypasses `_storage_cache`).
+
+### Added
+
+- `get_synapses_batch` on all storage backends (batched on SQLite/SurrealDB,
+  sequential fallback on the base class), mirroring `get_neurons_batch`.
+
 ## [2.10.4] — Tool-usage habits
 
 Tool calls now feed habit learning: repeated tool workflows (Read → Edit →

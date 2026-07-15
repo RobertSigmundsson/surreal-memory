@@ -91,6 +91,13 @@ def _is_auth_error(exc: Exception) -> bool:
 
 _BRAIN_ID_SAFE = re.compile(r"^[a-zA-Z0-9_.\-]+$")
 
+# Bounded concurrency for per-id batch fetches (get_neurons_batch/get_synapses_batch).
+# Pipelines direct record selects over the one shared AsyncSurreal connection;
+# measured ~1.7x over sequential on a 67k-neuron brain, with diminishing
+# returns above this value (single-connection multiplexing, not true parallel
+# sockets).
+_BATCH_FETCH_CONCURRENCY = 16
+
 
 def _brain_literal(brain_id: str) -> str:
     """Return ``brain_id`` as a safe inline SurrealQL string literal.
@@ -634,21 +641,34 @@ class SurrealDBStorage(
         return None
 
     async def get_neurons_batch(self, neuron_ids: list[str]) -> dict[str, Neuron]:
+        """Fetch multiple neurons by id, concurrently over the shared connection.
+
+        A single ``id IN [...]`` query was measured *slower* than per-id direct
+        selects on this SurrealDB version (3.2.0) — IN-membership against a
+        RecordID primary key doesn't use the primary index the way a direct
+        ``neuron:{id}`` fetch does, so it falls back to a scan-like path (same
+        family of index-selection gap as the brain_id-literal-vs-param gotcha
+        elsewhere in this store). Bounded concurrency instead pipelines the
+        direct selects over the one shared connection (~1.7x measured on a
+        67k-neuron brain) without the IN-query regression.
+        """
         if not neuron_ids:
             return {}
-        # Use direct select for each ID (more reliable than IN query with params)
-        results: dict[str, Neuron] = {}
-        for nid in neuron_ids:
+        semaphore = asyncio.Semaphore(_BATCH_FETCH_CONCURRENCY)
+
+        async def _fetch_one(nid: str) -> tuple[str, Neuron | None]:
             sid = _to_surreal_id(nid)
-            try:
-                result = await self._conn.select(f"neuron:{sid}")
-                if result and isinstance(result, list) and len(result) > 0:
-                    neuron = _row_to_neuron(result[0])
-                    # Use the converted ID as key
-                    results[nid] = neuron
-            except Exception:
-                pass
-        return results
+            async with semaphore:
+                try:
+                    result = await self._conn.select(f"neuron:{sid}")
+                except Exception:
+                    return nid, None
+            if result and isinstance(result, list) and len(result) > 0:
+                return nid, _row_to_neuron(result[0])
+            return nid, None
+
+        pairs = await asyncio.gather(*(_fetch_one(nid) for nid in neuron_ids))
+        return {nid: neuron for nid, neuron in pairs if neuron is not None}
 
     async def find_neurons(
         self,
@@ -815,16 +835,21 @@ class SurrealDBStorage(
     async def delete_neuron(self, neuron_id: str) -> bool:
         conn = self._ensure_conn()
         brain_id = self._get_brain_id()
+        safe_brain = _safe_brain_id(brain_id)
         sid = _to_surreal_id(neuron_id)
 
         # Delete connected synapses first (belt-and-braces: SurrealDB also auto-cleans
         # edges when the neuron record is deleted). Endpoints are native in/out now.
-        await self._query(
-            "DELETE synapse WHERE brain_id = $brain_id AND "
-            "(in = type::record('neuron', $nid) OR out = type::record('neuron', $nid))",
-            brain_id=brain_id,
-            nid=sid,
-        )
+        #
+        # Measured live: a single "brain_id = $brain_id AND (in = ... OR out = ...)"
+        # query cost ~1.2s/call regardless of whether brain_id/the record id are
+        # inlined or param-bound — SurrealDB 3.2.0's planner doesn't use either
+        # `idx_synapse_in`/`idx_synapse_out` index across an OR of two different
+        # fields, so it falls back to a full scan. Splitting into two single-field
+        # DELETEs (each hits its own index) measured ~5ms total for both — this was
+        # the dominant cost behind prune's non-dry-run timeout on a large brain.
+        await self._query(f"DELETE synapse WHERE brain_id = '{safe_brain}' AND in = neuron:{sid}")
+        await self._query(f"DELETE synapse WHERE brain_id = '{safe_brain}' AND out = neuron:{sid}")
         # Delete state (record id is state_<sid>, matching the writer in add_neuron)
         await self._query(f"DELETE neuron_state:state_{sid}")
 
@@ -834,6 +859,22 @@ class SurrealDBStorage(
             return True
         except Exception:
             return False
+
+    async def delete_neurons_batch(self, neuron_ids: list[str]) -> int:
+        """Delete multiple neurons sequentially.
+
+        Unlike ``get_neurons_batch``'s reads, concurrent deletes here raised
+        live ``Transaction conflict: Transaction write conflict`` errors —
+        SurrealDB's transaction isolation conflicts on concurrent writes to
+        the same tables (``synapse``, ``change_log``), it doesn't just slow
+        down like concurrent reads do. ``delete_neuron`` is cheap now (~ms,
+        see its docstring), so sequential is already well within budget.
+        """
+        count = 0
+        for nid in neuron_ids:
+            if await self.delete_neuron(nid):
+                count += 1
+        return count
 
     async def has_neuron_by_content_hash(self, content_hash: int) -> bool:
         brain_id = self._get_brain_id()
@@ -951,6 +992,31 @@ class SurrealDBStorage(
             pass
         return None
 
+    async def get_synapses_batch(self, synapse_ids: list[str]) -> dict[str, Synapse]:
+        """Fetch multiple synapses by id, concurrently over the shared connection.
+
+        See ``get_neurons_batch`` for why this is bounded-concurrent per-id
+        selects rather than a single ``id IN [...]`` query.
+        """
+        if not synapse_ids:
+            return {}
+        conn = self._ensure_conn()
+        semaphore = asyncio.Semaphore(_BATCH_FETCH_CONCURRENCY)
+
+        async def _fetch_one(syn_id: str) -> tuple[str, Synapse | None]:
+            sid = _to_surreal_id(syn_id)
+            async with semaphore:
+                try:
+                    result = await conn.select(f"synapse:{sid}")
+                except Exception:
+                    return syn_id, None
+            if result:
+                return syn_id, _row_to_synapse(result[0] if isinstance(result, list) else result)
+            return syn_id, None
+
+        pairs = await asyncio.gather(*(_fetch_one(sid) for sid in synapse_ids))
+        return {sid: synapse for sid, synapse in pairs if synapse is not None}
+
     async def get_synapses(
         self,
         source_id: str | None = None,
@@ -1009,6 +1075,18 @@ class SurrealDBStorage(
             return True
         except Exception:
             return False
+
+    async def delete_synapses_batch(self, synapse_ids: set[str] | list[str]) -> int:
+        """Delete multiple synapses sequentially.
+
+        See ``delete_neurons_batch`` — concurrent writes conflict under
+        SurrealDB's transaction isolation, unlike concurrent reads.
+        """
+        count = 0
+        for sid in synapse_ids:
+            if await self.delete_synapse(sid):
+                count += 1
+        return count
 
     # ================================================================
     # Graph Traversal
