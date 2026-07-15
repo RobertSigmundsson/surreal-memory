@@ -103,7 +103,10 @@ class TestFindNeuronsByIds:
         await st.find_neurons_by_ids(["abc-123", "def-456"])
         (sql,) = _queries(conn)
         assert sql.startswith("SELECT * OMIT embedding_vec FROM neuron:abc_123, neuron:def_456")
-        assert "WHERE" not in sql  # record fetch, not a table scan
+        # Still a pinned-record fetch, not a `FROM neuron` table scan…
+        assert "FROM neuron WHERE" not in sql
+        # …but scoped to the current brain (no cross-brain id read).
+        assert sql.endswith("WHERE brain_id = $brain_id")
 
     async def test_empty_and_unsafe_ids_are_dropped(self):
         st, conn = _store_with_mock_conn()

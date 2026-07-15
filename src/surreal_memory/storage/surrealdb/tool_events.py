@@ -15,6 +15,7 @@ import uuid
 from datetime import datetime, timedelta
 from typing import Any
 
+from surreal_memory.storage.surrealdb._ids import _to_surreal_id
 from surreal_memory.utils.timeutils import utcnow
 
 # Cap per brain to prevent unbounded growth (mirrors the SQLite mixin).
@@ -66,7 +67,7 @@ class SurrealDBToolEventsMixin:
             await conn.insert(
                 "tool_events",
                 {
-                    "id": event_id.replace("-", "_"),
+                    "id": _to_surreal_id(event_id),
                     "event_id": event_id,
                     "brain_id": brain_id,
                     "tool_name": ev.get("tool_name", ""),
