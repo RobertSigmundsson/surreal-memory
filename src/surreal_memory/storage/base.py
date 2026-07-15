@@ -1836,6 +1836,13 @@ class NeuralStorage(ABC):
 
     # ========== Change Log Operations ==========
 
+    async def record_prune_shadow(self, records: list[dict[str, Any]]) -> int:
+        """Persist prune_shadow counterfactual rows — isolated neurons our full-guard
+        KEEPS that a pinned-only policy (upstream/Toni) would have cut. Observability
+        only: NEVER deletes anything. Default is a no-op (0); backends that support it
+        (SurrealDB) override. Returns the number of rows written."""
+        return 0
+
     async def record_change(
         self,
         entity_type: str,
