@@ -15,7 +15,7 @@ import pytest
 
 from surreal_memory.engine.retrieval_types import DepthLevel, RetrievalResult, Subgraph
 from surreal_memory.mcp.server import MCPServer
-from surreal_memory.unified_config import ResponseConfig, ToolTierConfig
+from surreal_memory.unified_config import ResponseConfig, ToolTierConfig, WriteGateConfig
 from surreal_memory.utils.geo import GeoFilter
 
 
@@ -31,7 +31,7 @@ def _make_server() -> MCPServer:
             tool_tier=ToolTierConfig(tier="full"),
             response=ResponseConfig(),
         )
-        cfg.write_gate.enabled = False
+        cfg.write_gate = WriteGateConfig()  # real config (mode="off") so the write-gate is skipped
         cfg.encryption.enabled = False
         cfg.safety.auto_redact_min_severity = 3
         mock_get_config.return_value = cfg
