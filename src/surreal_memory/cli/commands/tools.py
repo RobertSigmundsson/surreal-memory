@@ -7,7 +7,7 @@ from typing import Annotated, Any
 
 import typer
 
-from surreal_memory.cli._helpers import get_config, get_storage, run_async
+from surreal_memory.cli._helpers import get_config, get_storage, resolve_brain, run_async
 
 
 def mcp() -> None:
@@ -433,7 +433,7 @@ def decay(
 
     async def _decay() -> None:
         config = get_config()
-        brain_name = brain or config.current_brain
+        brain_name = resolve_brain(brain, config)
 
         typer.echo(f"Applying decay to brain '{brain_name}'...")
         if dry_run:
@@ -558,7 +558,7 @@ def consolidate(
 
     async def _consolidate() -> None:
         config = get_config()
-        brain_name = brain or config.current_brain
+        brain_name = resolve_brain(brain, config)
 
         typer.echo(f"Consolidating brain '{brain_name}' (strategy: {strategy})...")
         if dry_run:
@@ -1061,7 +1061,7 @@ def lifecycle(
 
     async def _lifecycle() -> None:
         config = get_config()
-        brain_name = brain or config.current_brain
+        brain_name = resolve_brain(brain, config)
         storage = await get_storage(config, brain_name=brain_name)
 
         if action == "status":
