@@ -8,7 +8,7 @@ from typing import Annotated
 
 import typer
 
-from surreal_memory.cli._helpers import get_config, get_storage, run_async
+from surreal_memory.cli._helpers import get_config, get_storage, resolve_brain, run_async
 from surreal_memory.core.memory_types import Priority, TypedMemory, suggest_memory_type
 from surreal_memory.utils.timeutils import utcnow
 
@@ -269,7 +269,7 @@ def export_brain_cmd(
 
     async def _export() -> None:
         config = get_config()
-        brain_name = brain or config.current_brain
+        brain_name = resolve_brain(brain, config)
         storage = await get_storage(config, brain_name=brain_name)
 
         snapshot = await storage.export_brain(brain_name)
@@ -335,8 +335,9 @@ def import_brain_cmd(
 
         data = json.loads(input_path.read_text())
 
-        brain_name = brain or data.get("brain_name", "imported")
-        storage = await get_storage(config=get_config(), brain_name=brain_name)
+        config = get_config()
+        brain_name = resolve_brain(brain, config, default=data.get("brain_name", "imported"))
+        storage = await get_storage(config=config, brain_name=brain_name)
 
         incoming_snapshot = BrainSnapshot(
             brain_id=data.get("brain_id", brain_name),

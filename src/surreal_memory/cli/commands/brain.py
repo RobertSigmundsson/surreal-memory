@@ -13,6 +13,7 @@ from surreal_memory.cli._helpers import (
     get_config,
     get_storage,
     output_result,
+    resolve_brain,
     run_async,
 )
 from surreal_memory.safety.freshness import analyze_freshness
@@ -36,8 +37,8 @@ def brain_list(
     config = get_config()
     brains = config.list_brains()
     # Effective brain: env var overrides config (matches CLI get_storage resolution)
-    env_brain = os.environ.get("SURREAL_MEMORY_BRAIN") or os.environ.get("SURREAL_MEMORY_BRAIN")
-    current = env_brain or config.current_brain
+    env_brain = os.environ.get("SURREAL_MEMORY_BRAIN")
+    current = resolve_brain(None, config)
 
     if json_output:
         result: dict[str, Any] = {"brains": brains, "current": current}
@@ -158,7 +159,7 @@ def brain_export(
 
     async def _export() -> None:
         config = get_config()
-        brain_name = name or config.current_brain
+        brain_name = resolve_brain(name, config)
         brain_path = get_brain_path_auto(config, brain_name)
 
         if not brain_path.exists():
@@ -302,8 +303,8 @@ def brain_import(
                 if not typer.confirm("Continue importing?"):
                     raise typer.Exit(0)
 
-        brain_name = name or data.get("brain_name", "imported")
         config = get_config()
+        brain_name = resolve_brain(name, config, default=data.get("brain_name", "imported"))
 
         if brain_name in config.list_brains():
             typer.secho(
@@ -565,7 +566,7 @@ def brain_health(
 
     async def _health() -> dict[str, Any]:
         config = get_config()
-        brain_name = name or config.current_brain
+        brain_name = resolve_brain(name, config)
         brain_path = get_brain_path_auto(config, brain_name)
 
         if not brain_path.exists():
