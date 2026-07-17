@@ -6,7 +6,7 @@ making prior knowledge available from the very first turn.
 
 Usage as Claude Code hook:
     Reads JSON from stdin (may be empty for SessionStart).
-    Outputs {"type": "context", "content": "<markdown>"} to stdout.
+    Outputs hookSpecificOutput JSON (hookEventName + additionalContext) to stdout.
     Status messages go to stderr.
 
 Usage standalone:
@@ -81,6 +81,18 @@ def read_hook_input() -> dict[str, Any]:
         return {}
 
 
+async def get_reasoning_injection(hook_input: dict[str, Any]) -> str:
+    """Build the reasoning-strategies context block for this session (or "").
+
+    Thin delegate to the shared engine orchestrator, which SessionStart and the
+    UserPromptSubmit hook both call. Opt-in via reasoning_training.injection_enabled;
+    injects at most once per session via a marker shared between the two hooks.
+    """
+    from surreal_memory.engine.reasoning_injection import get_reasoning_context
+
+    return await get_reasoning_context(hook_input)
+
+
 def main() -> None:
     """Entry point for SessionStart hook."""
     logging.basicConfig(level=logging.WARNING, stream=sys.stderr)
@@ -91,34 +103,44 @@ def main() -> None:
     from surreal_memory.hooks.project_context import derive_project_name
 
     project_name = derive_project_name(hook_input)
-    if not project_name:
-        print("[Surreal-Memory] No project resolved at session start", file=sys.stderr)  # noqa: T201
-        sys.exit(0)
+    sections: list[str] = []
 
+    # Recent-memories block (scoped to the resolved project).
+    if project_name:
+        try:
+            memories = asyncio.run(get_recent_memories(project_name))
+        except Exception:
+            memories = ""
+            print("[Surreal-Memory] Session start context load failed", file=sys.stderr)  # noqa: T201
+        if memories:
+            sections.append(f"## Recent Memories — project: {project_name}\n\n{memories}")
+
+    # Reasoning-strategies block (opt-in; model-based, not project-scoped).
     try:
-        context_text = asyncio.run(get_recent_memories(project_name))
+        reasoning = asyncio.run(get_reasoning_injection(hook_input))
     except Exception:
-        print("[Surreal-Memory] Session start context load failed", file=sys.stderr)  # noqa: T201
-        sys.exit(0)  # Never block Claude Code
+        reasoning = ""
+        print("[Surreal-Memory] Session start reasoning injection failed", file=sys.stderr)  # noqa: T201
+    if reasoning:
+        sections.append(reasoning)
 
-    if not context_text:
-        print(  # noqa: T201
-            f"[Surreal-Memory] No memories to inject for project '{project_name}'",
-            file=sys.stderr,
-        )
+    if not sections:
+        print("[Surreal-Memory] No session-start context to inject", file=sys.stderr)  # noqa: T201
         sys.exit(0)
 
-    count = context_text.count("\n") + 1
+    # Claude Code adds a SessionStart hook's context to the model ONLY via the
+    # hookSpecificOutput.additionalContext JSON field (a top-level {"type":"context"}
+    # is parsed as JSON but carries no recognized field, so nothing is injected).
     print(  # noqa: T201
-        f"[Surreal-Memory] Injecting {count} memories for project '{project_name}'",
-        file=sys.stderr,
+        json.dumps(
+            {
+                "hookSpecificOutput": {
+                    "hookEventName": "SessionStart",
+                    "additionalContext": "\n\n".join(sections),
+                }
+            }
+        )
     )
-
-    response = {
-        "type": "context",
-        "content": f"## Recent Memories — project: {project_name}\n\n{context_text}",
-    }
-    print(json.dumps(response))  # noqa: T201
 
 
 if __name__ == "__main__":
