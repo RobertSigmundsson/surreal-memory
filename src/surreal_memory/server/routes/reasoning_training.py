@@ -27,6 +27,14 @@ from pydantic import BaseModel, Field
 
 from surreal_memory.core.brain import Brain
 from surreal_memory.engine.reasoning_miner import _MODELS_WITHOUT_THINKING, normalize_model
+from surreal_memory.engine.reasoning_progress import (
+    PHASE_DISTILLING,
+    PHASE_DONE,
+    PHASE_IDLE,
+    PHASE_INGESTING,
+    PHASE_SCANNING,
+    MiningProgress,
+)
 from surreal_memory.server.dependencies import get_brain, get_storage, require_local_request
 from surreal_memory.server.models import ErrorResponse
 from surreal_memory.storage.base import NeuralStorage
@@ -42,7 +50,7 @@ router = APIRouter(
 
 # Pattern fibers are idempotent by _reasoning_signature (bounded population);
 # matches the distiller / injection fetch ceiling.
-_PATTERN_FETCH_LIMIT = 5000
+_PATTERN_FETCH_LIMIT = 20_000
 _MAX_PAGE = 100
 # Model names / injection globs: letters, digits, dot, underscore, dash, glob chars.
 _MODEL_NAME_RE = re.compile(r"^[A-Za-z0-9._*?-]{1,128}$")
@@ -60,8 +68,16 @@ def _idle_mining_state() -> dict[str, Any]:
         "running": False,
         "started_at": None,
         "finished_at": None,
+        "phase": PHASE_IDLE,
+        "files_total": 0,
+        "files_scanned": 0,
+        "traces_found": 0,
         "traces_ingested": 0,
+        "traces_processed": 0,
         "patterns_learned": 0,
+        "current_model": None,
+        "models_done": 0,
+        "models_total": 0,
         "dry_run": False,
         "error": None,
     }
@@ -96,8 +112,16 @@ class MiningJobState(BaseModel):
     running: bool
     started_at: str | None = None
     finished_at: str | None = None
+    phase: str = PHASE_IDLE
+    files_total: int = 0
+    files_scanned: int = 0
+    traces_found: int = 0
     traces_ingested: int = 0
+    traces_processed: int = 0
     patterns_learned: int = 0
+    current_model: str | None = None
+    models_done: int = 0
+    models_total: int = 0
     dry_run: bool = False
     error: str | None = None
 
@@ -123,15 +147,18 @@ class ReasoningConfigUpdate(BaseModel):
     mining_models: list[str] | None = None
     injection_map: dict[str, str] | None = None
     categories: list[str] | None = None
+    min_trace_chars: int | None = Field(None, ge=0, le=1_000_000)
+    max_trace_chars: int | None = Field(None, ge=1, le=10_000_000)
     scan_lookback_days: int | None = Field(None, ge=0, le=100_000)
     retention_days: int | None = Field(None, ge=1, le=100_000)
     max_traces_total: int | None = Field(None, ge=1, le=10_000_000)
     min_cluster_support: int | None = Field(None, ge=1, le=100_000)
-    max_patterns_per_run: int | None = Field(None, ge=1, le=100_000)
     min_confidence: float | None = Field(None, ge=0.0, le=1.0)
     min_patterns_per_category: int | None = Field(None, ge=1, le=100_000)
     injection_max_patterns: int | None = Field(None, ge=1, le=1000)
     injection_max_chars: int | None = Field(None, ge=1, le=1_000_000)
+    # Per-model distillation targets (model -> 0..100). Validated in update_config.
+    pattern_targets: dict[str, int] | None = None
 
 
 class MineRequest(BaseModel):
@@ -382,12 +409,32 @@ async def update_config(body: ReasoningConfigUpdate) -> dict[str, Any]:
             raise HTTPException(status_code=422, detail="categories cannot be empty")
         changes["categories"] = deduped
 
+    if body.pattern_targets is not None:
+        targets: dict[str, int] = {}
+        for model, count in body.pattern_targets.items():
+            name = _validate_model_name(model, field="pattern_targets")
+            # A target model must actually produce thinking text to be distillable.
+            if not _has_thinking(name):
+                raise HTTPException(
+                    status_code=422,
+                    detail=f"Model {name!r} has no thinking text and cannot be a pattern target",
+                )
+            try:
+                targets[name] = max(0, min(int(count), 100))
+            except (ValueError, TypeError):
+                raise HTTPException(
+                    status_code=422,
+                    detail=f"pattern_targets[{name!r}] must be an integer 0-100",
+                ) from None
+        changes["pattern_targets"] = targets
+
     for field_name in (
+        "min_trace_chars",
+        "max_trace_chars",
         "scan_lookback_days",
         "retention_days",
         "max_traces_total",
         "min_cluster_support",
-        "max_patterns_per_run",
         "min_confidence",
         "min_patterns_per_category",
         "injection_max_patterns",
@@ -427,7 +474,7 @@ async def _run_mining(
     try:
         if dry_run:
             # Parity with consolidation dry_run: no scanning, no writes.
-            state.update(traces_ingested=0, patterns_learned=0)
+            state.update(phase=PHASE_DONE, traces_ingested=0, patterns_learned=0)
             return
 
         config = get_config()
@@ -439,16 +486,68 @@ async def _run_mining(
             overrides["mining_models"] = tuple(models)
         run_config = dc_replace(config, reasoning_training=dc_replace(rt, **overrides))
 
+        def _on_progress(p: MiningProgress) -> None:
+            # Merge per phase so distill snapshots (which don't know file counts)
+            # don't zero out the ingest phase's file/trace counters.
+            updates: dict[str, Any] = {"phase": p.phase}
+            if p.phase in (PHASE_SCANNING, PHASE_INGESTING):
+                updates.update(
+                    files_total=p.files_total,
+                    files_scanned=p.files_scanned,
+                    traces_found=p.traces_found,
+                    traces_ingested=p.traces_ingested,
+                )
+            elif p.phase == PHASE_DISTILLING:
+                updates.update(
+                    traces_processed=p.traces_processed,
+                    patterns_learned=p.patterns_learned,
+                    current_model=p.current_model,
+                    models_done=p.models_done,
+                    models_total=p.models_total,
+                )
+            state.update(updates)
+
         storage = await create_isolated_storage(brain_id)
         # We own the isolated SurrealDB instance and must close it; SQLite / in-memory
         # return the shared instance, which must NOT be closed out from under others.
         owns_storage = config.storage_backend == "surrealdb"
         try:
-            ingest = await ingest_reasoning_traces(storage, brain_id, run_config)
-            distill = await distill_reasoning_patterns(storage, brain_id, run_config)
+            logger.info("reasoning mining started for brain %s (backfill=%s)", brain_id, backfill)
+            state["phase"] = PHASE_SCANNING
+            ingest = await ingest_reasoning_traces(
+                storage, brain_id, run_config, backfill=backfill, progress=_on_progress
+            )
+            logger.info(
+                "reasoning ingest done for brain %s: %d/%d files, %d traces (%d new)",
+                brain_id,
+                ingest.files_scanned,
+                ingest.files_total,
+                ingest.traces_scanned,
+                ingest.traces_ingested,
+            )
             state.update(
+                phase=PHASE_DISTILLING,
+                files_total=ingest.files_total,
+                files_scanned=ingest.files_scanned,
+                traces_found=ingest.traces_scanned,
                 traces_ingested=ingest.traces_ingested,
+            )
+            distill = await distill_reasoning_patterns(
+                storage, brain_id, run_config, drain=True, progress=_on_progress
+            )
+            state.update(
+                phase=PHASE_DONE,
+                traces_ingested=ingest.traces_ingested,
+                traces_processed=distill.traces_processed,
                 patterns_learned=distill.patterns_learned,
+                models_done=distill.models_seen,
+                models_total=distill.models_seen,
+            )
+            logger.info(
+                "reasoning mining done for brain %s: %d patterns from %d traces processed",
+                brain_id,
+                distill.patterns_learned,
+                distill.traces_processed,
             )
         finally:
             if owns_storage:

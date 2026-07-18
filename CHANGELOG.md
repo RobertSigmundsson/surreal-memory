@@ -5,7 +5,51 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [2.13.0] — Full-corpus reasoning mining: deep discovery, per-model targets, live progress
+
+### Added
+
+- **Full-corpus reasoning mining.** The miner now discovers transcripts
+  recursively — nested session directories and Task-tool subagent transcripts
+  (`projects/<project>/<session>/subagents/agent-*.jsonl`), not just the top
+  `projects/<project>/*.jsonl` layer — so the ~1000 previously-invisible files
+  are mined. Subagent traces are attributed to their real project, not a
+  literal "subagents" pseudo-project.
+- **Per-model pattern targets.** Each mineable model has a distillation target
+  (0–100), set via a slider on the dashboard Reasoning tab (or
+  `[reasoning_training.pattern_targets]` in config / `PUT /config`). A
+  preliminary Mine with no targets set only DETECTS models; raising a target
+  then distills that model's traces up to the target. Replaces the old global
+  `max_patterns_per_run`.
+- **Live mining progress.** `GET /api/dashboard/reasoning/status` and the
+  dashboard show the phase (scanning → ingesting → distilling → done), files
+  scanned/total, traces found/ingested, and per-model distillation progress
+  while a run is active. The `smem reasoning mine` CLI prints the same, and
+  `docker logs` shows INFO milestones at start / after ingest / at end.
+- **Backfill is a true full re-scan.** `--backfill` (CLI / MCP / dashboard) now
+  re-reads every transcript from the top, bypassing the incremental
+  size+mtime/line skip (trace-hash dedup keeps it idempotent) instead of only
+  widening the lookback window. It never deletes scan state, so a later normal
+  scan stays cheap.
+
+### Changed
+
+- **opus-4-8 is now mined.** It was wrongly denylisted as "signature-only
+  thinking"; the real corpus has ~933 opus-4-8 traces averaging ~1166 chars of
+  genuine reasoning. The prefix-denylist mechanism is kept (currently empty) for
+  a future thinking-less model.
+- **No per-scan trace cap.** `max_traces_per_scan` is removed — mining ingests
+  one transcript at a time (bounded memory) and sees ALL traces. The
+  `max_trace_chars` content-safety limit is raised 20k → 100k.
+
+### Fixed
+
+- **Docker: reasoning mining found zero traces.** `docker-compose.surrealdb.yml`
+  now mounts the host's `~/.claude/projects` read-only into the dashboard
+  container at `/home/appuser/.claude/projects`. Without it the in-container miner
+  scanned an empty `~/.claude` and every dashboard "Mine" finished instantly with
+  0 traces (no error) — looking like nothing happened. Projects-only, read-only
+  mount (not the whole `~/.claude`); override via `HOST_CLAUDE_PROJECTS` in `.env`.
 
 ## [2.12.1] — Release pipeline: npm packages actually ship again
 

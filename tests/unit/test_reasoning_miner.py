@@ -2,7 +2,8 @@
 
 Uses synthetic JSONL transcript fixtures under a temporary ``.claude`` dir (no
 real thinking text). Covers dedup, model glob filter, truncation, ``<synthetic>``
-and opus (empty/denylisted) skipping, min-length gating, secret redaction,
+skipping (opus-4-8 is no longer denylisted — it IS mined), min-length gating,
+secret redaction,
 task_context capture, model normalization, incremental scan-state, and the
 async ingest path against InMemoryStorage.
 """
@@ -12,12 +13,16 @@ from __future__ import annotations
 import json
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
+
+import pytest
 
 from surreal_memory.engine.reasoning_miner import (
     ingest_reasoning_traces,
     normalize_model,
     scan_transcripts,
 )
+from surreal_memory.engine.reasoning_progress import MiningProgress
 from surreal_memory.storage.memory_store import InMemoryStorage
 from surreal_memory.unified_config import ReasoningTrainingConfig, UnifiedConfig
 
@@ -136,6 +141,40 @@ def test_incremental_state_rescans_changed(tmp_path: Path) -> None:
     assert "second reasoning" in traces[0]["content"]
 
 
+def test_backfill_bypasses_unchanged_skip(tmp_path: Path) -> None:
+    # A normal scan skips a file whose size+mtime are unchanged since the
+    # last scan (see test_incremental_state_skips_unchanged), but a backfill
+    # scan re-emits its traces regardless — bypass, not state-deletion.
+    claude = tmp_path / ".claude"
+    state = tmp_path / "state.json"
+    _write_transcript(claude, [_assistant("a long enough reasoning trace here", uuid="a")])
+    assert len(_scan(claude, _cfg(), state)) == 1
+    assert _scan(claude, _cfg(), state) == []  # normal 2nd scan: unchanged → skipped
+
+    backfilled = scan_transcripts(
+        _cfg(), state_path=state, claude_dir=claude, now=_NOW, backfill=True
+    )
+    assert len(backfilled) == 1
+    assert "long enough reasoning trace" in backfilled[0]["content"]
+
+
+def test_normal_scan_after_backfill_yields_nothing_new(tmp_path: Path) -> None:
+    # After a backfill re-scan, the scan-state entry is rewritten just like a
+    # normal scan would (never deleted) — so a THIRD, normal scan sees the
+    # file as unchanged again and stays cheap.
+    claude = tmp_path / ".claude"
+    state = tmp_path / "state.json"
+    _write_transcript(claude, [_assistant("a long enough reasoning trace here", uuid="a")])
+    assert len(_scan(claude, _cfg(), state)) == 1  # 1st: normal, populates state
+
+    backfilled = scan_transcripts(
+        _cfg(), state_path=state, claude_dir=claude, now=_NOW, backfill=True
+    )
+    assert len(backfilled) == 1  # 2nd: backfill, bypasses skip, rewrites state
+
+    assert _scan(claude, _cfg(), state) == []  # 3rd: normal, nothing new
+
+
 def test_model_glob_filter(tmp_path: Path) -> None:
     claude = tmp_path / ".claude"
     _write_transcript(
@@ -149,18 +188,33 @@ def test_model_glob_filter(tmp_path: Path) -> None:
     assert [t["model"] for t in traces] == ["claude-fable-5"]
 
 
-def test_synthetic_and_opus_are_skipped(tmp_path: Path) -> None:
+def test_synthetic_skipped(tmp_path: Path) -> None:
+    # The <synthetic> pseudo-model (non-model turns) is never mined.
     claude = tmp_path / ".claude"
     _write_transcript(
         claude,
         [
             _assistant("synthetic reasoning trace long enough", model="<synthetic>", uuid="a"),
-            _assistant("opus reasoning trace long enough", model="claude-opus-4-8", uuid="b"),
             _assistant("fable reasoning trace long enough", model="claude-fable-5", uuid="c"),
         ],
     )
     traces = _scan(claude, _cfg(), tmp_path / "state.json")
     assert [t["model"] for t in traces] == ["claude-fable-5"]
+
+
+def test_opus_4_8_is_mined(tmp_path: Path) -> None:
+    # opus-4-8 is NO LONGER denylisted — its thinking traces are mined like any
+    # other model (run-008 correction: opus emits real thinking, ~1166 chars avg).
+    claude = tmp_path / ".claude"
+    _write_transcript(
+        claude,
+        [
+            _assistant("opus reasoning trace long enough", model="claude-opus-4-8", uuid="b"),
+            _assistant("fable reasoning trace long enough", model="claude-fable-5", uuid="c"),
+        ],
+    )
+    traces = _scan(claude, _cfg(), tmp_path / "state.json")
+    assert {t["model"] for t in traces} == {"claude-opus-4-8", "claude-fable-5"}
 
 
 def test_empty_thinking_skipped(tmp_path: Path) -> None:
@@ -259,15 +313,86 @@ def test_files_outside_projects_glob_ignored(tmp_path: Path) -> None:
     assert _scan(claude, _cfg(), tmp_path / "state.json") == []
 
 
-def test_max_traces_per_scan_soft_cap(tmp_path: Path) -> None:
+def test_nested_session_directory_discovered(tmp_path: Path) -> None:
+    # projects/<project>/<session>/t.jsonl — one level deeper than the old
+    # `projects/*/*.jsonl` glob covered.
     claude = tmp_path / ".claude"
-    entries = [
-        _assistant(f"reasoning trace number {i} long enough", uuid=f"u{i}") for i in range(5)
-    ]
-    _write_transcript(claude, entries)
-    traces = _scan(claude, _cfg(max_traces_per_scan=3), tmp_path / "state.json")
-    # Whole file is scanned (no mid-file loss); cap only stops scanning MORE files.
-    assert len(traces) == 5
+    _write_transcript(
+        claude,
+        [_assistant("nested session reasoning trace long enough", uuid="n1")],
+        slug="proj-a/2026-03-01-session1",
+    )
+    traces = _scan(claude, _cfg(), tmp_path / "state.json")
+    assert len(traces) == 1
+    assert traces[0]["project"] == "proj-a"
+
+
+def test_subagent_transcript_discovered_and_attributed_to_project(tmp_path: Path) -> None:
+    # projects/<project>/<session>/subagents/agent-*.jsonl — Task-tool subagent
+    # transcripts must be discovered AND attributed to the top-level project,
+    # not to a literal "subagents" pseudo-project.
+    claude = tmp_path / ".claude"
+    entry = _assistant("subagent reasoning trace long enough to mine", uuid="sa1")
+    entry["isSidechain"] = True
+    _write_transcript(
+        claude,
+        [entry],
+        slug="proj-a/session1/subagents",
+        name="agent-1.jsonl",
+    )
+    traces = _scan(claude, _cfg(), tmp_path / "state.json")
+    assert len(traces) == 1
+    assert traces[0]["project"] == "proj-a"
+
+
+def test_stray_file_directly_in_projects_dir_ignored(tmp_path: Path) -> None:
+    # A jsonl sitting directly in projects/ (no project subdirectory) isn't
+    # associated with any project and must be skipped, even though it's a
+    # deeper scan than the old glob.
+    claude = tmp_path / ".claude"
+    (claude / "projects").mkdir(parents=True, exist_ok=True)
+    (claude / "projects" / "stray.jsonl").write_text(
+        json.dumps(_assistant("stray at projects root long enough", uuid="s1")) + "\n",
+        encoding="utf-8",
+    )
+    assert _scan(claude, _cfg(), tmp_path / "state.json") == []
+
+
+def test_symlink_escape_blocked_at_depth(tmp_path: Path) -> None:
+    # A symlink nested several directories deep that resolves outside
+    # ~/.claude must still be rejected by the path-escape guard.
+    claude = tmp_path / ".claude"
+    session_dir = claude / "projects" / "proj-a" / "session1"
+    session_dir.mkdir(parents=True, exist_ok=True)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    real = outside / "evil.jsonl"
+    real.write_text(
+        json.dumps(_assistant("escaped reasoning trace long enough", uuid="e1")) + "\n",
+        encoding="utf-8",
+    )
+    (session_dir / "evil.jsonl").symlink_to(real)
+    assert _scan(claude, _cfg(), tmp_path / "state.json") == []
+
+
+def test_scan_returns_all_traces_unbounded(tmp_path: Path) -> None:
+    """No per-scan cap: many files' worth of traces are all returned, uncapped."""
+    claude = tmp_path / ".claude"
+    files = 6
+    per_file = 4
+    total = files * per_file
+    for f in range(files):
+        entries = [
+            _assistant(
+                f"reasoning trace file {f} number {i} long enough to qualify",
+                session=f"s{f}",
+                uuid=f"u{f}-{i}",
+            )
+            for i in range(per_file)
+        ]
+        _write_transcript(claude, entries, slug=f"proj-{f}")
+    traces = _scan(claude, _cfg(), tmp_path / "state.json")
+    assert len(traces) == total
 
 
 async def test_ingest_reasoning_traces_into_storage(tmp_path: Path) -> None:
@@ -295,6 +420,51 @@ async def test_ingest_reasoning_traces_into_storage(tmp_path: Path) -> None:
     stats = await storage.get_reasoning_stats("b1")
     assert stats["total"] == 2
     assert set(stats["by_model"]) == {"claude-fable-5", "claude-sonnet-5"}
+
+
+async def test_second_consecutive_backfill_ingest_is_noop_at_storage(tmp_path: Path) -> None:
+    # Backfill bypasses the miner's size+mtime skip, so a 2nd backfill still
+    # RE-SCANS the file and re-emits its trace — but trace_hash dedup at the
+    # storage layer means nothing NEW actually gets inserted the 2nd time.
+    claude = tmp_path / ".claude"
+    _write_transcript(
+        claude,
+        [_assistant("reasoning trace long enough for backfill dedup test", uuid="a")],
+    )
+    storage = InMemoryStorage()
+    storage.set_brain("b1")
+    cfg = UnifiedConfig(
+        data_dir=tmp_path / ".surrealmemory",
+        current_brain="default",
+        reasoning_training=_cfg(),
+    )
+    state_path = tmp_path / "state.json"
+
+    first = await ingest_reasoning_traces(
+        storage,
+        "b1",
+        cfg,
+        claude_dir=claude,
+        state_path=state_path,
+        now=_NOW,
+        backfill=True,
+    )
+    assert first.traces_ingested == 1
+
+    second = await ingest_reasoning_traces(
+        storage,
+        "b1",
+        cfg,
+        claude_dir=claude,
+        state_path=state_path,
+        now=_NOW,
+        backfill=True,
+    )
+    assert second.traces_scanned == 1  # the miner still re-emits it (bypass)
+    assert second.traces_ingested == 0  # but storage-layer dedup drops it
+
+    stats = await storage.get_reasoning_stats("b1")
+    assert stats["total"] == 1  # no duplicate row was created
 
 
 def _fake_unified_config(tmp_path: Path, *, mining_enabled: bool) -> UnifiedConfig:
@@ -377,3 +547,129 @@ async def test_consolidation_dry_run_skips_ingest(tmp_path, monkeypatch) -> None
     )
     assert report.reasoning_traces_ingested == 0
     assert calls["n"] == 0
+
+
+class _CountingStorage(InMemoryStorage):
+    """InMemoryStorage that records how many times insert is called."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.insert_calls = 0
+
+    async def insert_reasoning_traces(self, brain_id: str, traces: list[dict[str, Any]]) -> int:
+        self.insert_calls += 1
+        return await super().insert_reasoning_traces(brain_id, traces)
+
+
+class _CrashOnNthInsert(InMemoryStorage):
+    """InMemoryStorage that raises on the *nth* insert call (1-based)."""
+
+    def __init__(self, crash_on: int) -> None:
+        super().__init__()
+        self._crash_on = crash_on
+        self.insert_calls = 0
+
+    async def insert_reasoning_traces(self, brain_id: str, traces: list[dict[str, Any]]) -> int:
+        self.insert_calls += 1
+        if self.insert_calls == self._crash_on:
+            raise RuntimeError("simulated storage failure mid-ingest")
+        return await super().insert_reasoning_traces(brain_id, traces)
+
+
+def _ingest_cfg(tmp_path: Path) -> UnifiedConfig:
+    return UnifiedConfig(
+        data_dir=tmp_path / ".surrealmemory",
+        current_brain="default",
+        reasoning_training=_cfg(),
+    )
+
+
+async def test_ingest_inserts_per_file_not_once(tmp_path: Path) -> None:
+    # Two separate transcript FILES → two separate storage inserts (per-file
+    # ingest bounds memory), not one batched insert at the end.
+    claude = tmp_path / ".claude"
+    _write_transcript(
+        claude, [_assistant("file one reasoning long enough", uuid="a")], slug="proj-a"
+    )
+    _write_transcript(
+        claude, [_assistant("file two reasoning long enough", uuid="b")], slug="proj-b"
+    )
+    storage = _CountingStorage()
+    storage.set_brain("b1")
+    result = await ingest_reasoning_traces(
+        storage,
+        "b1",
+        _ingest_cfg(tmp_path),
+        claude_dir=claude,
+        state_path=tmp_path / "state.json",
+        now=_NOW,
+    )
+    assert storage.insert_calls == 2
+    assert result.files_total == 2
+    assert result.files_scanned == 2
+    assert result.traces_ingested == 2
+
+
+async def test_ingest_progress_is_monotonic_and_complete(tmp_path: Path) -> None:
+    claude = tmp_path / ".claude"
+    for i in range(3):
+        _write_transcript(
+            claude,
+            [_assistant(f"reasoning trace {i} long enough", uuid=f"u{i}")],
+            slug=f"proj-{i}",
+        )
+    storage = InMemoryStorage()
+    storage.set_brain("b1")
+    snapshots: list[MiningProgress] = []
+    result = await ingest_reasoning_traces(
+        storage,
+        "b1",
+        _ingest_cfg(tmp_path),
+        claude_dir=claude,
+        state_path=tmp_path / "state.json",
+        now=_NOW,
+        progress=snapshots.append,
+    )
+    assert snapshots, "progress callback was never invoked"
+    # A scanning snapshot with the total known precedes ingesting.
+    assert snapshots[0].phase == "scanning"
+    assert any(s.phase == "ingesting" for s in snapshots)
+    # files_scanned and traces_found only ever increase.
+    files_seen = [s.files_scanned for s in snapshots]
+    assert files_seen == sorted(files_seen)
+    found_seen = [s.traces_found for s in snapshots]
+    assert found_seen == sorted(found_seen)
+    # The final snapshot reflects a fully-scanned corpus.
+    assert snapshots[-1].files_scanned == snapshots[-1].files_total == 3
+    assert result.files_scanned == 3
+    assert result.traces_ingested == 3
+
+
+async def test_ingest_state_survives_a_crash_mid_run(tmp_path: Path) -> None:
+    # File 1 ingests cleanly, file 2's insert raises → file 1's scan-state is
+    # persisted (finally block), file 2's is not (recorded only after insert).
+    claude = tmp_path / ".claude"
+    _write_transcript(
+        claude, [_assistant("first file reasoning long enough", uuid="a")], slug="proj-a"
+    )
+    _write_transcript(
+        claude, [_assistant("second file reasoning long enough", uuid="b")], slug="proj-b"
+    )
+    storage = _CrashOnNthInsert(crash_on=2)
+    storage.set_brain("b1")
+    state_file = tmp_path / "state.json"
+    with pytest.raises(RuntimeError):
+        await ingest_reasoning_traces(
+            storage,
+            "b1",
+            _ingest_cfg(tmp_path),
+            claude_dir=claude,
+            state_path=state_file,
+            now=_NOW,
+        )
+    saved = json.loads(state_file.read_text(encoding="utf-8"))
+    # Exactly the first file (proj-a) is recorded; the crashed file (proj-b) is not.
+    assert len(saved) == 1
+    only_key = next(iter(saved))
+    assert "proj-a" in only_key
+    assert not any("proj-b" in k for k in saved)

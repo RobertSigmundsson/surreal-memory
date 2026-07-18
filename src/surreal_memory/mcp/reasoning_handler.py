@@ -18,7 +18,7 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-_PATTERN_FETCH_LIMIT = 5000
+_PATTERN_FETCH_LIMIT = 20_000
 
 
 class ReasoningHandler:
@@ -135,8 +135,9 @@ class ReasoningHandler:
         if args.get("dry_run"):
             return {"traces_ingested": 0, "patterns_learned": 0, "dry_run": True}
 
+        backfill = bool(args.get("backfill"))
         overrides: dict[str, Any] = {}
-        if args.get("backfill"):
+        if backfill:
             overrides["scan_lookback_days"] = 0
         models = args.get("models")
         if isinstance(models, list) and models:
@@ -151,11 +152,13 @@ class ReasoningHandler:
         storage = await create_isolated_storage(brain_id)
         owns_storage = self.config.storage_backend == "surrealdb"
         try:
-            ingest = await ingest_reasoning_traces(storage, brain_id, run_cfg)
-            distill = await distill_reasoning_patterns(storage, brain_id, run_cfg)
+            ingest = await ingest_reasoning_traces(storage, brain_id, run_cfg, backfill=backfill)
+            distill = await distill_reasoning_patterns(storage, brain_id, run_cfg, drain=True)
             return {
                 "traces_ingested": ingest.traces_ingested,
                 "patterns_learned": distill.patterns_learned,
+                "files_scanned": ingest.files_scanned,
+                "files_total": ingest.files_total,
             }
         finally:
             if owns_storage:

@@ -149,17 +149,115 @@ def test_status_with_traces_and_patterns(
 def test_status_denylisted_model_has_no_thinking(
     client: TestClient, mock_storage: AsyncMock, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    # opus-4-8 is no longer denylisted, so use a FICTIONAL denylisted model to
+    # exercise the has_thinking_text=False path (the mechanism still works).
+    monkeypatch.setattr(rt_module, "_MODELS_WITHOUT_THINKING", ("fictional-no-think-model",))
     monkeypatch.setattr("surreal_memory.unified_config.get_config", lambda: _cfg(tmp_path))
     mock_storage.get_reasoning_stats.return_value = {
-        "by_model": {"claude-opus-4-8": {"trace_count": 0, "unprocessed": 0, "last_trace_at": ""}},
+        "by_model": {
+            "fictional-no-think-model": {"trace_count": 0, "unprocessed": 0, "last_trace_at": ""}
+        },
         "by_category": {},
         "total": 0,
         "unprocessed": 0,
     }
     resp = client.get("/api/dashboard/reasoning/status")
     data = resp.json()
-    opus = next(m for m in data["per_model"] if m["model"] == "claude-opus-4-8")
-    assert opus["has_thinking_text"] is False
+    model = next(m for m in data["per_model"] if m["model"] == "fictional-no-think-model")
+    assert model["has_thinking_text"] is False
+
+
+def test_status_idle_has_progress_fields(
+    client: TestClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("surreal_memory.unified_config.get_config", lambda: _cfg(tmp_path))
+    mining = client.get("/api/dashboard/reasoning/status").json()["mining"]
+    assert mining["phase"] == "idle"
+    assert mining["files_total"] == 0
+    assert mining["files_scanned"] == 0
+    assert mining["traces_found"] == 0
+    assert mining["traces_processed"] == 0
+    assert mining["current_model"] is None
+    assert mining["models_done"] == 0
+    assert mining["models_total"] == 0
+
+
+async def test_run_mining_wires_progress_and_finishes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from surreal_memory.engine.reasoning_progress import (
+        PHASE_DISTILLING,
+        PHASE_INGESTING,
+        MiningProgress,
+    )
+
+    cfg = _cfg(tmp_path, mining_enabled=True)
+    monkeypatch.setattr("surreal_memory.unified_config.get_config", lambda *a, **k: cfg)
+    monkeypatch.setattr(
+        "surreal_memory.unified_config.create_isolated_storage",
+        AsyncMock(return_value=AsyncMock()),
+    )
+
+    captured: list[dict[str, Any]] = []
+
+    async def _fake_ingest(
+        storage: Any, brain_id: str, config: Any, *, backfill: bool = False, progress: Any = None
+    ) -> SimpleNamespace:
+        if progress is not None:
+            progress(
+                MiningProgress(
+                    phase=PHASE_INGESTING,
+                    files_total=10,
+                    files_scanned=5,
+                    traces_found=3,
+                    traces_ingested=2,
+                )
+            )
+            captured.append(dict(rt_module._mining_states[brain_id]))
+        return SimpleNamespace(
+            traces_ingested=2, traces_scanned=3, files_scanned=10, files_total=10
+        )
+
+    async def _fake_distill(
+        storage: Any, brain_id: str, config: Any, *, drain: bool = False, progress: Any = None
+    ) -> SimpleNamespace:
+        if progress is not None:
+            progress(
+                MiningProgress(
+                    phase=PHASE_DISTILLING,
+                    current_model="claude-fable-5",
+                    models_done=0,
+                    models_total=1,
+                    patterns_learned=1,
+                    traces_processed=2,
+                )
+            )
+        return SimpleNamespace(patterns_learned=1, traces_processed=2, models_seen=1)
+
+    monkeypatch.setattr(
+        "surreal_memory.engine.reasoning_miner.ingest_reasoning_traces", _fake_ingest
+    )
+    monkeypatch.setattr(
+        "surreal_memory.engine.reasoning_distiller.distill_reasoning_patterns", _fake_distill
+    )
+
+    rt_module._mining_states[BRAIN_ID] = rt_module._idle_mining_state()
+    rt_module._mining_states[BRAIN_ID].update(running=True)
+    await rt_module._run_mining(BRAIN_ID, backfill=False, dry_run=False, models=None)
+
+    # An intermediate ingest snapshot was visible mid-run.
+    assert captured and captured[0]["phase"] == PHASE_INGESTING
+    assert captured[0]["files_scanned"] == 5
+    assert captured[0]["traces_found"] == 3
+
+    final = rt_module._mining_states[BRAIN_ID]
+    assert final["phase"] == "done"
+    assert final["running"] is False
+    assert final["finished_at"] is not None
+    assert final["patterns_learned"] == 1
+    assert final["traces_processed"] == 2
+    assert final["files_scanned"] == 10
+    assert final["models_total"] == 1
 
 
 # ── PUT /config ───────────────────────────────────────────────────────────────
@@ -184,36 +282,45 @@ def test_config_toggle_mining(client: TestClient, config_capture: dict[str, Any]
 
 
 def test_config_rejects_model_without_thinking(
-    client: TestClient, config_capture: dict[str, Any]
+    client: TestClient, config_capture: dict[str, Any], monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    # opus is mineable now; a genuinely thinking-less model (fictional denylist
+    # entry) is still rejected for mining_models.
+    monkeypatch.setattr(rt_module, "_MODELS_WITHOUT_THINKING", ("fictional-no-think-model",))
     resp = client.put(
-        "/api/dashboard/reasoning/config", json={"mining_models": ["claude-opus-4-8"]}
+        "/api/dashboard/reasoning/config",
+        json={"mining_models": ["fictional-no-think-model"]},
     )
     assert resp.status_code == 422
     assert "thinking" in resp.json()["detail"].lower()
 
 
 def test_config_rejects_injection_source_without_thinking(
-    client: TestClient, config_capture: dict[str, Any]
+    client: TestClient, config_capture: dict[str, Any], monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    # A thinking-less injection SOURCE (fictional denylist entry) is rejected.
+    monkeypatch.setattr(rt_module, "_MODELS_WITHOUT_THINKING", ("fictional-no-think-model",))
     resp = client.put(
         "/api/dashboard/reasoning/config",
-        json={"injection_map": {"claude-fable-5": "claude-opus-4-8"}},
+        json={"injection_map": {"claude-fable-5": "fictional-no-think-model"}},
     )
     assert resp.status_code == 422
 
 
 def test_config_allows_denylisted_target(
-    client: TestClient, config_capture: dict[str, Any]
+    client: TestClient, config_capture: dict[str, Any], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # opus is a valid injection TARGET (recipient); fable is a thinking source.
+    # A denylisted (thinking-less) model is still a valid injection TARGET
+    # (recipient); the source must have thinking text. opus is no longer
+    # denylisted, so pin a fictional denylisted model as the target here.
+    monkeypatch.setattr(rt_module, "_MODELS_WITHOUT_THINKING", ("fictional-no-think-model",))
     resp = client.put(
         "/api/dashboard/reasoning/config",
-        json={"injection_map": {"claude-opus-4-8": "claude-fable-5"}},
+        json={"injection_map": {"fictional-no-think-model": "claude-fable-5"}},
     )
     assert resp.status_code == 200
     assert config_capture["cfg"].reasoning_training.injection_map == (
-        ("claude-opus-4-8", "claude-fable-5"),
+        ("fictional-no-think-model", "claude-fable-5"),
     )
 
 
@@ -234,6 +341,30 @@ def test_config_min_confidence_out_of_range(
 
 def test_config_rejects_bad_model_name(client: TestClient, config_capture: dict[str, Any]) -> None:
     resp = client.put("/api/dashboard/reasoning/config", json={"mining_models": ["bad name!;drop"]})
+    assert resp.status_code == 422
+
+
+def test_config_pattern_targets_roundtrip(
+    client: TestClient, config_capture: dict[str, Any]
+) -> None:
+    # Valid targets round-trip; an out-of-range value clamps to 0..100.
+    resp = client.put(
+        "/api/dashboard/reasoning/config",
+        json={"pattern_targets": {"claude-fable-5": 30, "claude-sonnet-5": 150}},
+    )
+    assert resp.status_code == 200
+    saved = config_capture["cfg"].reasoning_training.pattern_targets
+    assert saved == {"claude-fable-5": 30, "claude-sonnet-5": 100}
+    assert resp.json()["config"]["pattern_targets"]["claude-fable-5"] == 30
+
+
+def test_config_rejects_bad_pattern_target_name(
+    client: TestClient, config_capture: dict[str, Any]
+) -> None:
+    resp = client.put(
+        "/api/dashboard/reasoning/config",
+        json={"pattern_targets": {"bad name!;drop": 10}},
+    )
     assert resp.status_code == 422
 
 
@@ -261,6 +392,20 @@ def test_config_rejects_bad_category_name(
 ) -> None:
     resp = client.put("/api/dashboard/reasoning/config", json={"categories": ['bad"; drop']})
     assert resp.status_code == 422
+
+
+def test_config_trace_chars_roundtrip(client: TestClient, config_capture: dict[str, Any]) -> None:
+    resp = client.put(
+        "/api/dashboard/reasoning/config",
+        json={"min_trace_chars": 500, "max_trace_chars": 50_000},
+    )
+    assert resp.status_code == 200
+    body = resp.json()["config"]
+    assert body["min_trace_chars"] == 500
+    assert body["max_trace_chars"] == 50_000
+    assert config_capture["cfg"].reasoning_training.min_trace_chars == 500
+    assert config_capture["cfg"].reasoning_training.max_trace_chars == 50_000
+    assert config_capture["saved"] is not None  # persisted
 
 
 # ── POST /mine ────────────────────────────────────────────────────────────────
@@ -334,6 +479,38 @@ def test_mine_isolated_per_brain(
 
     monkeypatch.setattr(rt_module, "_run_mining", _noop)
     assert client.post("/api/dashboard/reasoning/mine", json={}).status_code == 202
+
+
+async def test_run_mining_forwards_backfill_to_ingest(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # _run_mining must forward backfill=True into ingest_reasoning_traces (the
+    # miner's real full-rescan bypass), on top of the scan_lookback_days=0
+    # override it already applies.
+    monkeypatch.setattr(
+        "surreal_memory.unified_config.get_config",
+        lambda: _cfg(tmp_path, mining_enabled=True),
+    )
+    storage = AsyncMock()
+    storage.close = AsyncMock()
+    monkeypatch.setattr(
+        "surreal_memory.unified_config.create_isolated_storage",
+        AsyncMock(return_value=storage),
+    )
+    ingest_mock = AsyncMock(return_value=SimpleNamespace(traces_ingested=1, traces_scanned=1))
+    distill_mock = AsyncMock(
+        return_value=SimpleNamespace(patterns_learned=0, traces_processed=1, models_seen=1)
+    )
+    monkeypatch.setattr(
+        "surreal_memory.engine.reasoning_miner.ingest_reasoning_traces", ingest_mock
+    )
+    monkeypatch.setattr(
+        "surreal_memory.engine.reasoning_distiller.distill_reasoning_patterns", distill_mock
+    )
+
+    await rt_module._run_mining(BRAIN_ID, True, False, None)
+
+    assert ingest_mock.await_args.kwargs["backfill"] is True
 
 
 # ── GET/DELETE patterns ───────────────────────────────────────────────────────

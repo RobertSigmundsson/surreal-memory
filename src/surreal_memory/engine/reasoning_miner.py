@@ -13,18 +13,25 @@ incremental scan-state file skips unchanged transcripts.
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import logging
+import os
 import re
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC
 from fnmatch import fnmatch
 from functools import lru_cache
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from surreal_memory.engine.reasoning_progress import (
+    PHASE_INGESTING,
+    PHASE_SCANNING,
+    MiningProgress,
+)
 from surreal_memory.safety.sensitive import (
     SensitivePattern,
     SensitiveType,
@@ -36,15 +43,25 @@ from surreal_memory.utils.timeutils import utcnow
 if TYPE_CHECKING:
     from datetime import datetime
 
+    from surreal_memory.engine.reasoning_progress import ProgressCallback
     from surreal_memory.storage.base import NeuralStorage
     from surreal_memory.unified_config import ReasoningTrainingConfig, UnifiedConfig
 
+# Persist scan-state to disk this often (in files) during a long ingest, so a
+# crash midway keeps most of the progress; a full save also runs in ``finally``.
+_STATE_SAVE_EVERY = 50
+# Emit a milestone log line this often (in files) so ``docker logs`` shows life.
+_LOG_EVERY = 250
+
 logger = logging.getLogger(__name__)
 
-# Models whose thinking blocks are empty (signature-only) — never a mining
-# source. opus-4.8 is already excluded by the non-empty-thinking filter; this is
-# a belt-and-suspenders prefix denylist (see run 007 BINDING CORRECTION #5).
-_MODELS_WITHOUT_THINKING = ("claude-opus-4-8",)
+# Prefix denylist of models whose thinking blocks are empty (signature-only) and
+# must never be mined. Currently EMPTY: run-007 assumed claude-opus-4-8 emitted
+# signature-only thinking, but the real corpus has ~933 opus-4-8 traces averaging
+# ~1166 chars of genuine reasoning, so opus is now mined like any other model.
+# The mechanism (_is_denylisted, the route's _has_thinking / PUT-config 422 path)
+# is kept for a future model that genuinely lacks thinking text.
+_MODELS_WITHOUT_THINKING: tuple[str, ...] = ()
 
 # The synthetic attribution used for non-model turns — never mine it.
 _SYNTHETIC_MODEL = "<synthetic>"
@@ -166,9 +183,50 @@ def _extract_user_text(entry: dict[str, Any]) -> str:
     return ""
 
 
-def _project_from_path(jsonl: Path) -> str:
-    """Derive a readable project name from the transcript's parent directory."""
-    return jsonl.parent.name
+def _project_from_path(resolved: Path, projects_dir: Path) -> str:
+    """Derive the top-level project name from the transcript's location under *projects_dir*.
+
+    Uses the first path segment under ``projects/`` (e.g. ``proj-a`` for both
+    ``proj-a/session.jsonl`` and ``proj-a/session/subagents/agent-1.jsonl``),
+    NOT the immediate parent directory — so nested session transcripts and Task-tool
+    subagent transcripts attribute to their actual project instead of a literal
+    session-id or ``"subagents"`` pseudo-project.
+    """
+    try:
+        rel = resolved.relative_to(projects_dir.resolve())
+    except ValueError:
+        return resolved.parent.name
+    return rel.parts[0]
+
+
+def _discover_transcripts(projects_dir: Path, claude_root: Path) -> list[tuple[Path, Path]]:
+    """Recursively discover transcript files under *projects_dir*.
+
+    Covers not just the direct ``projects/<project>/*.jsonl`` layer but also
+    session transcripts nested in dated/session subdirectories and Task-tool
+    subagent transcripts (``projects/<project>/<session>/subagents/agent-*.jsonl``),
+    which a one-level glob misses entirely.
+
+    Each candidate must (a) resolve inside *claude_root* — a path-escape guard
+    against symlink/traversal tricks, checked at every depth, not just the top
+    level — and (b) sit at least one directory below *projects_dir*: a stray
+    file placed directly in ``projects/`` isn't associated with any project and
+    is skipped. Returns ``(original, resolved)`` pairs sorted by original path.
+    """
+    projects_root = projects_dir.resolve()
+    discovered: list[tuple[Path, Path]] = []
+    for jsonl in sorted(projects_dir.rglob("*.jsonl")):
+        resolved = jsonl.resolve()
+        if not resolved.is_relative_to(claude_root):
+            continue
+        try:
+            rel = resolved.relative_to(projects_root)
+        except ValueError:
+            continue
+        if len(rel.parts) < 2:
+            continue
+        discovered.append((jsonl, resolved))
+    return discovered
 
 
 def _now_ts(now: datetime | None) -> float:
@@ -198,12 +256,48 @@ def _save_scan_state(state_path: Path | None, state: dict[str, dict[str, Any]]) 
         logger.debug("reasoning scan-state write failed: %s", state_path, exc_info=True)
 
 
+def _plan_file_scan(
+    st: os.stat_result,
+    prev: dict[str, Any],
+    cutoff_ts: float | None,
+    *,
+    backfill: bool,
+) -> tuple[bool, int]:
+    """Decide whether to skip a transcript file and which line to resume from.
+
+    Normal scans (``backfill=False``) apply today's incrementality exactly as
+    before: honor the lookback cutoff, skip files whose size+mtime are
+    unchanged since the last scan, and resume after the last processed line on
+    append-only growth (falling back to line 0 on shrink/rewrite).
+
+    A backfill scan (``backfill=True``) is a full re-scan BYPASS, not a
+    state-deletion: it ignores the lookback cutoff and the size+mtime skip and
+    always reads from line 0, regardless of what the scan-state says. It never
+    deletes or resets the state file — the caller still records this file's
+    fresh ``(mtime, size, last_line)`` afterward exactly as a normal scan
+    would, so trace_hash dedup at insert time makes the re-emission harmless
+    and a LATER normal scan sees the file as unchanged and skips it again.
+
+    Returns ``(skip, start_line)``.
+    """
+    if backfill:
+        return False, 0
+    if cutoff_ts is not None and st.st_mtime < cutoff_ts:
+        return True, 0
+    if prev.get("size") == st.st_size and prev.get("mtime") == st.st_mtime:
+        return True, 0
+    start_line = int(prev.get("last_line", 0)) if st.st_size > int(prev.get("size", 0)) else 0
+    return False, start_line
+
+
 @dataclass
 class ReasoningIngestResult:
     """Outcome of a reasoning-trace ingest pass."""
 
     traces_ingested: int = 0
     traces_scanned: int = 0
+    files_total: int = 0
+    files_scanned: int = 0
 
 
 def scan_transcripts(
@@ -212,17 +306,29 @@ def scan_transcripts(
     state_path: Path | None = None,
     claude_dir: Path | None = None,
     now: datetime | None = None,
+    backfill: bool = False,
 ) -> list[dict[str, Any]]:
-    """Scan ``~/.claude/projects/*/*.jsonl`` for mineable reasoning traces.
+    """Scan ``~/.claude/projects/**/*.jsonl`` for mineable reasoning traces.
 
-    Returns staging-ready dicts (trace_hash, model, session_id, project,
-    task_context, content, content_chars, created_at). Honors the config's
-    model globs, char limits, per-scan cap, lookback window and redaction flag,
-    and updates the incremental scan-state file.
+    Discovery is recursive (see ``_discover_transcripts``): it covers nested
+    session transcripts and Task-tool subagent transcripts, not just the
+    direct ``projects/<project>/*.jsonl`` layer. Returns staging-ready dicts
+    (trace_hash, model, session_id, project, task_context, content,
+    content_chars, created_at). Honors the config's model globs, char limits,
+    lookback window and redaction flag, and updates the incremental
+    scan-state file (keyed by each file's full resolved path, so the extra
+    discovery depth simply accrues new entries).
 
-    The per-scan cap is a soft target: a file is always scanned whole (so its
-    recorded state never hides un-returned traces), and scanning simply stops
-    after the running total reaches ``max_traces_per_scan``.
+    There is no per-scan cap: every matching file is scanned in full and all
+    its traces are returned, unbounded.
+
+    ``backfill=True`` is a full re-scan BYPASS (see ``_plan_file_scan``): it
+    ignores the lookback cutoff, the size+mtime skip and any resume line for
+    EVERY discovered file, re-reading each one from the top. It is not
+    state-deletion — the scan-state entry for each file is still (re)written
+    afterward exactly as in a normal scan, so trace_hash dedup at insert time
+    keeps the re-emission harmless and a later normal (``backfill=False``)
+    scan again sees unchanged files and skips them cheaply.
     """
     claude_root = (claude_dir or (Path.home() / ".claude")).resolve()
     projects_dir = claude_root / "projects"
@@ -239,35 +345,23 @@ def scan_transcripts(
     traces: list[dict[str, Any]] = []
     seen_hashes: set[str] = set()
 
-    for jsonl in sorted(projects_dir.glob("*/*.jsonl")):
-        resolved = jsonl.resolve()
-        # Path-escape guard: never read outside ~/.claude (symlink / traversal).
-        if not resolved.is_relative_to(claude_root):
-            continue
+    for _jsonl, resolved in _discover_transcripts(projects_dir, claude_root):
         try:
             st = resolved.stat()
         except OSError:
             continue
-        # Lookback window: skip transcripts untouched within scan_lookback_days.
-        if cutoff_ts is not None and st.st_mtime < cutoff_ts:
-            continue
         key = str(resolved)
         prev = state.get(key, {})
-        # Incremental: skip files whose size+mtime are unchanged since last scan.
-        if prev.get("size") == st.st_size and prev.get("mtime") == st.st_mtime:
+        skip, start_line = _plan_file_scan(st, prev, cutoff_ts, backfill=backfill)
+        if skip:
             continue
-        # Resume after the last processed line on append-only growth; otherwise
-        # (shrunk / rewritten / edited-in-place) rescan from the top — trace_hash
-        # dedup keeps any re-emitted traces harmless at insert time.
-        start_line = int(prev.get("last_line", 0)) if st.st_size > int(prev.get("size", 0)) else 0
 
+        project = _project_from_path(resolved, projects_dir)
         file_traces, line_count = _scan_file(
-            resolved, config, seen_hashes, fallback_created, start_line=start_line
+            resolved, config, seen_hashes, fallback_created, project, start_line=start_line
         )
         traces.extend(file_traces)
         state[key] = {"mtime": st.st_mtime, "size": st.st_size, "last_line": line_count}
-        if len(traces) >= config.max_traces_per_scan:
-            break
 
     _save_scan_state(state_path, state)
     return traces
@@ -278,6 +372,7 @@ def _scan_file(
     config: ReasoningTrainingConfig,
     seen_hashes: set[str],
     fallback_created: str,
+    project: str,
     *,
     start_line: int = 0,
 ) -> tuple[list[dict[str, Any]], int]:
@@ -286,7 +381,6 @@ def _scan_file(
     ``start_line`` resumes after an already-processed prefix (append-only
     growth), so a resumed scan does not re-emit traces from earlier passes.
     """
-    project = _project_from_path(resolved)
     out: list[dict[str, Any]] = []
     prev_user_text = ""
     line_count = start_line
@@ -411,19 +505,115 @@ async def ingest_reasoning_traces(
     claude_dir: Path | None = None,
     state_path: Path | None = None,
     now: datetime | None = None,
+    backfill: bool = False,
+    progress: ProgressCallback | None = None,
 ) -> ReasoningIngestResult:
-    """Scan transcripts and insert new reasoning traces into staging.
+    """Scan transcripts and insert new reasoning traces into staging, per file.
 
-    The scan-state file lives under ``config.data_dir`` unless overridden.
+    Unlike the synchronous :func:`scan_transcripts` (which gathers every trace
+    into one list), this async path discovers the transcript corpus, then scans
+    and INSERTS one file at a time: each file's blocking read runs in
+    ``asyncio.to_thread`` and its traces are staged immediately before the next
+    file is opened. That bounds peak memory to a single file's traces regardless
+    of corpus size (what makes the un-capped full-corpus scan safe) and lets it
+    report live :class:`MiningProgress` through *progress* as it goes.
+
+    Scan-state is written every ``_STATE_SAVE_EVERY`` files and again in a
+    ``finally`` block, and a file's state entry is recorded only AFTER its
+    traces are successfully inserted — so a crash mid-insert leaves the failed
+    file un-recorded (it is re-scanned next run) while completed files persist.
+    The state file lives under ``config.data_dir`` unless overridden and is
+    never deleted; ``backfill=True`` bypasses the per-file skip (see
+    :func:`_plan_file_scan`) but is only ever set for an explicit user-triggered
+    run, never for background consolidation.
     """
     resolved_state = state_path or (config.data_dir / "reasoning_scan_state.json")
-    traces = scan_transcripts(
-        config.reasoning_training,
-        state_path=resolved_state,
-        claude_dir=claude_dir,
-        now=now,
+    rt = config.reasoning_training
+    claude_root = (claude_dir or (Path.home() / ".claude")).resolve()
+    projects_dir = claude_root / "projects"
+
+    prog = MiningProgress(phase=PHASE_SCANNING)
+
+    def _emit() -> None:
+        if progress is not None:
+            progress(replace(prog))
+
+    if not projects_dir.is_dir():
+        _emit()
+        return ReasoningIngestResult()
+
+    discovered = _discover_transcripts(projects_dir, claude_root)
+    prog.files_total = len(discovered)
+    _emit()
+
+    now_ts = _now_ts(now)
+    cutoff_ts = now_ts - rt.scan_lookback_days * 86400 if rt.scan_lookback_days > 0 else None
+    fallback_created = (now or utcnow()).isoformat()
+
+    state = _load_scan_state(resolved_state)
+    seen_hashes: set[str] = set()
+    traces_scanned = 0
+    traces_ingested = 0
+    files_scanned = 0
+
+    prog.phase = PHASE_INGESTING
+    try:
+        for _jsonl, resolved in discovered:
+            try:
+                st = resolved.stat()
+            except OSError:
+                files_scanned += 1
+                prog.files_scanned = files_scanned
+                continue
+
+            key = str(resolved)
+            prev = state.get(key, {})
+            skip, start_line = _plan_file_scan(st, prev, cutoff_ts, backfill=backfill)
+            if not skip:
+                project = _project_from_path(resolved, projects_dir)
+                # The blocking file read runs off the event-loop thread and
+                # RETURNS its traces; the callback below is only ever invoked
+                # from this (event-loop) thread.
+                file_traces, line_count = await asyncio.to_thread(
+                    _scan_file,
+                    resolved,
+                    rt,
+                    seen_hashes,
+                    fallback_created,
+                    project,
+                    start_line=start_line,
+                )
+                if file_traces:
+                    # Insert this file's traces before opening the next file, so
+                    # peak memory is one file's worth of traces, not the corpus.
+                    inserted = await storage.insert_reasoning_traces(brain_id, file_traces)
+                    traces_scanned += len(file_traces)
+                    traces_ingested += inserted
+                # Record this file's scan-state ONLY after a successful insert:
+                # a crash mid-insert leaves it un-recorded so it is re-scanned.
+                state[key] = {"mtime": st.st_mtime, "size": st.st_size, "last_line": line_count}
+
+            files_scanned += 1
+            prog.files_scanned = files_scanned
+            prog.traces_found = traces_scanned
+            prog.traces_ingested = traces_ingested
+            if files_scanned % _STATE_SAVE_EVERY == 0:
+                _save_scan_state(resolved_state, state)
+            if files_scanned % _LOG_EVERY == 0:
+                logger.info(
+                    "reasoning ingest: %d/%d files scanned, %d traces (%d new)",
+                    files_scanned,
+                    prog.files_total,
+                    traces_scanned,
+                    traces_ingested,
+                )
+            _emit()
+    finally:
+        _save_scan_state(resolved_state, state)
+
+    return ReasoningIngestResult(
+        traces_ingested=traces_ingested,
+        traces_scanned=traces_scanned,
+        files_total=prog.files_total,
+        files_scanned=files_scanned,
     )
-    if not traces:
-        return ReasoningIngestResult(traces_ingested=0, traces_scanned=0)
-    ingested = await storage.insert_reasoning_traces(brain_id, traces)
-    return ReasoningIngestResult(traces_ingested=ingested, traces_scanned=len(traces))

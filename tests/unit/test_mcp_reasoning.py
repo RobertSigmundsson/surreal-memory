@@ -126,8 +126,9 @@ async def test_reasoning_mine_disabled(tmp_path: Path) -> None:
 async def test_reasoning_mine_runs(tmp_path: Path) -> None:
     server = _make_server(tmp_path, mining_enabled=True)
     storage = _storage()
-    ingest = SimpleNamespace(traces_ingested=4, traces_scanned=10)
+    ingest = SimpleNamespace(traces_ingested=4, traces_scanned=10, files_scanned=3, files_total=3)
     distill = SimpleNamespace(patterns_learned=2, traces_processed=4, models_seen=1)
+    ingest_mock = AsyncMock(return_value=ingest)
     with (
         patch.object(server, "get_storage", return_value=storage),
         # mine runs on an isolated (non-cached) storage to avoid the shared-singleton race.
@@ -135,10 +136,7 @@ async def test_reasoning_mine_runs(tmp_path: Path) -> None:
             "surreal_memory.unified_config.create_isolated_storage",
             new=AsyncMock(return_value=storage),
         ),
-        patch(
-            "surreal_memory.engine.reasoning_miner.ingest_reasoning_traces",
-            new=AsyncMock(return_value=ingest),
-        ),
+        patch("surreal_memory.engine.reasoning_miner.ingest_reasoning_traces", new=ingest_mock),
         patch(
             "surreal_memory.engine.reasoning_distiller.distill_reasoning_patterns",
             new=AsyncMock(return_value=distill),
@@ -148,6 +146,8 @@ async def test_reasoning_mine_runs(tmp_path: Path) -> None:
 
     assert result["traces_ingested"] == 4
     assert result["patterns_learned"] == 2
+    # No backfill arg → backfill must default to False (never a silent full rescan).
+    assert ingest_mock.await_args.kwargs["backfill"] is False
 
 
 @pytest.mark.asyncio
@@ -155,7 +155,11 @@ async def test_reasoning_mine_applies_overrides(tmp_path: Path) -> None:
     # backfill + models must flow into the run config passed to the engine.
     server = _make_server(tmp_path, mining_enabled=True)
     storage = _storage()
-    ingest_mock = AsyncMock(return_value=SimpleNamespace(traces_ingested=1, traces_scanned=1))
+    ingest_mock = AsyncMock(
+        return_value=SimpleNamespace(
+            traces_ingested=1, traces_scanned=1, files_scanned=1, files_total=1
+        )
+    )
     distill_mock = AsyncMock(
         return_value=SimpleNamespace(patterns_learned=0, traces_processed=1, models_seen=1)
     )
@@ -177,6 +181,9 @@ async def test_reasoning_mine_applies_overrides(tmp_path: Path) -> None:
     run_cfg = ingest_mock.await_args.args[2]  # (storage, brain_id, config)
     assert run_cfg.reasoning_training.scan_lookback_days == 0
     assert run_cfg.reasoning_training.mining_models == ("a", "b")
+    # backfill must also flow as the real backfill kwarg (full-rescan bypass),
+    # not just the scan_lookback_days=0 override.
+    assert ingest_mock.await_args.kwargs["backfill"] is True
 
 
 @pytest.mark.asyncio

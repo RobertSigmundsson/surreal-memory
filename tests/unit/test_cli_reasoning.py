@@ -142,8 +142,9 @@ def test_mine_disabled_exits_nonzero(tmp_path: Path) -> None:
 
 def test_mine_runs_when_enabled(tmp_path: Path) -> None:
     storage = _storage()
-    ingest = SimpleNamespace(traces_ingested=4, traces_scanned=10)
+    ingest = SimpleNamespace(traces_ingested=4, traces_scanned=10, files_scanned=3, files_total=3)
     distill = SimpleNamespace(patterns_learned=2, traces_processed=4, models_seen=1)
+    ingest_mock = AsyncMock(return_value=ingest)
     with (
         patch(f"{CLI}.get_config", MagicMock()),
         patch(f"{CLI}.get_storage", new=AsyncMock(return_value=storage)),
@@ -151,10 +152,7 @@ def test_mine_runs_when_enabled(tmp_path: Path) -> None:
             "surreal_memory.unified_config.get_config",
             return_value=_ucfg(tmp_path, mining_enabled=True),
         ),
-        patch(
-            "surreal_memory.engine.reasoning_miner.ingest_reasoning_traces",
-            new=AsyncMock(return_value=ingest),
-        ),
+        patch("surreal_memory.engine.reasoning_miner.ingest_reasoning_traces", new=ingest_mock),
         patch(
             "surreal_memory.engine.reasoning_distiller.distill_reasoning_patterns",
             new=AsyncMock(return_value=distill),
@@ -166,6 +164,8 @@ def test_mine_runs_when_enabled(tmp_path: Path) -> None:
     data = json.loads(result.output)
     assert data["traces_ingested"] == 4
     assert data["patterns_learned"] == 2
+    # No --backfill flag → backfill must default to False (never a silent full rescan).
+    assert ingest_mock.await_args.kwargs["backfill"] is False
 
 
 def test_mine_dry_run(tmp_path: Path) -> None:
@@ -189,7 +189,7 @@ def test_mine_dry_run(tmp_path: Path) -> None:
 def test_mine_force_bypasses_disabled(tmp_path: Path) -> None:
     # --force runs mining even when mining_enabled is False (the privacy escape hatch).
     storage = _storage()
-    ingest = SimpleNamespace(traces_ingested=1, traces_scanned=1)
+    ingest = SimpleNamespace(traces_ingested=1, traces_scanned=1, files_scanned=1, files_total=1)
     distill = SimpleNamespace(patterns_learned=0, traces_processed=1, models_seen=1)
     with (
         patch(f"{CLI}.get_config", MagicMock()),
@@ -213,7 +213,11 @@ def test_mine_force_bypasses_disabled(tmp_path: Path) -> None:
 def test_mine_applies_overrides(tmp_path: Path) -> None:
     # --backfill + --models must flow into the run config passed to the engine.
     storage = _storage()
-    ingest_mock = AsyncMock(return_value=SimpleNamespace(traces_ingested=1, traces_scanned=1))
+    ingest_mock = AsyncMock(
+        return_value=SimpleNamespace(
+            traces_ingested=1, traces_scanned=1, files_scanned=1, files_total=1
+        )
+    )
     distill_mock = AsyncMock(
         return_value=SimpleNamespace(patterns_learned=0, traces_processed=1, models_seen=1)
     )
@@ -237,3 +241,6 @@ def test_mine_applies_overrides(tmp_path: Path) -> None:
     run_cfg = ingest_mock.await_args.args[2]  # (storage, brain_id, config)
     assert run_cfg.reasoning_training.scan_lookback_days == 0
     assert run_cfg.reasoning_training.mining_models == ("a", "b")
+    # --backfill must also flow as the real backfill kwarg (full-rescan bypass),
+    # not just the scan_lookback_days=0 override.
+    assert ingest_mock.await_args.kwargs["backfill"] is True
