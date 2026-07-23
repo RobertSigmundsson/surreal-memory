@@ -67,6 +67,36 @@ _GENERIC_FILLER = frozenset(
     }
 )
 
+# Machine-output / notification noise — never valuable knowledge. Empirical denylist
+# from gate_decision false-accepts (2026-07-23): 180x "Session activity:", 30x <summary>,
+# 20x "Background command", 19x <status>, 12x task-notification, tool-use-id, *-caveat>, etc.
+_NOISE_TAG_RE = re.compile(
+    r"</?summary>|</?status>|</?task-notification>|<system-reminder"
+    r"|[a-z][a-z_-]*-caveat>|<tool_use_id>|tool-use-id>|<function_calls>"
+    r'|\bMonitor event\b|Background command "',
+    re.IGNORECASE,
+)
+_NOISE_PREFIXES = (
+    "session activity:",
+    "<task-notification",
+    "ps -o ",
+    "echo ",
+    "curl -",
+)
+
+
+def _is_machine_noise(content: str) -> bool:
+    """True if content is machine output / session-notification noise, not knowledge.
+
+    Two signals: (a) starts with a known auto-capture/shell noise prefix, or
+    (b) contains a structural notification/tool tag that never appears in a real memory.
+    """
+    stripped = content.strip()
+    if stripped.lower().startswith(_NOISE_PREFIXES):
+        return True
+    return bool(_NOISE_TAG_RE.search(stripped))
+
+
 # -- Quality thresholds -----------------------------------------------------
 
 _MIN_CONTENT_LENGTH = 10
@@ -235,6 +265,16 @@ def check_write_gate(
             hints=("Provide substantive content instead of generic filler",),
             rejected=True,
             rejection_reason=f"Generic filler rejected: '{stripped[:50]}'",
+        )
+
+    # Gate 1b: Machine-output / session-notification noise (empirical denylist)
+    if _is_machine_noise(stripped):
+        return QualityResult(
+            score=0,
+            quality="low",
+            hints=("Machine output / session-notification noise is not a memory",),
+            rejected=True,
+            rejection_reason=f"Machine-noise rejected: '{stripped[:50]}'",
         )
 
     # Gate 2: Minimum length
