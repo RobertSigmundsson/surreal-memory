@@ -19,19 +19,25 @@ if TYPE_CHECKING:
 
 _CAUSAL_PATTERN = re.compile(
     r"\b(because|caused|due to|led to|resulted in|reason|since|therefore"
-    r"|so that|in order to|as a result|consequently)\b",
+    r"|so that|in order to|as a result|consequently"
+    # PL (2026-07-23, specyficzne markery przyczyny — unikamy ultra-częstych):
+    r"|ponieważ|dlatego|gdyż|wskutek|z powodu|w wyniku|spowodowa\w*|przez co|zatem)\b",
     re.IGNORECASE,
 )
 
 _TEMPORAL_PATTERN = re.compile(
     r"\b(after|before|then|when|while|during|until|once|first|next"
-    r"|previously|subsequently|earlier|later|following)\b",
+    r"|previously|subsequently|earlier|later|following"
+    # PL (specyficzne markery czasu — bez ultra-częstego "po"):
+    r"|podczas|zanim|następnie|wcześniej|później|najpierw|dopiero|potem)\b",
     re.IGNORECASE,
 )
 
 _COMPARATIVE_PATTERN = re.compile(
     r"\b(over|instead of|replaced|vs|versus|compared to|rather than"
-    r"|better than|worse than|faster|slower|cheaper|preferred)\b",
+    r"|better than|worse than|faster|slower|cheaper|preferred"
+    # PL (markery porównania/wyboru):
+    r"|zamiast|zastąp\w*|lepsz\w*|gorsz\w*|szybsz\w*|wolniejsz\w*|tańsz\w*|kosztem|w przeciwieństwie|wol[ię])\b",
     re.IGNORECASE,
 )
 
