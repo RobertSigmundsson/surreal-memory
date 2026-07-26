@@ -2618,13 +2618,14 @@ class SurrealDBStorage(
         )
         count = 0
         for r in rows:
-            # Re-sanitise the id read back from the DB rather than trusting the
-            # write-path invariant (defence in depth): _to_surreal_id strips the
-            # table prefix and folds, so ``neuron:{nid}`` stays a safe literal.
-            nid = _to_surreal_id(str(r.get("id", "")))
+            # Route through delete_neuron() (audit DB-01) instead of a raw
+            # conn.delete(): that raw call skipped the synapse cascade AND the
+            # neuron_state cleanup, leaving both as orphans once the ephemeral
+            # neuron aged out — the same bug already fixed for delete_neuron's
+            # other callers, just missed here.
             try:
-                await self._conn.delete(f"neuron:{nid}")
-                count += 1
+                if await self.delete_neuron(str(r.get("id", ""))):
+                    count += 1
             except Exception:
                 pass
         return count
