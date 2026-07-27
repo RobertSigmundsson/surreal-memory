@@ -131,11 +131,17 @@ def main() -> None:
     # Claude Code adds a SessionStart hook's context to the model ONLY via the
     # hookSpecificOutput.additionalContext JSON field (a top-level {"type":"context"}
     # is parsed as JSON but carries no recognized field, so nothing is injected).
+    # Echo back the event we were actually invoked for instead of hardcoding
+    # SessionStart: this entry point is also wired to SubagentStart so subagents
+    # receive memories + reasoning strategies, and a hookEventName that disagrees
+    # with the live event makes Claude Code drop additionalContext — the hook
+    # would appear to run while injecting nothing.
+    event_name = str(hook_input.get("hook_event_name") or "SessionStart")
     print(  # noqa: T201
         json.dumps(
             {
                 "hookSpecificOutput": {
-                    "hookEventName": "SessionStart",
+                    "hookEventName": event_name,
                     "additionalContext": "\n\n".join(sections),
                 }
             }
