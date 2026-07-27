@@ -158,20 +158,42 @@ async def find_cross_cluster_links(
     if len(cluster_list) < 2:
         return []
 
+    # Referential liveness guard (audit 2026-07-27): fibers outlive their
+    # neurons — cascade_delete_synapses cleans synapses on neuron DELETE, but
+    # nothing re-anchors fibers, so anchor_neuron_id / neuron_ids may point at
+    # deleted records. Anchoring a RELATED_TO on such an id creates a synapse
+    # that is orphaned at birth (26 measured in prod, all from this function),
+    # and because the existing-pair dedup below only sees live synapses while
+    # the cascade keeps deleting the dead ones, every enrichment run recreated
+    # them — manual hygiene could never converge. Verify every referenced id
+    # in one batch and drop the dead ones from both anchors and entity sets.
+    referenced: set[str] = set()
+    for indices in cluster_list:
+        for idx in indices:
+            referenced.add(tagged_fibers[idx].anchor_neuron_id)
+            referenced |= tagged_fibers[idx].neuron_ids
+    alive = set((await storage.get_neurons_batch(list(referenced))).keys())
+
     # Build cluster entity sets and anchor IDs
     cluster_entities: list[set[str]] = []
-    cluster_anchors: list[str] = []
+    cluster_anchors: list[str | None] = []
     for indices in cluster_list:
         entity_ids: set[str] = set()
         for idx in indices:
             entity_ids |= tagged_fibers[idx].neuron_ids
-        cluster_entities.append(entity_ids)
-        # Use the highest-salience fiber's anchor as cluster anchor
-        best_fiber = max(
+        cluster_entities.append(entity_ids & alive)
+        # Use the highest-salience fiber whose anchor still exists; a cluster
+        # whose anchors are all dead contributes no links.
+        anchor: str | None = None
+        for candidate in sorted(
             (tagged_fibers[i] for i in indices),
             key=lambda f: f.salience,
-        )
-        cluster_anchors.append(best_fiber.anchor_neuron_id)
+            reverse=True,
+        ):
+            if candidate.anchor_neuron_id in alive:
+                anchor = candidate.anchor_neuron_id
+                break
+        cluster_anchors.append(anchor)
 
     # Check existing synapses between cluster anchors
     existing_synapses = await storage.get_synapses_paged(type=SynapseType.RELATED_TO)
@@ -194,6 +216,8 @@ async def find_cross_cluster_links(
 
             anchor_a = cluster_anchors[i]
             anchor_b = cluster_anchors[j]
+            if anchor_a is None or anchor_b is None:
+                continue
             if anchor_a == anchor_b:
                 continue
             if (anchor_a, anchor_b) in existing_pairs:
