@@ -234,28 +234,33 @@ async def build_injection_context(
 async def get_reasoning_context(hook_input: dict[str, Any]) -> str:
     """Resolve the active model, build its reasoning block, mark the session.
 
-    Shared by the SessionStart and UserPromptSubmit hooks. Opt-in via
-    reasoning_training.injection_enabled. Those two fire for the same session and
-    race each other, so they inject at most once per session via the marker
-    (already_injected/mark_injected) — whichever gets there first wins.
-
-    The marker is keyed on ``session_id``, so it is only correct for events that
-    fire once per session. A per-subagent event (``SubagentStart``, which a user
-    can wire to this same entry point) carries the PARENT session's id, so
-    honouring the marker there would return "" for every subagent after the
-    first — and silently, since "" is also the legitimate "nothing matched"
-    answer. Such events are exempt from the marker and do not set it.
-
+    Shared by the SessionStart, UserPromptSubmit and SubagentStart hooks. Opt-in
+    via reasoning_training.injection_enabled. Main-session hooks (SessionStart /
+    UserPromptSubmit) inject at most once per session via the marker
+    (already_injected/mark_injected) — whichever fires first wins. Two exemptions
+    from the marker:
+    - SubagentStart: fires once per spawned subagent and EVERY subagent must
+      receive the strategies (payload carries the PARENT session_id, so the
+      per-session marker would silently starve all subagents after the first).
+    - SessionStart with source == "compact": compaction just flattened the old
+      context, so the previously injected block is GONE from the conversation —
+      honoring the marker would leave the session strategy-less until it ends;
+      re-inject instead (startup/resume/clear keep the once-per-session rule:
+      their history, including the block, is still present).
     Storage is opened on the current brain and always closed. Returns "" when
-    injection is disabled, already done this session (session-scoped events
-    only), or nothing matched.
+    injection is disabled, already done this session (non-exempt events only),
+    or nothing matched.
     """
     from surreal_memory.unified_config import get_config, get_shared_storage
 
     config = get_config()
     if not config.reasoning_training.injection_enabled:
         return ""
-    per_session = str(hook_input.get("hook_event_name") or "") != "SubagentStart"
+    event = str(hook_input.get("hook_event_name") or "")
+    per_session = not (
+        event == "SubagentStart"
+        or (event == "SessionStart" and str(hook_input.get("source") or "") == "compact")
+    )
     session_id = str(hook_input.get("session_id") or "")
     if per_session and already_injected(session_id):
         return ""
