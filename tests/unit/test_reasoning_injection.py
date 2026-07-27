@@ -198,6 +198,42 @@ async def test_build_block_renders_ranked(tmp_path: Path) -> None:
     assert block.index("debugging: verify") < block.index("planning: plan")
 
 
+async def test_build_block_multi_source(tmp_path: Path) -> None:
+    """A comma-separated map value yields one block PER source, in order.
+
+    Learn-from-the-stronger doctrine (Robert, 2026-07-27): models below the
+    apex get both apex banks. A source with no patterns contributes nothing
+    (no empty header), and each block keeps its own budget.
+    """
+    storage = InMemoryStorage()
+    storage.set_brain(BRAIN)
+    await _add_pattern(
+        storage, "claude-fable-5", "debugging", "debugging: fable-way", "verify", 1.0, 3
+    )
+    await _add_pattern(storage, "claude-opus-5", "planning", "planning: opus-way", "plan", 0.9, 2)
+    cfg = _ucfg(
+        tmp_path,
+        injection_map=(("claude-sonnet-*", "claude-fable-5,claude-opus-5"),),
+    )
+
+    block = await build_injection_context(storage, "claude-sonnet-5", cfg)
+    assert "## Reasoning strategies (learned from claude-fable-5)" in block
+    assert "## Reasoning strategies (learned from claude-opus-5)" in block
+    assert "debugging: fable-way" in block
+    assert "planning: opus-way" in block
+    # Source order from the map value is preserved.
+    assert block.index("claude-fable-5") < block.index("claude-opus-5")
+
+    # Unknown third source is silently skipped — no empty header.
+    cfg2 = _ucfg(
+        tmp_path,
+        injection_map=(("default", "claude-fable-5,claude-ghost-9"),),
+    )
+    block2 = await build_injection_context(storage, "anything", cfg2)
+    assert "claude-fable-5" in block2
+    assert "claude-ghost-9" not in block2
+
+
 async def test_injection_disabled_returns_empty(tmp_path: Path) -> None:
     storage = InMemoryStorage()
     storage.set_brain(BRAIN)
