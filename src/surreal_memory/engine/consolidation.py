@@ -932,6 +932,17 @@ class ConsolidationEngine:
             ):
                 continue
 
+            # Never merge a pinned fiber away, for the same reason: the merged
+            # fiber carries only `merged_from`, dropping both the pin itself and
+            # the source metadata (ReasoningBank `_reasoning_pattern` + strategy
+            # /signature, trained KB). Pinning exists precisely to make a fiber
+            # survive lifecycle, and merge is part of lifecycle — without this
+            # guard reasoning patterns lose their fibers on the next
+            # consolidation and injection silently falls back to the few that
+            # happened not to overlap (observed 2026-07-27: 95 patterns -> 3).
+            if fiber_list[i].pinned or fiber_list[j].pinned:
+                continue
+
             set_a = fiber_list[i].neuron_ids
             set_b = fiber_list[j].neuron_ids
             intersection = len(set_a & set_b)
