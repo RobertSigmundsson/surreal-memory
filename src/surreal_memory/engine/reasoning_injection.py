@@ -234,20 +234,25 @@ async def build_injection_context(
 async def get_reasoning_context(hook_input: dict[str, Any]) -> str:
     """Resolve the active model, build its reasoning block, mark the session.
 
-    Shared by the SessionStart and UserPromptSubmit hooks. Opt-in via
-    reasoning_training.injection_enabled; injects at most once per session via the
-    marker (already_injected/mark_injected), so whichever hook fires first wins and
-    the other is a no-op. Storage is opened on the current brain and always closed.
-    Returns "" when injection is disabled, already done this session, or nothing
-    matched.
+    Shared by the SessionStart, UserPromptSubmit and SubagentStart hooks. Opt-in
+    via reasoning_training.injection_enabled. Main-session hooks (SessionStart /
+    UserPromptSubmit) inject at most once per session via the marker
+    (already_injected/mark_injected) — whichever fires first wins. SubagentStart
+    is exempt from the marker: it fires once per spawned subagent and EVERY
+    subagent must receive the strategies (payload carries the PARENT session_id,
+    so the per-session marker would silently starve all subagents after the
+    first injection). Storage is opened on the current brain and always closed.
+    Returns "" when injection is disabled, already done this session (main-session
+    hooks only), or nothing matched.
     """
     from surreal_memory.unified_config import get_config, get_shared_storage
 
     config = get_config()
     if not config.reasoning_training.injection_enabled:
         return ""
+    per_session = str(hook_input.get("hook_event_name") or "") != "SubagentStart"
     session_id = str(hook_input.get("session_id") or "")
-    if already_injected(session_id):
+    if per_session and already_injected(session_id):
         return ""
 
     model = resolve_active_model(hook_input)
@@ -260,7 +265,7 @@ async def get_reasoning_context(hook_input: dict[str, Any]) -> str:
         except Exception:
             logger.debug("reasoning storage.close() failed (non-fatal)", exc_info=True)
 
-    if block:
+    if block and per_session:
         mark_injected(session_id)
     return block
 

@@ -35,34 +35,104 @@ from surreal_memory.storage.sqlite_store import SQLiteStorage
 # ── Content generators ───────────────────────────────────────────────────────
 
 TOPICS = [
-    "Python", "JavaScript", "Rust", "Go", "TypeScript", "Java", "C++", "Ruby",
-    "PostgreSQL", "Redis", "MongoDB", "MySQL", "SQLite", "Elasticsearch", "Cassandra",
-    "Docker", "Kubernetes", "Terraform", "Ansible", "Jenkins", "GitHub Actions", "ArgoCD",
-    "React", "Vue", "Angular", "Svelte", "Next.js", "FastAPI", "Django", "Flask",
-    "JWT", "OAuth2", "CORS", "HTTPS", "WebSocket", "gRPC", "GraphQL", "REST",
-    "AWS", "GCP", "Azure", "Cloudflare", "Vercel", "Netlify", "DigitalOcean",
-    "Machine Learning", "Neural Networks", "NLP", "Computer Vision", "Transformers",
+    "Python",
+    "JavaScript",
+    "Rust",
+    "Go",
+    "TypeScript",
+    "Java",
+    "C++",
+    "Ruby",
+    "PostgreSQL",
+    "Redis",
+    "MongoDB",
+    "MySQL",
+    "SQLite",
+    "Elasticsearch",
+    "Cassandra",
+    "Docker",
+    "Kubernetes",
+    "Terraform",
+    "Ansible",
+    "Jenkins",
+    "GitHub Actions",
+    "ArgoCD",
+    "React",
+    "Vue",
+    "Angular",
+    "Svelte",
+    "Next.js",
+    "FastAPI",
+    "Django",
+    "Flask",
+    "JWT",
+    "OAuth2",
+    "CORS",
+    "HTTPS",
+    "WebSocket",
+    "gRPC",
+    "GraphQL",
+    "REST",
+    "AWS",
+    "GCP",
+    "Azure",
+    "Cloudflare",
+    "Vercel",
+    "Netlify",
+    "DigitalOcean",
+    "Machine Learning",
+    "Neural Networks",
+    "NLP",
+    "Computer Vision",
+    "Transformers",
 ]
 
 ACTIONS = [
-    "supports", "implements", "requires", "provides", "enables", "handles",
-    "manages", "processes", "validates", "optimizes", "replaces", "extends",
-    "integrates with", "depends on", "supersedes", "enhances",
+    "supports",
+    "implements",
+    "requires",
+    "provides",
+    "enables",
+    "handles",
+    "manages",
+    "processes",
+    "validates",
+    "optimizes",
+    "replaces",
+    "extends",
+    "integrates with",
+    "depends on",
+    "supersedes",
+    "enhances",
 ]
 
 FEATURES = [
-    "concurrent request handling", "type-safe data validation",
-    "automatic schema generation", "efficient memory management",
-    "distributed caching layers", "real-time event streaming",
-    "structured error handling", "automated test discovery",
-    "incremental compilation", "hot module replacement",
-    "connection pooling", "query optimization", "load balancing",
-    "rate limiting", "health monitoring", "circuit breaker pattern",
-    "retry with exponential backoff", "blue-green deployment",
-    "canary releases", "feature flag management",
-    "structured logging", "distributed tracing",
-    "authentication middleware", "authorization policies",
-    "input sanitization", "CSRF protection",
+    "concurrent request handling",
+    "type-safe data validation",
+    "automatic schema generation",
+    "efficient memory management",
+    "distributed caching layers",
+    "real-time event streaming",
+    "structured error handling",
+    "automated test discovery",
+    "incremental compilation",
+    "hot module replacement",
+    "connection pooling",
+    "query optimization",
+    "load balancing",
+    "rate limiting",
+    "health monitoring",
+    "circuit breaker pattern",
+    "retry with exponential backoff",
+    "blue-green deployment",
+    "canary releases",
+    "feature flag management",
+    "structured logging",
+    "distributed tracing",
+    "authentication middleware",
+    "authorization policies",
+    "input sanitization",
+    "CSRF protection",
 ]
 
 MEMORY_TYPES = ["fact", "decision", "error", "insight", "todo", "workflow", "context"]
@@ -86,10 +156,14 @@ INSIGHT_TEMPLATES = [
 ]
 
 REASONS = [
-    "better performance under load", "stronger type safety",
-    "more active community", "better documentation",
-    "lower operational cost", "simpler deployment",
-    "native async support", "better error messages",
+    "better performance under load",
+    "stronger type safety",
+    "more active community",
+    "better documentation",
+    "lower operational cost",
+    "simpler deployment",
+    "native async support",
+    "better error messages",
 ]
 
 
@@ -198,15 +272,17 @@ async def bench_recall(
             times.append((time.perf_counter() - t0) * 1000)
             last = result
 
-        results.append({
-            "query": query,
-            "depth": depth.name,
-            "median_ms": round(statistics.median(times), 2),
-            "p95_ms": round(sorted(times)[int(len(times) * 0.95)], 2),
-            "neurons": last.neurons_activated if last else 0,
-            "confidence": round(last.confidence, 2) if last else 0,
-            "has_answer": bool(last and last.context),
-        })
+        results.append(
+            {
+                "query": query,
+                "depth": depth.name,
+                "median_ms": round(statistics.median(times), 2),
+                "p95_ms": round(sorted(times)[int(len(times) * 0.95)], 2),
+                "neurons": last.neurons_activated if last else 0,
+                "confidence": round(last.confidence, 2) if last else 0,
+                "has_answer": bool(last and last.context),
+            }
+        )
 
     return results
 
@@ -315,15 +391,17 @@ async def run_scale_benchmark(n_memories: int, tmpdir: str) -> dict:
     print(f"  DB size after encode: {db_size_after_encode:.1f} MB")
 
     # Phase 2: Recall (pre-consolidation)
-    print(f"  Running recall queries (pre-consolidation)...")
+    print("  Running recall queries (pre-consolidation)...")
     recall_pre = await bench_recall(storage, config, RECALL_QUERIES, n_runs=5, label="pre")
 
     # Phase 3: Diagnostics (pre-consolidation)
-    print(f"  Running diagnostics (pre-consolidation)...")
+    print("  Running diagnostics (pre-consolidation)...")
     diag_pre = await bench_diagnostics(storage)
-    print(f"    Grade: {diag_pre['grade']} | Purity: {diag_pre['purity']} | "
-          f"Neurons: {diag_pre['neuron_count']:,} | Synapses: {diag_pre['synapse_count']:,} | "
-          f"Fibers: {diag_pre['fiber_count']:,}")
+    print(
+        f"    Grade: {diag_pre['grade']} | Purity: {diag_pre['purity']} | "
+        f"Neurons: {diag_pre['neuron_count']:,} | Synapses: {diag_pre['synapse_count']:,} | "
+        f"Fibers: {diag_pre['fiber_count']:,}"
+    )
 
     # Phase 4: Consolidation
     consolidation = await bench_consolidation(storage)
@@ -332,15 +410,17 @@ async def run_scale_benchmark(n_memories: int, tmpdir: str) -> dict:
     print(f"  DB size after consolidation: {db_size_after_consolidation:.1f} MB")
 
     # Phase 5: Recall (post-consolidation)
-    print(f"  Running recall queries (post-consolidation)...")
+    print("  Running recall queries (post-consolidation)...")
     recall_post = await bench_recall(storage, config, RECALL_QUERIES, n_runs=5, label="post")
 
     # Phase 6: Diagnostics (post-consolidation)
-    print(f"  Running diagnostics (post-consolidation)...")
+    print("  Running diagnostics (post-consolidation)...")
     diag_post = await bench_diagnostics(storage)
-    print(f"    Grade: {diag_post['grade']} | Purity: {diag_post['purity']} | "
-          f"Neurons: {diag_post['neuron_count']:,} | Synapses: {diag_post['synapse_count']:,} | "
-          f"Fibers: {diag_post['fiber_count']:,}")
+    print(
+        f"    Grade: {diag_post['grade']} | Purity: {diag_post['purity']} | "
+        f"Neurons: {diag_post['neuron_count']:,} | Synapses: {diag_post['synapse_count']:,} | "
+        f"Fibers: {diag_post['fiber_count']:,}"
+    )
 
     await storage.close()
     gc.collect()
@@ -380,36 +460,56 @@ def generate_scale_markdown(results: list[dict], timestamp: str) -> str:
 
     # ── Encode throughput ──
     sections.append("### Encode Throughput\n")
-    headers = ["Memories", "Total (s)", "Mean (ms)", "Median (ms)", "P95 (ms)", "P99 (ms)", "Throughput (mem/s)", "Errors"]
+    headers = [
+        "Memories",
+        "Total (s)",
+        "Mean (ms)",
+        "Median (ms)",
+        "P95 (ms)",
+        "P99 (ms)",
+        "Throughput (mem/s)",
+        "Errors",
+    ]
     rows = []
     for r in results:
         e = r["encode"]
-        rows.append([
-            f"{r['scale']:,}",
-            f"{e['total_ms'] / 1000:.1f}",
-            str(e["mean_ms"]),
-            str(e["median_ms"]),
-            str(e["p95_ms"]),
-            str(e["p99_ms"]),
-            str(e["throughput"]),
-            str(e["errors"]),
-        ])
+        rows.append(
+            [
+                f"{r['scale']:,}",
+                f"{e['total_ms'] / 1000:.1f}",
+                str(e["mean_ms"]),
+                str(e["median_ms"]),
+                str(e["p95_ms"]),
+                str(e["p99_ms"]),
+                str(e["throughput"]),
+                str(e["errors"]),
+            ]
+        )
     sections.append(md_table(headers, rows))
 
     # ── Database size ──
     sections.append("\n### Database Size\n")
-    headers = ["Memories", "After Encode (MB)", "After Consolidation (MB)", "Neurons", "Synapses", "Fibers"]
+    headers = [
+        "Memories",
+        "After Encode (MB)",
+        "After Consolidation (MB)",
+        "Neurons",
+        "Synapses",
+        "Fibers",
+    ]
     rows = []
     for r in results:
         d = r["diag_pre"]
-        rows.append([
-            f"{r['scale']:,}",
-            str(r["db_size_mb"]),
-            str(r["db_size_post_consolidation_mb"]),
-            f"{d['neuron_count']:,}",
-            f"{d['synapse_count']:,}",
-            f"{d['fiber_count']:,}",
-        ])
+        rows.append(
+            [
+                f"{r['scale']:,}",
+                str(r["db_size_mb"]),
+                str(r["db_size_post_consolidation_mb"]),
+                f"{d['neuron_count']:,}",
+                f"{d['synapse_count']:,}",
+                f"{d['fiber_count']:,}",
+            ]
+        )
     sections.append(md_table(headers, rows))
 
     # ── Recall latency ──
@@ -420,72 +520,105 @@ def generate_scale_markdown(results: list[dict], timestamp: str) -> str:
         headers = ["Query", "Depth", "Median (ms)", "P95 (ms)", "Neurons", "Confidence", "Found"]
         rows = []
         for q in r["recall_post"]:
-            rows.append([
-                q["query"],
-                q["depth"],
-                str(q["median_ms"]),
-                str(q["p95_ms"]),
-                str(q["neurons"]),
-                str(q["confidence"]),
-                "yes" if q["has_answer"] else "no",
-            ])
+            rows.append(
+                [
+                    q["query"],
+                    q["depth"],
+                    str(q["median_ms"]),
+                    str(q["p95_ms"]),
+                    str(q["neurons"]),
+                    str(q["confidence"]),
+                    "yes" if q["has_answer"] else "no",
+                ]
+            )
         # Add average row
         avg_median = round(statistics.mean(q["median_ms"] for q in r["recall_post"]), 2)
         avg_p95 = round(statistics.mean(q["p95_ms"] for q in r["recall_post"]), 2)
         avg_neurons = round(statistics.mean(q["neurons"] for q in r["recall_post"]), 1)
-        rows.append([
-            "**Average**", "", f"**{avg_median}**", f"**{avg_p95}**",
-            f"**{avg_neurons}**", "", "",
-        ])
+        rows.append(
+            [
+                "**Average**",
+                "",
+                f"**{avg_median}**",
+                f"**{avg_p95}**",
+                f"**{avg_neurons}**",
+                "",
+                "",
+            ]
+        )
         sections.append(md_table(headers, rows))
 
     # ── Consolidation ──
     sections.append("\n### Consolidation Performance\n")
-    headers = ["Memories", "Duration (s)", "Synapses Pruned", "Neurons Pruned", "Fibers Merged", "Synapses Enriched"]
+    headers = [
+        "Memories",
+        "Duration (s)",
+        "Synapses Pruned",
+        "Neurons Pruned",
+        "Fibers Merged",
+        "Synapses Enriched",
+    ]
     rows = []
     for r in results:
         c = r["consolidation"]
-        rows.append([
-            f"{r['scale']:,}",
-            f"{c['duration_ms'] / 1000:.1f}",
-            str(c["synapses_pruned"]),
-            str(c["neurons_pruned"]),
-            str(c["fibers_merged"]),
-            str(c["synapses_enriched"]),
-        ])
+        rows.append(
+            [
+                f"{r['scale']:,}",
+                f"{c['duration_ms'] / 1000:.1f}",
+                str(c["synapses_pruned"]),
+                str(c["neurons_pruned"]),
+                str(c["fibers_merged"]),
+                str(c["synapses_enriched"]),
+            ]
+        )
     sections.append(md_table(headers, rows))
 
     # ── Health ──
     sections.append("\n### Health Diagnostics\n")
-    headers = ["Memories", "Phase", "Grade", "Purity", "Connectivity", "Diversity", "Freshness", "Orphan Rate", "Warnings", "Diagnostics (ms)"]
+    headers = [
+        "Memories",
+        "Phase",
+        "Grade",
+        "Purity",
+        "Connectivity",
+        "Diversity",
+        "Freshness",
+        "Orphan Rate",
+        "Warnings",
+        "Diagnostics (ms)",
+    ]
     rows = []
     for r in results:
         for phase, key in [("Pre", "diag_pre"), ("Post", "diag_post")]:
             d = r[key]
-            rows.append([
-                f"{r['scale']:,}",
-                phase,
-                d["grade"],
-                str(d["purity"]),
-                str(d["connectivity"]),
-                str(d["diversity"]),
-                str(d["freshness"]),
-                str(d["orphan_rate"]),
-                str(d["warnings"]),
-                str(d["diagnostics_ms"]),
-            ])
+            rows.append(
+                [
+                    f"{r['scale']:,}",
+                    phase,
+                    d["grade"],
+                    str(d["purity"]),
+                    str(d["connectivity"]),
+                    str(d["diversity"]),
+                    str(d["freshness"]),
+                    str(d["orphan_rate"]),
+                    str(d["warnings"]),
+                    str(d["diagnostics_ms"]),
+                ]
+            )
     sections.append(md_table(headers, rows))
 
     # ── Methodology ──
     sections.append("\n### Methodology\n")
-    sections.append("""
+    sections.append(
+        """
 - **Storage**: Real SQLiteStorage (aiosqlite, WAL mode)
 - **Platform**: Windows 11, single-threaded async
 - **Memory types**: 7 types (fact, decision, error, insight, todo, workflow, context)
 - **Content**: Diverse generated content from 50 topics × 16 actions × 26 features
 - **Recall runs**: 5 per query (median reported)
 - **Seed**: `random.seed(42)` for reproducibility
-""".strip())
+""".strip()
+    )
 
     return "\n\n".join(sections) + "\n"
 
@@ -520,7 +653,7 @@ async def main() -> None:
         # Remove old SQLite at Scale section if present
         marker = "## SQLite at Scale"
         if marker in existing:
-            existing = existing[:existing.index(marker)].rstrip() + "\n\n"
+            existing = existing[: existing.index(marker)].rstrip() + "\n\n"
         combined = existing + scale_md
     else:
         combined = scale_md
@@ -537,12 +670,14 @@ async def main() -> None:
         d = r["diag_post"]
         c = r["consolidation"]
         avg_recall = round(statistics.mean(q["median_ms"] for q in r["recall_post"]), 2)
-        print(f"  {r['scale']:>6,} memories: "
-              f"encode={e['throughput']} mem/s, "
-              f"recall_avg={avg_recall}ms, "
-              f"consolidation={c['duration_ms'] / 1000:.1f}s, "
-              f"grade={d['grade']}, "
-              f"db={r['db_size_post_consolidation_mb']}MB")
+        print(
+            f"  {r['scale']:>6,} memories: "
+            f"encode={e['throughput']} mem/s, "
+            f"recall_avg={avg_recall}ms, "
+            f"consolidation={c['duration_ms'] / 1000:.1f}s, "
+            f"grade={d['grade']}, "
+            f"db={r['db_size_post_consolidation_mb']}MB"
+        )
 
 
 if __name__ == "__main__":

@@ -6,12 +6,12 @@ Usage:
     python scripts/gen_cli_docs.py --check      # check if docs are up-to-date (exit 1 if stale)
     python scripts/gen_cli_docs.py --stdout      # print to stdout instead of file
 """
+
 from __future__ import annotations
 
 import argparse
 import sys
 from pathlib import Path
-from typing import Any
 
 import click
 import typer.main
@@ -57,7 +57,16 @@ CLI_CATEGORIES: list[tuple[str, str, list[str]]] = [
     (
         "config",
         "Configuration & Setup",
-        ["init", "setup", "mcp-config", "prompt", "hooks", "config preset", "config tier", "install-skills"],
+        [
+            "init",
+            "setup",
+            "mcp-config",
+            "prompt",
+            "hooks",
+            "config preset",
+            "config tier",
+            "install-skills",
+        ],
     ),
     (
         "server",
@@ -110,9 +119,7 @@ def _get_click_app() -> click.Group:
     return typer.main.get_command(app)  # type: ignore[return-value]
 
 
-def _collect_commands(
-    group: click.BaseCommand, prefix: str = ""
-) -> dict[str, click.Command]:
+def _collect_commands(group: click.BaseCommand, prefix: str = "") -> dict[str, click.Command]:
     """Recursively collect all commands with their full names."""
     result: dict[str, click.Command] = {}
 
@@ -183,8 +190,7 @@ def _format_command(name: str, cmd: click.Command) -> str:
     params = [
         p
         for p in cmd.params
-        if p.name not in ("help",)
-        and not (isinstance(p, click.Option) and p.hidden)
+        if p.name not in ("help",) and not (isinstance(p, click.Option) and p.hidden)
     ]
 
     if params:
@@ -300,7 +306,9 @@ def main() -> None:
         if output_path.exists():
             existing = output_path.read_text(encoding="utf-8")
             if existing == content:
-                print(f"  docs/getting-started/cli-reference.md is up-to-date ({len(content)} chars)")
+                print(
+                    f"  docs/getting-started/cli-reference.md is up-to-date ({len(content)} chars)"
+                )
                 return
             else:
                 print(

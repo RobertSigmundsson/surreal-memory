@@ -113,15 +113,17 @@ async def main() -> None:
     storage1, brain1 = await create_expert_brain()
 
     stats = await storage1.get_stats(brain1.id)
-    print(f"   Created brain with {stats['neuron_count']} neurons, "
-          f"{stats['synapse_count']} synapses, {stats['fiber_count']} fibers")
+    print(
+        f"   Created brain with {stats['neuron_count']} neurons, "
+        f"{stats['synapse_count']} synapses, {stats['fiber_count']} fibers"
+    )
 
     # 2. Test the expert brain
     print("\n2. Testing expert brain...")
     pipeline1 = ReflexPipeline(storage1, brain1.config)
 
     result = await pipeline1.query("How should I format strings in Python?")
-    print(f"   Query: How should I format strings in Python?")
+    print("   Query: How should I format strings in Python?")
     print(f"   Answer: {result.answer}")
 
     # 3. Export brain
@@ -157,10 +159,8 @@ async def main() -> None:
     # 6. Verify stats match
     print("6. Verifying import...")
     stats2 = await storage2.get_stats(imported_brain_id)
-    print(f"   Original: {stats['neuron_count']} neurons, "
-          f"{stats['synapse_count']} synapses")
-    print(f"   Imported: {stats2['neuron_count']} neurons, "
-          f"{stats2['synapse_count']} synapses")
+    print(f"   Original: {stats['neuron_count']} neurons, {stats['synapse_count']} synapses")
+    print(f"   Imported: {stats2['neuron_count']} neurons, {stats2['synapse_count']} synapses")
 
     # Cleanup
     Path(export_path).unlink(missing_ok=True)

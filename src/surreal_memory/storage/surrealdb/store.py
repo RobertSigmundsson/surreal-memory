@@ -478,7 +478,7 @@ class SurrealDBStorage(
         namespace: str = "",
         database: str = "",
         user: str = "",
-        password: str = "",
+        password: str = "",  # nosec B107 — pusty sentinel "wez z env/config", nie haslo
         embedding_dim: int = 3072,
     ) -> None:
         from surreal_memory.storage.surrealdb.connection import SurrealSettings

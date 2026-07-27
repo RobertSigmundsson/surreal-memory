@@ -26,9 +26,9 @@ class SensitiveType(StrEnum):
     """Types of sensitive content."""
 
     API_KEY = "api_key"
-    PASSWORD = "password"
-    SECRET = "secret"
-    TOKEN = "token"
+    PASSWORD = "password"  # nosec B105 — etykieta TYPU sekretu w detektorze, nie sekret
+    SECRET = "secret"  # nosec B105
+    TOKEN = "token"  # nosec B105
     PRIVATE_KEY = "private_key"
     CREDIT_CARD = "credit_card"
     SSN = "ssn"
@@ -37,7 +37,7 @@ class SensitiveType(StrEnum):
     AWS_KEY = "aws_key"
     DATABASE_URL = "database_url"
     JWT = "jwt"
-    GENERIC_SECRET = "generic_secret"
+    GENERIC_SECRET = "generic_secret"  # nosec B105
 
 
 @dataclass(frozen=True)

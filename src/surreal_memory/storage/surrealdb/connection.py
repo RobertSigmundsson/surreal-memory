@@ -14,7 +14,7 @@ from dataclasses import dataclass
 
 DEFAULT_URL = "http://localhost:8001"
 DEFAULT_USER = "root"
-DEFAULT_PASS = "surrealmemory"  # noqa: S105
+DEFAULT_PASS = "surrealmemory"  # noqa: S105  # nosec B105 — udokumentowany default dev; prod nadpisuje SURREALDB_PASS
 
 AUTH_HINT = (
     "The MCP server env is likely empty or missing SURREALDB_PASS, so it fell back to the "

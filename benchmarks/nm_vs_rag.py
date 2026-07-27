@@ -52,6 +52,7 @@ QUERIES = [
 
 # -- Vanilla vector search --------------------------------
 
+
 def _tokenize(text: str) -> Counter[str]:
     words = re.findall(r"[a-zA-Z_]+", text.lower())
     return Counter(words)
@@ -71,10 +72,7 @@ def _cosine_similarity(a: Counter[str], b: Counter[str]) -> float:
 
 def vanilla_search(query: str, memories: list[str], top_k: int = 3) -> list[tuple[str, float]]:
     query_vec = _tokenize(query)
-    scored = [
-        (mem, _cosine_similarity(query_vec, _tokenize(mem)))
-        for mem in memories
-    ]
+    scored = [(mem, _cosine_similarity(query_vec, _tokenize(mem))) for mem in memories]
     scored.sort(key=lambda x: x[1], reverse=True)
     return [(mem, score) for mem, score in scored[:top_k] if score > 0]
 
@@ -93,6 +91,7 @@ GRAY = "\033[90m"
 
 
 # -- Main -------------------------------------------------
+
 
 async def main() -> None:
     # Setup Surreal-Memory
@@ -140,7 +139,9 @@ async def main() -> None:
             print(f"\n{DIM}{'-' * 80}{RESET}\n")
             continue
         print(f"\n  {GREEN}{BOLD}Surreal-Memory (spreading activation):{RESET}")
-        print(f"    {DIM}Neurons activated: {result.neurons_activated} | Confidence: {result.confidence:.2f}{RESET}")
+        print(
+            f"    {DIM}Neurons activated: {result.neurons_activated} | Confidence: {result.confidence:.2f}{RESET}"
+        )
 
         # Parse relevant memories from context
         if result.context:
@@ -187,7 +188,9 @@ async def main() -> None:
     print("                  Graph grows smarter with more memories (consolidation)")
     print()
     print(f"  {DIM}15 memories | 5 queries | Baseline: bag-of-words cosine similarity{RESET}")
-    print(f"  {DIM}Surreal-Memory: ReflexPipeline depth=DEEP (spreading activation + causal){RESET}")
+    print(
+        f"  {DIM}Surreal-Memory: ReflexPipeline depth=DEEP (spreading activation + causal){RESET}"
+    )
     print()
 
 

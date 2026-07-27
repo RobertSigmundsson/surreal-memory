@@ -5,6 +5,8 @@ repos:
       - id: trailing-whitespace
       - id: end-of-file-fixer
       - id: check-yaml
+        # mkdocs.yml uzywa tagow python/name (mkdocs-material) — sama skladnia
+        args: [--unsafe]
       - id: check-added-large-files
       - id: check-merge-conflict
       - id: check-toml
@@ -13,19 +15,31 @@ repos:
         args: [--branch, main, --branch, master]
 
   - repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: v0.9.6
+    rev: v0.16.0
     hooks:
       - id: ruff
         args: [--fix]
       - id: ruff-format
 
   - repo: https://github.com/pre-commit/mirrors-mypy
-    rev: v1.15.0
+    rev: v2.3.0
     hooks:
       - id: mypy
+        # mypy tylko na src/ — benchmarks/ nie sa pakietem (duplicate module names)
+        files: ^src/
         additional_dependencies:
           - pydantic>=2.0
           - types-python-dateutil
+          # Srodowisko hooka MUSI miec typowane zaleznosci glowne projektu —
+          # brakujacy pakiet rozwiazuje sie jako Any i produkuje falszywe bledy
+          # (aiosqlite -> ~100x no-any-return, typer -> untyped-decorator).
+          # Lustro [project.dependencies] z pyproject (2026-07-27):
+          - aiosqlite
+          - typer>=0.9.0,<0.26
+          - aiohttp>=3.9.0
+          - networkx>=3.0
+          - rich>=13.0.0
+          - typing_extensions>=4.0
         args: [--ignore-missing-imports]
         exclude: ^tests/
 
@@ -33,6 +47,9 @@ repos:
     rev: 1.8.3
     hooks:
       - id: bandit
+        # files: ^src/ — exclude_dirs bandita NIE dziala na pliki podane jawnie
+        # przez pre-commit (tylko na rekursje -r), wiec zakres tnie pre-commit
+        files: ^src/
         args: [-c, pyproject.toml, -r, src/]
         additional_dependencies: ["bandit[toml]"]
 

@@ -118,7 +118,7 @@ async def simulate_conversation() -> None:
             print(f"     (Confidence: {confidence:.2f})\n")
         else:
             context = await bot.recall(question)
-            print(f"Bot: Let me check... Here's what I found:")
+            print("Bot: Let me check... Here's what I found:")
             print(f"     {context[:200]}...\n")
 
     # Session 3: Adding new memories and recalling context
@@ -129,7 +129,7 @@ async def simulate_conversation() -> None:
 
     print("User: Tell me about my recent progress")
     context = await bot.recall("recent progress on the project")
-    print(f"Bot: Here's what I know about your recent work:")
+    print("Bot: Here's what I know about your recent work:")
     print(f"     {context}\n")
 
 

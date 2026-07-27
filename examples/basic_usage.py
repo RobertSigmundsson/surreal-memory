@@ -37,7 +37,10 @@ async def main() -> None:
     encoder = MemoryEncoder(storage, config)
 
     memories = [
-        ("Met with Alice at the coffee shop to discuss the API design", datetime(2024, 2, 3, 15, 0)),
+        (
+            "Met with Alice at the coffee shop to discuss the API design",
+            datetime(2024, 2, 3, 15, 0),
+        ),
         ("Alice suggested adding rate limiting to prevent abuse", datetime(2024, 2, 3, 15, 30)),
         ("Decided to use FastAPI for the backend implementation", datetime(2024, 2, 3, 16, 0)),
         ("Completed the authentication module, took 3 hours", datetime(2024, 2, 4, 10, 0)),
@@ -48,7 +51,9 @@ async def main() -> None:
     for content, timestamp in memories:
         result = await encoder.encode(content, timestamp=timestamp)
         print(f"  - Encoded: {content[:50]}...")
-        print(f"    Created {len(result.neurons_created)} neurons, {len(result.synapses_created)} synapses")
+        print(
+            f"    Created {len(result.neurons_created)} neurons, {len(result.synapses_created)} synapses"
+        )
 
     # 3. Query memories
     pipeline = ReflexPipeline(storage, config)
@@ -74,7 +79,7 @@ async def main() -> None:
 
     # 4. Get brain statistics
     stats = await storage.get_stats(brain.id)
-    print(f"\nBrain statistics:")
+    print("\nBrain statistics:")
     print(f"  Neurons: {stats['neuron_count']}")
     print(f"  Synapses: {stats['synapse_count']}")
     print(f"  Fibers: {stats['fiber_count']}")

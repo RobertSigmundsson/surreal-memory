@@ -11,7 +11,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
-from xml.sax.saxutils import escape
+from xml.sax.saxutils import escape  # nosec B406 — escape do ZAPISU GraphML, zero parsowania XML
 
 if TYPE_CHECKING:
     from surreal_memory.cli.storage import PersistentStorage
