@@ -390,6 +390,46 @@ async def test_subagent_start_injects_every_time_despite_session_marker(
     assert already_injected("s-fresh") is False
 
 
+async def test_session_start_compact_reinjects_despite_session_marker(
+    clean_env: Path, tmp_path: Path
+) -> None:
+    # Compaction flattens the conversation, destroying the previously injected
+    # block. SessionStart(source=compact) must re-inject despite the session
+    # marker; all other sources (resume/startup/clear) keep honoring it — their
+    # history, including the original block, is still in the context.
+    mark_injected("s-compact")
+    storage = InMemoryStorage()
+    storage.set_brain("default")
+    await _add_pattern(storage, "claude-fable-5", "debugging", "debugging: verify", "s", 1.0, 3)
+    cfg = _ucfg(tmp_path, injection_map=(("claude-opus-*", "claude-fable-5"),))
+    with (
+        patch("surreal_memory.unified_config.get_config", return_value=cfg),
+        patch(
+            "surreal_memory.unified_config.get_shared_storage",
+            new=AsyncMock(return_value=storage),
+        ),
+    ):
+        compacted = await get_reasoning_context(
+            {
+                "session_id": "s-compact",
+                "model": "claude-opus-4-8",
+                "hook_event_name": "SessionStart",
+                "source": "compact",
+            }
+        )
+        resumed = await get_reasoning_context(
+            {
+                "session_id": "s-compact",
+                "model": "claude-opus-4-8",
+                "hook_event_name": "SessionStart",
+                "source": "resume",
+            }
+        )
+
+    assert "learned from claude-fable-5" in compacted
+    assert resumed == ""
+
+
 # ── session idempotency markers ──────────────────────────────────────────────
 
 
