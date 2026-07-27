@@ -275,6 +275,79 @@ class TestFindCrossClusterLinks:
         result = await find_cross_cluster_links(store)
         assert len(result) == 0
 
+    async def test_dead_anchor_creates_no_orphan_synapse(self, store: InMemoryStorage) -> None:
+        """A fiber whose anchor neuron was deleted must not anchor a link.
+
+        Fibers outlive their neurons (nothing re-anchors them on neuron DELETE),
+        so anchor_neuron_id can point at a deleted record. Without the liveness
+        guard the synapse is orphaned at birth and — because existing-pair dedup
+        only sees live synapses — recreated on every enrichment run (26 measured
+        in prod on 2026-07-27, all from this function).
+        """
+        shared_neuron = Neuron.create(
+            type=NeuronType.ENTITY, content="shared", neuron_id="n-shared"
+        )
+        anchor_b = Neuron.create(
+            type=NeuronType.CONCEPT, content="anchor-b", neuron_id="n-anchor-b"
+        )
+        for n in [shared_neuron, anchor_b]:
+            await store.add_neuron(n)
+        # NOTE: "n-anchor-dead" is deliberately never added — it plays the role
+        # of a neuron deleted after the fiber was created.
+
+        fiber_a = Fiber.create(
+            neuron_ids={"n-anchor-dead", "n-shared"},
+            synapse_ids=set(),
+            anchor_neuron_id="n-anchor-dead",
+            tags={"python", "api"},
+            fiber_id="f-a",
+        )
+        fiber_b = Fiber.create(
+            neuron_ids={"n-anchor-b", "n-shared"},
+            synapse_ids=set(),
+            anchor_neuron_id="n-anchor-b",
+            tags={"rust", "cli"},
+            fiber_id="f-b",
+        )
+        await store.add_fiber(fiber_a)
+        await store.add_fiber(fiber_b)
+
+        result = await find_cross_cluster_links(store)
+        assert result == [], "dead anchor must not produce an orphan-at-birth synapse"
+
+    async def test_dead_shared_neuron_not_counted_as_overlap(self, store: InMemoryStorage) -> None:
+        """A deleted entity neuron must not count as cross-cluster overlap."""
+        anchor_a = Neuron.create(
+            type=NeuronType.CONCEPT, content="anchor-a", neuron_id="n-anchor-a"
+        )
+        anchor_b = Neuron.create(
+            type=NeuronType.CONCEPT, content="anchor-b", neuron_id="n-anchor-b"
+        )
+        for n in [anchor_a, anchor_b]:
+            await store.add_neuron(n)
+        # "n-shared-dead" never added: the only overlap between the clusters
+        # is a deleted neuron, so no link should be created.
+
+        fiber_a = Fiber.create(
+            neuron_ids={"n-anchor-a", "n-shared-dead"},
+            synapse_ids=set(),
+            anchor_neuron_id="n-anchor-a",
+            tags={"python", "api"},
+            fiber_id="f-a",
+        )
+        fiber_b = Fiber.create(
+            neuron_ids={"n-anchor-b", "n-shared-dead"},
+            synapse_ids=set(),
+            anchor_neuron_id="n-anchor-b",
+            tags={"rust", "cli"},
+            fiber_id="f-b",
+        )
+        await store.add_fiber(fiber_a)
+        await store.add_fiber(fiber_b)
+
+        result = await find_cross_cluster_links(store)
+        assert result == [], "overlap consisting only of deleted neurons must not link"
+
     async def test_single_cluster_no_links(self, store: InMemoryStorage) -> None:
         """Fibers that cluster together (high tag overlap) produce no cross-cluster links."""
         neurons = [
