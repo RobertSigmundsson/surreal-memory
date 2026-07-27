@@ -145,16 +145,35 @@ def resolve_active_model(hook_input: dict[str, Any]) -> str:
 # ── Injection context ────────────────────────────────────────────────────────
 
 
-def _resolve_source_model(model: str, injection_map: tuple[tuple[str, str], ...]) -> str | None:
-    """Map the active model to a source model via injection_map (glob first-match,
-    then the literal ``default`` key)."""
+def _split_sources(source: str) -> tuple[str, ...]:
+    """Split a map VALUE into source models, preserving order, deduped.
+
+    Multi-source doctrine (Robert, 2026-07-27: every model learns from the
+    models STRONGER than itself): a value may carry several sources separated
+    by "," (config.toml) or "|" (the env-var format uses "," as the PAIR
+    separator, so values there must use "|"). Single-source values pass
+    through unchanged — full back-compat.
+    """
+    seen: list[str] = []
+    for part in source.replace("|", ",").split(","):
+        name = part.strip()
+        if name and name not in seen:
+            seen.append(name)
+    return tuple(seen)
+
+
+def _resolve_source_models(
+    model: str, injection_map: tuple[tuple[str, str], ...]
+) -> tuple[str, ...]:
+    """Map the active model to its source models via injection_map (glob
+    first-match, then the literal ``default`` key)."""
     for target, source in injection_map:
         if target != "default" and fnmatch(model, target):
-            return source
+            return _split_sources(source)
     for target, source in injection_map:
         if target == "default":
-            return source
-    return None
+            return _split_sources(source)
+    return ()
 
 
 async def build_injection_context(
@@ -171,8 +190,8 @@ async def build_injection_context(
     rt = config.reasoning_training
     if not rt.injection_enabled:
         return ""
-    source = _resolve_source_model(model, rt.injection_map)
-    if not source:
+    sources = _resolve_source_models(model, rt.injection_map)
+    if not sources:
         return ""
 
     fibers = await storage.find_fibers(
@@ -181,14 +200,11 @@ async def build_injection_context(
     if len(fibers) >= _PATTERN_FETCH_LIMIT:
         # Truncation would silently drop a model's patterns; surface it instead.
         logger.warning(
-            "reasoning pattern-fiber fetch hit the %d-row ceiling; some '%s' "
+            "reasoning pattern-fiber fetch hit the %d-row ceiling; some %s "
             "patterns may be missing from injection",
             _PATTERN_FETCH_LIMIT,
-            source,
+            sources,
         )
-    candidates = [f for f in fibers if f.metadata.get("_source_model") == source]
-    if not candidates:
-        return ""
 
     def _rank(f: Any) -> float:
         md = f.metadata
@@ -196,36 +212,49 @@ async def build_injection_context(
             md.get("_reasoning_frequency", 0.0)
         )
 
-    candidates.sort(key=_rank, reverse=True)
-
-    per_category: dict[str, int] = {}
-    chosen: list[Any] = []
-    for f in candidates:
-        category = str(f.metadata.get("_reasoning_category", ""))
-        if per_category.get(category, 0) >= _MAX_PER_CATEGORY:
+    # One block per source, each with its own patterns/char budget — a model
+    # mapped to several sources (learn-from-the-stronger doctrine) gets every
+    # bank fully, not the first bank crowding out the rest. A source with no
+    # patterns contributes nothing (no empty headers).
+    blocks: list[str] = []
+    for source in sources:
+        candidates = [f for f in fibers if f.metadata.get("_source_model") == source]
+        if not candidates:
             continue
-        per_category[category] = per_category.get(category, 0) + 1
-        chosen.append(f)
-        if len(chosen) >= rt.injection_max_patterns:
-            break
-    if not chosen:
-        return ""
+        candidates.sort(key=_rank, reverse=True)
 
-    header = f"## Reasoning strategies (learned from {source})"
-    parts = [header, ""]
-    total = len(header) + 1
-    for i, f in enumerate(chosen, start=1):
-        md = f.metadata
-        title = str(md.get("_reasoning_title", "")).strip()
-        body = str(md.get("_reasoning_strategy") or md.get("_reasoning_description", "")).strip()
-        body = " ".join(body.split())  # collapse whitespace/newlines to one line
-        entry = f"{i}. **{title}** — {body}" if body else f"{i}. **{title}**"
-        # Always include the first entry; later ones respect the char budget.
-        if i > 1 and total + len(entry) + 1 > rt.injection_max_chars:
-            break
-        parts.append(entry)
-        total += len(entry) + 1
-    return "\n".join(parts)
+        per_category: dict[str, int] = {}
+        chosen: list[Any] = []
+        for f in candidates:
+            category = str(f.metadata.get("_reasoning_category", ""))
+            if per_category.get(category, 0) >= _MAX_PER_CATEGORY:
+                continue
+            per_category[category] = per_category.get(category, 0) + 1
+            chosen.append(f)
+            if len(chosen) >= rt.injection_max_patterns:
+                break
+        if not chosen:
+            continue
+
+        header = f"## Reasoning strategies (learned from {source})"
+        parts = [header, ""]
+        total = len(header) + 1
+        for i, f in enumerate(chosen, start=1):
+            md = f.metadata
+            title = str(md.get("_reasoning_title", "")).strip()
+            body = str(
+                md.get("_reasoning_strategy") or md.get("_reasoning_description", "")
+            ).strip()
+            body = " ".join(body.split())  # collapse whitespace/newlines to one line
+            entry = f"{i}. **{title}** — {body}" if body else f"{i}. **{title}**"
+            # Always include the first entry; later ones respect the char budget.
+            if i > 1 and total + len(entry) + 1 > rt.injection_max_chars:
+                break
+            parts.append(entry)
+            total += len(entry) + 1
+        blocks.append("\n".join(parts))
+
+    return "\n\n".join(blocks)
 
 
 # ── Hook orchestration (shared by SessionStart + UserPromptSubmit) ────────────
