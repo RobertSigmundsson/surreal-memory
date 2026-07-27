@@ -784,3 +784,59 @@ async def test_merge_never_removes_reasoning_pattern_fiber() -> None:
         if f.id in {"pattern-1", "pattern-2"}:
             assert f.metadata.get("_source_model") == "claude-fable-5"
             assert f.metadata.get("_reasoning_category") == "debugging"
+
+
+@pytest.mark.asyncio
+async def test_merge_never_removes_pinned_fiber() -> None:
+    """A pinned fiber must survive _merge even at 100% neuron overlap.
+
+    ReasoningBank patterns are pinned by the distiller precisely so lifecycle
+    skips them. Merge deletes member fibers and the merged fiber keeps only
+    `merged_from`, dropping the pin and the pattern metadata. Patterns of one
+    category always share the `reasoning_category:*` neuron, so overlap is
+    guaranteed by construction — without this guard every consolidation wiped
+    them and injection silently degraded (2026-07-27: 95 patterns -> 3 fibers).
+    """
+    store = InMemoryStorage()
+    brain = Brain.create(name="merge_pinned_test", brain_id="mp-brain")
+    await store.save_brain(brain)
+    store.set_brain(brain.id)
+
+    for nid in ("n-a", "n-b", "n-c"):
+        await store.add_neuron(Neuron.create(type=NeuronType.ENTITY, content=nid, neuron_id=nid))
+
+    shared = {"n-a", "n-b", "n-c"}  # 100% overlap → Jaccard 1.0, well above 0.5
+    plain1 = Fiber(
+        id="plain-1",
+        neuron_ids=shared,
+        synapse_ids=set(),
+        anchor_neuron_id="n-a",
+        pathway=["n-a"],
+        frequency=5,
+    )
+    plain2 = Fiber(
+        id="plain-2",
+        neuron_ids=shared,
+        synapse_ids=set(),
+        anchor_neuron_id="n-b",
+        pathway=["n-b"],
+        frequency=5,
+    )
+    pattern = Fiber(
+        id="pattern-1",
+        neuron_ids=shared,
+        synapse_ids=set(),
+        anchor_neuron_id="n-a",
+        pathway=["n-a"],
+        frequency=5,
+        pinned=True,
+        metadata={"_reasoning_pattern": True, "_reasoning_signature": "sig-1"},
+    )
+    for f in (plain1, plain2, pattern):
+        await store.add_fiber(f)
+
+    engine = ConsolidationEngine(store, ConsolidationConfig())
+    await engine._merge(ConsolidationReport(), dry_run=False)
+
+    remaining = {f.id for f in await store.get_fibers(limit=100)}
+    assert "pattern-1" in remaining, "merge must never delete a pinned fiber"
