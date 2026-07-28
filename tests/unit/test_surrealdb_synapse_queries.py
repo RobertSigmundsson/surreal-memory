@@ -150,19 +150,30 @@ class TestQueryShapes:
 
     @pytest.mark.asyncio
     async def test_delete_neuron_cascade_uses_in_out(self):
-        """Two single-field DELETEs, not one OR query.
+        """Two single-field DELETEs, not one OR query — and brain-agnostic.
 
         A single "brain_id = ... AND (in = X OR out = X)" query measured
         ~1.2s/call live on SurrealDB 3.2.0 — the planner doesn't use either
         idx_synapse_in/idx_synapse_out across an OR of two different fields.
         Splitting into two single-field DELETEs (each hits its own index)
         measured ~5ms total.
+
+        The DELETEs match the neuron endpoint ALONE, with no ``brain_id``
+        filter (audit DB-01): a synapse pointing at the deleted neuron becomes
+        a dangling orphan regardless of its own brain_id, and some write paths
+        create synapses with a NULL brain_id that a ``brain_id = '<brain>' AND``
+        filter silently skipped. Matching the endpoint alone is both correct and
+        index-friendly.
         """
         st, conn = _store_with_mock_conn()
         await st.delete_neuron("a")
-        in_query = _find_query(conn, "AND in = neuron:")
-        out_query = _find_query(conn, "AND out = neuron:")
+        in_query = _find_query(conn, "WHERE in = neuron:")
+        out_query = _find_query(conn, "WHERE out = neuron:")
         assert in_query is not None
         assert out_query is not None
         assert " OR " not in in_query[0]
         assert " OR " not in out_query[0]
+        # brain-agnostic on purpose (audit DB-01): no brain_id filter, or the
+        # NULL-brain_id orphan synapses this fix targets would be skipped again.
+        assert "brain_id" not in in_query[0]
+        assert "brain_id" not in out_query[0]

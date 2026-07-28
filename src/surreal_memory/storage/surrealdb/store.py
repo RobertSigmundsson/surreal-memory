@@ -907,22 +907,21 @@ class SurrealDBStorage(
 
     async def delete_neuron(self, neuron_id: str) -> bool:
         conn = self._ensure_conn()
-        brain_id = self._get_brain_id()
-        safe_brain = _safe_brain_id(brain_id)
         sid = _to_surreal_id(neuron_id)
 
-        # Delete connected synapses first (belt-and-braces: SurrealDB also auto-cleans
-        # edges when the neuron record is deleted). Endpoints are native in/out now.
-        #
-        # Measured live: a single "brain_id = $brain_id AND (in = ... OR out = ...)"
-        # query cost ~1.2s/call regardless of whether brain_id/the record id are
-        # inlined or param-bound — SurrealDB 3.2.0's planner doesn't use either
-        # `idx_synapse_in`/`idx_synapse_out` index across an OR of two different
-        # fields, so it falls back to a full scan. Splitting into two single-field
-        # DELETEs (each hits its own index) measured ~5ms total for both — this was
-        # the dominant cost behind prune's non-dry-run timeout on a large brain.
-        await self._query(f"DELETE synapse WHERE brain_id = '{safe_brain}' AND in = neuron:{sid}")
-        await self._query(f"DELETE synapse WHERE brain_id = '{safe_brain}' AND out = neuron:{sid}")
+        # Delete connected synapses first. This is brain-agnostic ON PURPOSE (audit
+        # DB-01): a synapse whose in/out points at this neuron becomes a dangling
+        # orphan once the neuron is gone, regardless of the synapse's own brain_id.
+        # Some write paths create synapses with a NULL brain_id, which the previous
+        # `brain_id = '<brain>' AND ...` filter silently skipped — leaving orphans that
+        # the schema's cascade_delete_synapses event did NOT catch either (that event
+        # does not fire on the SDK conn.delete() call below). Matching the neuron
+        # endpoint alone is correct AND index-friendly: two single-field DELETEs each
+        # hit their own `idx_synapse_in`/`idx_synapse_out` index (~5ms total); a
+        # combined OR across the two fields falls back to a full scan in SurrealDB
+        # 3.2.0's planner (~1.2s), which was the dominant cost behind prune timeouts.
+        await self._query(f"DELETE synapse WHERE in = neuron:{sid}")
+        await self._query(f"DELETE synapse WHERE out = neuron:{sid}")
         # Delete state (record id is state_<sid>, matching the writer in add_neuron)
         await self._query(f"DELETE neuron_state:state_{sid}")
 
@@ -2619,13 +2618,14 @@ class SurrealDBStorage(
         )
         count = 0
         for r in rows:
-            # Re-sanitise the id read back from the DB rather than trusting the
-            # write-path invariant (defence in depth): _to_surreal_id strips the
-            # table prefix and folds, so ``neuron:{nid}`` stays a safe literal.
-            nid = _to_surreal_id(str(r.get("id", "")))
+            # Route through delete_neuron() (audit DB-01) instead of a raw
+            # conn.delete(): that raw call skipped the synapse cascade AND the
+            # neuron_state cleanup, leaving both as orphans once the ephemeral
+            # neuron aged out — the same bug already fixed for delete_neuron's
+            # other callers, just missed here.
             try:
-                await self._conn.delete(f"neuron:{nid}")
-                count += 1
+                if await self.delete_neuron(str(r.get("id", ""))):
+                    count += 1
             except Exception:
                 pass
         return count
