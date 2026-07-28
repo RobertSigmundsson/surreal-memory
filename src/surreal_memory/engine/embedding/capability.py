@@ -21,6 +21,11 @@ _PROVIDER_IMPORT: dict[str, tuple[str, str]] = {
     "openai": ("openai", "embeddings-openai"),
     "openrouter": ("openai", "embeddings-openrouter"),
     "sentence_transformer": ("sentence_transformers", "embeddings"),
+    # HTTP provider (self-hosted BGE-M3): only needs httpx, shipped in the
+    # ``server`` extra. Without this entry the probe reports the configured
+    # bge_m3 provider as "unknown" and logs a spurious degraded-keyword-mode
+    # warning even though recall/remember embed fine via the factory.
+    "bge_m3": ("httpx", "server"),
 }
 
 

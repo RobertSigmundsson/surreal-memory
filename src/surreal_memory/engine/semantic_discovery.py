@@ -203,6 +203,12 @@ def _create_provider(config: BrainConfig, task_type: str = "RETRIEVAL_QUERY") ->
         from surreal_memory.engine.embedding.ollama_embedding import OllamaEmbedding
 
         provider = OllamaEmbedding(model=model_name)
+    elif provider_name in ("bge_m3", "bge-m3"):
+        from surreal_memory.engine.embedding.bge_m3_embedding import BGEM3Embedding
+
+        # base_url / api_key / dimension resolved from env (SURREAL_MEMORY_EMBEDDING_BASE_URL,
+        # BGE_M3_API_KEY, SURREAL_MEMORY_EMBEDDING_DIMENSION) — see BGEM3Embedding.
+        provider = BGEM3Embedding(model=model_name or "bge-m3")
     else:
         raise ValueError(f"Unknown embedding provider: {provider_name}")
 
