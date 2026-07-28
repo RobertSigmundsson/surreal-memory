@@ -70,6 +70,25 @@ class TestClauseBoundaryBigrams:
         assert "py" in unigrams
         assert "bigramy" in unigrams
 
+    def test_no_bigram_across_en_dash(self) -> None:
+        # The en-dash (U+2013) is a clause boundary too, not only the em-dash
+        # (—, U+2014): editors and OSes emit it for ranges and asides, so without
+        # it the same cross-clause junk bigram (a filename fragment glued onto the
+        # next clause) slips through.
+        text = "blad w keywords.py – bigramy nie powinny przecinac granic"  # noqa: RUF001
+        bigrams = _bigrams(text)
+        assert "py bigramy" not in bigrams
+        unigrams = _unigrams(text)
+        assert "py" in unigrams
+        assert "bigramy" in unigrams
+
+    def test_hyphen_is_not_a_clause_boundary(self) -> None:
+        # A hyphen inside a compound term must NOT split a clause: the two halves
+        # are adjacent content words and should still pair as a bigram (contrast
+        # with the en-/em-dash, which do split).
+        bigrams = _bigrams("modul cache-aside dziala szybko")
+        assert "cache aside" in bigrams
+
     def test_phase1_junk_bigrams_eliminated(self) -> None:
         junk = {
             "reguly czy",

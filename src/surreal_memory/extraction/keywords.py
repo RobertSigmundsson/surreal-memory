@@ -554,12 +554,13 @@ STOP_WORDS: frozenset[str] = (
 )
 
 # Clause boundary: bigrams never pair words that cross one of these.
-# Em-dash is included — it sets off a parenthetical/separate clause the same as a
-# comma (live-proven: "keywords.py — bigramy" otherwise lets the "py" filename
-# fragment glue onto the next clause's first word). Plain ASCII hyphen is
+# Em-dash (—) and en-dash are both included — each sets off a parenthetical /
+# separate clause the same as a comma (live-proven: "keywords.py — bigramy"
+# otherwise lets the "py" filename fragment glue onto the next clause's first
+# word; editors and OSes emit the en-dash just as often). Plain ASCII hyphen is
 # deliberately NOT included: it's mid-word in compounds like "write-gate", which
 # must still yield the useful bigram "write gate".
-_CLAUSE_BOUNDARY = re.compile(r"[.,;:!?\n\r—]+")
+_CLAUSE_BOUNDARY = re.compile(r"[.,;:!?\n\r—–]+")  # noqa: RUF001 (literal en-dash intended)
 
 
 def _get_stop_words(language: str, text: str) -> frozenset[str]:
