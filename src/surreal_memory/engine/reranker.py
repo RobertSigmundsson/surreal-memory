@@ -182,26 +182,42 @@ class HttpReranker:
         blend_weight: float = 0.7,
         max_candidates: int = 30,
         timeout: float = 15.0,
+        api_key: str = "",
     ) -> None:
         self._endpoint = endpoint.rstrip("/")
         self._model = model_name
         self._blend_weight = min(max(blend_weight, 0.0), 1.0)
         self._max_candidates = min(max_candidates, 100)
         self._timeout = timeout
+        # Bearer auth for endpoints that require it (e.g. the self-hosted BGE-M3
+        # /rerank service). llamastash/llama.cpp need none — an empty key sends no header.
+        self._api_key = (
+            api_key
+            or os.environ.get("SURREAL_MEMORY_RERANKER_API_KEY", "")
+            or os.environ.get("BGE_M3_API_KEY", "")
+        ).strip()
 
     def _raw_scores(self, query: str, documents: list[str]) -> list[float]:
         payload = json.dumps({"model": self._model, "query": query, "documents": documents}).encode(
             "utf-8"
         )
-        req = urllib.request.Request(  # noqa: S310 - fixed local llamastash endpoint
+        headers = {"Content-Type": "application/json"}
+        if self._api_key:
+            headers["Authorization"] = f"Bearer {self._api_key}"
+        req = urllib.request.Request(  # noqa: S310 - fixed local rerank endpoint
             f"{self._endpoint}/rerank",
             data=payload,
-            headers={"Content-Type": "application/json"},
+            headers=headers,
             method="POST",
         )
         with urllib.request.urlopen(req, timeout=self._timeout) as resp:  # noqa: S310
             data = json.loads(resp.read().decode("utf-8"))
-        by_index = {int(r["index"]): float(r["relevance_score"]) for r in data.get("results", [])}
+        # Accept both the OpenAI-compatible field (`relevance_score`, llamastash) and
+        # the BGE-M3 service field (`score`).
+        by_index = {
+            int(r["index"]): float(r.get("relevance_score", r.get("score", 0.0)))
+            for r in data.get("results", [])
+        }
         return [by_index.get(i, float("-inf")) for i in range(len(documents))]
 
     def rerank(
