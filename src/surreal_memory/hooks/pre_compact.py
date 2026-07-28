@@ -182,10 +182,44 @@ async def flush_text(text: str, project_name: str | None = None) -> dict[str, An
         auto_redact_severity = config.safety.auto_redact_min_severity
         saved: list[str] = []
 
+        # Write gate for the compaction flush (intent=auto). This path encoded
+        # with NO gate at all, so junk auto-captures bypassed both telemetry
+        # and enforcement — same contract as the stop-hook auto block now.
+        write_gate_cfg = config.write_gate
+        gate_mode = write_gate_cfg.effective_auto_mode
+
         for item in boosted:
             try:
                 # Auto-redact sensitive content
                 content = item["content"]
+
+                if gate_mode != "off":
+                    from surreal_memory.engine.gate_telemetry import log_gate_decision
+                    from surreal_memory.engine.quality_scorer import check_write_gate
+
+                    gate_result = check_write_gate(
+                        content,
+                        gate_config=write_gate_cfg,
+                        is_auto_capture=True,
+                        memory_type=item.get("type"),
+                        tags=list(base_tags),
+                    )
+                    await log_gate_decision(
+                        storage,
+                        intent="auto",
+                        accepted=not gate_result.rejected,
+                        reason=gate_result.rejection_reason or "accept",
+                        score=gate_result.score,
+                        mode=gate_mode,
+                        content=content,
+                    )
+                    if gate_mode == "enforce" and gate_result.rejected:
+                        logger.debug(
+                            "Pre-compact write gate rejected: %s",
+                            gate_result.rejection_reason,
+                        )
+                        continue
+
                 redacted_content, matches, _ = auto_redact_content(
                     content, min_severity=auto_redact_severity
                 )
