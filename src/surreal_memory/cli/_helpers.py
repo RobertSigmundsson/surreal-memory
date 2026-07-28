@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 from collections.abc import Coroutine
 from pathlib import Path
 from typing import Any, TypeVar
@@ -17,6 +18,24 @@ from surreal_memory.cli.storage import PersistentStorage
 logger = logging.getLogger(__name__)
 
 T = TypeVar("T")
+
+
+def resolve_brain(brain: str | None, config: CLIConfig, *, default: str | None = None) -> str:
+    """Resolve the effective brain name: explicit arg > env var > default/config.
+
+    Every CLI command that needs the brain name before calling ``get_storage``
+    (e.g. to echo progress) must resolve it through this helper rather than
+    ``brain or config.current_brain`` — that pattern always produces a
+    non-``None`` name, which makes ``get_storage`` skip its own env-var check
+    (see its docstring) and silently ignores ``SURREAL_MEMORY_BRAIN``.
+    """
+    if brain is not None:
+        return brain
+    env_brain = os.environ.get("SURREAL_MEMORY_BRAIN")
+    if env_brain:
+        return env_brain
+    return default if default is not None else config.current_brain
+
 
 # Track storages created during a CLI command so we can close them before
 # the event loop shuts down (prevents "Event loop is closed" noise from
@@ -84,13 +103,7 @@ async def get_storage(
         Storage instance (local JSON, local SQLite, or remote shared)
     """
     # Priority: explicit arg > env var > config file
-    if brain_name is None:
-        import os
-
-        env_brain = os.environ.get("SURREAL_MEMORY_BRAIN") or os.environ.get("SURREAL_MEMORY_BRAIN")
-        name = env_brain or config.current_brain
-    else:
-        name = brain_name
+    name = resolve_brain(brain_name, config)
 
     # Remote shared mode (via server)
     use_shared = (config.is_shared_mode or force_shared) and not force_local and not force_sqlite
