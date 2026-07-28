@@ -660,12 +660,17 @@ class SurrealDBStorage(
         return neuron.id
 
     async def get_neuron(self, neuron_id: str) -> Neuron | None:
-        conn = self._ensure_conn()
+        # Scope to the current brain: a bare record select would let a caller
+        # read another brain's neuron by id. The record is still pinned in FROM.
+        brain_id = self._get_brain_id()
         sid = _to_surreal_id(neuron_id)
         try:
-            result = await conn.select(f"neuron:{sid}")
-            if result and isinstance(result, list) and len(result) > 0:
-                return _row_to_neuron(result[0])
+            rows = await self._query(
+                f"SELECT * FROM neuron:{sid} WHERE brain_id = $brain_id",
+                brain_id=brain_id,
+            )
+            if rows:
+                return _row_to_neuron(rows[0])
         except Exception:
             pass
         return None
@@ -684,17 +689,29 @@ class SurrealDBStorage(
         """
         if not neuron_ids:
             return {}
+        # Scope every fetch to the current brain: these are direct record-id
+        # selects, so without a brain_id filter a caller could read a neuron
+        # owned by another brain just by knowing (or guessing) its id. The FROM
+        # is still a pinned record (neuron:{sid}), so this stays a direct fetch,
+        # not a table scan — the brain_id check only rejects a cross-brain hit.
+        # Resolve the brain id ONCE, before any concurrent fetch starts, so a
+        # hostile/unset brain context fails closed (_safe_brain_id raises) rather
+        # than firing 16 unscoped selects.
+        brain_id = self._get_brain_id()
         semaphore = asyncio.Semaphore(_BATCH_FETCH_CONCURRENCY)
 
         async def _fetch_one(nid: str) -> tuple[str, Neuron | None]:
             sid = _to_surreal_id(nid)
             async with semaphore:
                 try:
-                    result = await self._conn.select(f"neuron:{sid}")
+                    rows = await self._query(
+                        f"SELECT * FROM neuron:{sid} WHERE brain_id = $brain_id",
+                        brain_id=brain_id,
+                    )
                 except Exception:
                     return nid, None
-            if result and isinstance(result, list) and len(result) > 0:
-                return nid, _row_to_neuron(result[0])
+            if rows:
+                return nid, _row_to_neuron(rows[0])
             return nid, None
 
         pairs = await asyncio.gather(*(_fetch_one(nid) for nid in neuron_ids))
@@ -814,12 +831,19 @@ class SurrealDBStorage(
         ]
         if not safe:
             return []
+        # Scope to the current brain: the FROM is a pinned record-id list (still
+        # a direct fetch, not a table scan), and the WHERE brain_id filter keeps
+        # a caller from reading another brain's neuron by id.
+        brain_id = self._get_brain_id()
         projection = "SELECT *" if include_embedding else "SELECT * OMIT embedding_vec"
         out: list[Neuron] = []
         # Chunk to keep the FROM record-id list a sane query size.
         for i in range(0, len(safe), 1000):
             things = ", ".join(f"neuron:{s}" for s in safe[i : i + 1000])
-            rows = await self._query(f"{projection} FROM {things}")
+            rows = await self._query(
+                f"{projection} FROM {things} WHERE brain_id = $brain_id",
+                brain_id=brain_id,
+            )
             out.extend(_row_to_neuron(r) for r in rows)
         return out
 
@@ -962,12 +986,15 @@ class SurrealDBStorage(
     # ================================================================
 
     async def get_neuron_state(self, neuron_id: str) -> NeuronState | None:
-        conn = self._ensure_conn()
+        brain_id = self._get_brain_id()
         sid = _to_surreal_id(neuron_id)
         try:
-            result = await conn.select(f"neuron_state:state_{sid}")
-            if result:
-                return _row_to_neuron_state(result[0] if isinstance(result, list) else result)
+            rows = await self._query(
+                f"SELECT * FROM neuron_state:state_{sid} WHERE brain_id = $brain_id",
+                brain_id=brain_id,
+            )
+            if rows:
+                return _row_to_neuron_state(rows[0])
         except Exception:
             pass
         return None
@@ -1103,12 +1130,15 @@ class SurrealDBStorage(
         return len(synapses)
 
     async def get_synapse(self, synapse_id: str) -> Synapse | None:
-        conn = self._ensure_conn()
+        brain_id = self._get_brain_id()
         sid = _to_surreal_id(synapse_id)
         try:
-            result = await conn.select(f"synapse:{sid}")
-            if result:
-                return _row_to_synapse(result[0] if isinstance(result, list) else result)
+            rows = await self._query(
+                f"SELECT * FROM synapse:{sid} WHERE brain_id = $brain_id",
+                brain_id=brain_id,
+            )
+            if rows:
+                return _row_to_synapse(rows[0])
         except Exception:
             pass
         return None
@@ -1121,18 +1151,28 @@ class SurrealDBStorage(
         """
         if not synapse_ids:
             return {}
-        conn = self._ensure_conn()
+        # Scope every fetch to the current brain: like get_neurons_batch these are
+        # direct record-id selects, so without a brain_id filter a caller could
+        # read a synapse owned by another brain just by knowing (or guessing) its
+        # id. The FROM stays a pinned record (synapse:{sid}) — a direct fetch, not
+        # a table scan — and the WHERE brain_id only rejects a cross-brain hit.
+        # Resolve the brain id ONCE, before any concurrent fetch starts, so a
+        # hostile/unset brain context fails closed (_safe_brain_id raises).
+        brain_id = self._get_brain_id()
         semaphore = asyncio.Semaphore(_BATCH_FETCH_CONCURRENCY)
 
         async def _fetch_one(syn_id: str) -> tuple[str, Synapse | None]:
             sid = _to_surreal_id(syn_id)
             async with semaphore:
                 try:
-                    result = await conn.select(f"synapse:{sid}")
+                    rows = await self._query(
+                        f"SELECT * FROM synapse:{sid} WHERE brain_id = $brain_id",
+                        brain_id=brain_id,
+                    )
                 except Exception:
                     return syn_id, None
-            if result:
-                return syn_id, _row_to_synapse(result[0] if isinstance(result, list) else result)
+            if rows:
+                return syn_id, _row_to_synapse(rows[0])
             return syn_id, None
 
         pairs = await asyncio.gather(*(_fetch_one(sid) for sid in synapse_ids))
@@ -1438,12 +1478,15 @@ class SurrealDBStorage(
         return fiber.id
 
     async def get_fiber(self, fiber_id: str) -> Fiber | None:
-        conn = self._ensure_conn()
+        brain_id = self._get_brain_id()
         fid = _to_surreal_id(fiber_id)
         try:
-            result = await conn.select(f"fiber:{fid}")
-            if result:
-                return _row_to_fiber(result[0] if isinstance(result, list) else result)
+            rows = await self._query(
+                f"SELECT * FROM fiber:{fid} WHERE brain_id = $brain_id",
+                brain_id=brain_id,
+            )
+            if rows:
+                return _row_to_fiber(rows[0])
         except Exception:
             pass
         return None
