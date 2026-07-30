@@ -61,6 +61,9 @@ class ScoreBreakdown:
     raw_total: float = 0.0
     trust_factor: float = 1.0  # U2: in [1-trust_weight, 1] when active, else 1.0 (no-op)
     recency_factor: float = 1.0  # U2: recency blend factor when recency_weight != 1.0
+    embedding_grounded: bool = True  # P1: False when no embedding anchor cleared
+    # similarity_threshold for this query — raw_total is proportionally discounted in this
+    # case so confidence doesn't overstate relevance for keyword/entity/time-only matches.
 
 
 @dataclass
