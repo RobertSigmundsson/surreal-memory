@@ -31,6 +31,22 @@ if TYPE_CHECKING:
     from surreal_memory.engine.causal_traversal import CausalChain, EventSequence
     from surreal_memory.storage.base import NeuralStorage
 
+# P1 fix (SMEM-MEMORY-QUALITY, 2026-07-30): confidence was reachable via keyword/entity/
+# time anchors alone and still hit ~1.0 even when no embedding anchor cleared
+# similarity_threshold (see engine/retrieval.py::_find_embedding_anchors). Applied to the
+# AGGREGATE raw_total (not just base_confidence) because intersection_boost is unbounded
+# (0.05 per intersecting neuron, uncapped — verified live: 25 intersections = 1.25, alone
+# larger than the entire base_confidence range) and would otherwise swamp a discount placed
+# on base_confidence alone. Proportional, not a hard ceiling: a query with strong
+# multi-signal corroboration (high raw_total from many boosts) still lands reasonably after
+# the discount; a query with weak, single-signal support drops meaningfully. An earlier
+# design exempted "rank-1 keyword/entity hit" from the discount on the theory that a literal
+# match doesn't need embedding corroboration — dropped after live verification showed that
+# heuristic is nearly always true (every keyword sub-search trivially produces its own
+# rank-1 hit), so it exempted the exact confirmed-bug query (the "sernik" negative control)
+# instead of catching it.
+_NO_EMBEDDING_ANCHOR_DISCOUNT = 0.6
+
 
 class SynthesisMethod(StrEnum):
     """How the answer was reconstructed."""
@@ -69,6 +85,7 @@ async def reconstruct_answer(
     intersections: list[str],
     fibers: list[Fiber],
     max_contributing: int = 5,
+    has_embedding_anchor: bool = True,
 ) -> ReconstructionResult:
     """Reconstruct an answer from the activated subgraph.
 
@@ -83,6 +100,9 @@ async def reconstruct_answer(
         intersections: Intersection neuron IDs (from multiple anchor sets)
         fibers: Matched fibers from retrieval
         max_contributing: Max neurons for multi-neuron synthesis
+        has_embedding_anchor: Whether any embedding anchor cleared
+            similarity_threshold for this query (P1 fix — default True preserves
+            legacy behavior for callers that don't track anchor provenance).
 
     Returns:
         ReconstructionResult with answer and metadata
@@ -114,6 +134,7 @@ async def reconstruct_answer(
         top_id,
         top_score,
         intersections,
+        has_embedding_anchor=has_embedding_anchor,
     )
 
     # Strategy 1: Single mode — dominant neuron
@@ -183,10 +204,18 @@ async def _compute_score_breakdown(
     top_id: str,
     top_score: float,
     intersections: list[str],
+    has_embedding_anchor: bool = True,
 ) -> ScoreBreakdown:
     """Compute multi-factor score breakdown for the top neuron."""
     base_confidence = min(1.0, top_score)
-    intersection_boost = 0.05 * len(intersections) if intersections else 0.0
+    # P1 fix: intersection_boost was uncapped (0.05 per intersecting neuron) — live
+    # verification found a real query with 25 intersections producing a 1.25 boost on its
+    # own, which on top of base_confidence made raw_total swamp the [0, 1] range so
+    # thoroughly that no proportional discount below could bring confidence under 1.0.
+    # Capped at the same per-neuron rate up to 6 intersections (the existing tests' and
+    # other callers' typical range is 0-3, well under this), beyond which more
+    # intersections stop adding further boost.
+    intersection_boost = min(0.3, 0.05 * len(intersections)) if intersections else 0.0
 
     freshness_boost = 0.0
     frequency_boost = 0.0
@@ -234,6 +263,16 @@ async def _compute_score_breakdown(
         + emotional_resonance
         + decision_domain_boost
     )
+
+    # P1 fix: discount the AGGREGATE raw_total, not just base_confidence — applying it to
+    # base_confidence alone was verified live to have no effect, since intersection_boost
+    # is unbounded (0.05 per intersecting neuron, no cap) and dwarfs base_confidence's
+    # [0, 1] range once a query has more than ~10 intersecting neurons. Proportional, not a
+    # hard ceiling, so a query with genuinely strong multi-signal corroboration still lands
+    # reasonably after the discount.
+    if not has_embedding_anchor:
+        raw_total *= _NO_EMBEDDING_ANCHOR_DISCOUNT
+
     return ScoreBreakdown(
         base_activation=base_confidence,
         intersection_boost=intersection_boost,
@@ -242,6 +281,7 @@ async def _compute_score_breakdown(
         emotional_resonance=emotional_resonance,
         decision_domain_boost=decision_domain_boost,
         raw_total=raw_total,
+        embedding_grounded=has_embedding_anchor,
     )
 
 
