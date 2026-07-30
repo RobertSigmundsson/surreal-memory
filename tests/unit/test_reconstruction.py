@@ -271,6 +271,94 @@ class TestReconstructAnswer:
         assert result.score_breakdown.intersection_boost > 0
 
     @pytest.mark.asyncio
+    async def test_no_embedding_anchor_discounts_confidence(self) -> None:
+        """P1 fix: confidence should be discounted when no embedding anchor cleared
+        similarity_threshold — this is the exact shape of the confirmed bug (bogus
+        query, confidence=1.0 via keyword anchor alone). The discount applies to the
+        aggregate raw_total, not base_activation — base_activation itself is identical
+        between the grounded/ungrounded runs; only raw_total/confidence differ."""
+        neurons = {"n1": _make_neuron("n1", "unrelated content")}
+        states = {"n1": NeuronState(neuron_id="n1")}
+        storage = _make_mock_storage(neurons, states)
+
+        activations = {"n1": _make_activation("n1", 0.95)}
+        result_grounded = await reconstruct_answer(
+            storage,
+            activations,
+            intersections=["n1"],
+            fibers=[],
+            has_embedding_anchor=True,
+        )
+        result_ungrounded = await reconstruct_answer(
+            storage,
+            activations,
+            intersections=["n1"],
+            fibers=[],
+            has_embedding_anchor=False,
+        )
+        assert result_grounded.score_breakdown is not None
+        assert result_ungrounded.score_breakdown is not None
+        assert result_grounded.score_breakdown.embedding_grounded is True
+        assert result_ungrounded.score_breakdown.embedding_grounded is False
+        # base_activation is untouched by the discount (only raw_total is scaled).
+        assert result_ungrounded.score_breakdown.base_activation == pytest.approx(
+            result_grounded.score_breakdown.base_activation, abs=0.01
+        )
+        # Discounted confidence must be strictly lower than the grounded one.
+        assert result_ungrounded.confidence < result_grounded.confidence
+        assert result_ungrounded.score_breakdown.raw_total == pytest.approx(
+            result_grounded.score_breakdown.raw_total * 0.6, abs=0.01
+        )
+
+    @pytest.mark.asyncio
+    async def test_discount_survives_large_intersection_boost(self) -> None:
+        """Regression for a live-verification finding (2026-07-30): discounting only
+        base_activation had NO effect once intersection_boost (0.05 per intersecting
+        neuron, uncapped) grew large enough to dominate raw_total on its own — live
+        data showed 25 intersections producing a 1.25 boost, swamping any discount
+        placed on the [0, 1]-range base_activation. The discount must apply to the
+        aggregate raw_total so it remains visible regardless of intersection count."""
+        neurons = {"n1": _make_neuron("n1", "unrelated content")}
+        states = {"n1": NeuronState(neuron_id="n1")}
+        storage = _make_mock_storage(neurons, states)
+
+        activations = {"n1": _make_activation("n1", 0.95)}
+        many_intersections = [f"i{i}" for i in range(25)]  # 25 * 0.05 = 1.25 boost
+        result_grounded = await reconstruct_answer(
+            storage,
+            activations,
+            intersections=many_intersections,
+            fibers=[],
+            has_embedding_anchor=True,
+        )
+        result_ungrounded = await reconstruct_answer(
+            storage,
+            activations,
+            intersections=many_intersections,
+            fibers=[],
+            has_embedding_anchor=False,
+        )
+        assert result_grounded.confidence == pytest.approx(1.0, abs=0.01)
+        # Without the raw_total-level discount, this used to also clamp to 1.0
+        # (base_confidence 0.6 + intersection_boost 1.25 still exceeds 1.0).
+        assert result_ungrounded.confidence < 0.95
+
+    @pytest.mark.asyncio
+    async def test_default_has_embedding_anchor_preserves_legacy_behavior(self) -> None:
+        """Callers that don't pass has_embedding_anchor (e.g. any code path not yet
+        updated) must see identical behavior to before the P1 fix — no discount."""
+        neurons = {"n1": _make_neuron("n1", "content")}
+        states = {"n1": NeuronState(neuron_id="n1")}
+        storage = _make_mock_storage(neurons, states)
+
+        activations = {"n1": _make_activation("n1", 0.9)}
+        result = await reconstruct_answer(storage, activations, intersections=["n1"], fibers=[])
+        assert result.score_breakdown is not None
+        assert result.score_breakdown.embedding_grounded is True
+        # top_score = 0.9 * 1.5 (intersection boost) = 1.35, clamped to 1.0 — undiscounted.
+        assert result.score_breakdown.base_activation == pytest.approx(1.0, abs=0.01)
+
+    @pytest.mark.asyncio
     async def test_max_contributing_respected(self) -> None:
         """max_contributing should limit multi-neuron count."""
         neurons = {f"n{i}": _make_neuron(f"n{i}", f"content-{i}") for i in range(10)}
