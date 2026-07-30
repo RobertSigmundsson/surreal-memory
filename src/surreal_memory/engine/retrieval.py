@@ -321,6 +321,15 @@ class ReflexPipeline:
             stimulus, exclude_ephemeral=exclude_ephemeral
         )
 
+        # P1 fix (SMEM-MEMORY-QUALITY): capture embedding-anchor provenance here, while
+        # ranked_lists still carries per-retriever identity, so reconstruct_answer() can
+        # avoid inflating confidence for queries with zero embedding corroboration.
+        has_embedding_anchor = any(
+            anchor.retriever == "embedding"
+            for ranked_list in ranked_lists
+            for anchor in ranked_list
+        )
+
         # 3.5 RRF score fusion: compute initial activation levels from multi-retriever ranks
         anchor_activations: dict[str, float] | None = None
         if ranked_lists and any(ranked_lists):
@@ -608,6 +617,7 @@ class ReflexPipeline:
             activations,
             all_intersections,
             fibers_matched,
+            has_embedding_anchor=has_embedding_anchor,
         )
 
         # Create encryptor for decryption if encryption is enabled (cached)
