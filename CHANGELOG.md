@@ -5,6 +5,79 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.19.0] — Learned reasoning patterns can be rebuilt, and pattern reads follow the request's brain
+
+### Losing pattern fibers was permanent
+
+Distillation marks every trace it consumes as processed — including the ones it discards
+(off-category, or in a cluster too small to support a pattern) — and nothing could ever clear
+that flag. So a brain whose pattern fibers were lost had no path back. Re-running the miner
+looked like it should fix it and could not: the transcript re-scan finds the same traces,
+ingest deduplicates them on `trace_hash`, and distillation only ever reads *unprocessed*
+rows. The run reported traces processed and zero patterns learned, and the dashboard's
+category coverage stayed frozen at whatever the surviving patterns happened to add up to,
+run after run.
+
+This was reachable through no fault of the operator: patterns mined before 2.17.0 were
+written under a brain scope no read path consults (fixed there), and once those rows were
+removed as orphans, the traces that produced them were still marked processed.
+
+`reprocess` re-opens that backlog. It is available on `POST /api/dashboard/reasoning/mine`,
+as a checkbox beside *Backfill* in the dashboard's mining card, on `smem_reasoning`
+(`action: "mine"`), and as `smem reasoning mine --reprocess`. Repeating it is safe: pattern
+signatures make a second pass a no-op rather than a duplicate-maker. It respects
+`mining_models` — which are globs, so they are resolved against the models actually present
+before anything is re-opened, and a filter matching nothing re-opens nothing rather than
+widening into a blanket reset. `dry_run` still wins: re-opening the backlog is a write.
+
+One limit is inherent: a distill run prunes processed traces past `retention_days`, so
+`reprocess` can only rebuild from what is still staged. Anything older needs `backfill` to
+re-ingest it from the transcripts, and rotated transcripts are gone for good.
+
+### Consolidation merged learned patterns away as fast as mining produced them
+
+`_merge` builds one fiber from a group of overlapping ones, and the merged fiber
+REPLACES its members' metadata wholesale before the members are deleted. Learned
+reasoning patterns are the most exposed fibers in the graph to that: every
+pattern in a category is attached to that category's concept neuron, and shared
+neurons are exactly what the overlap check keys on. A mining run's whole output
+therefore collapsed into a single metadata-less "Merged from N fibers" row, its
+`_source_model` / `_reasoning_category` / `_reasoning_confidence` gone, and
+category coverage fell straight back to zero — with the source traces already
+marked processed, which before the reprocess path above meant it stayed there.
+
+This is why coverage could look frozen while mining reported patterns learned
+run after run: they were being produced and consumed in the same cycle.
+
+The same defect had already been found and fixed for `_habit_pattern`, whose
+guard carries a comment describing this exact failure. It simply never covered
+`_reasoning_pattern`. Both markers now share one guard.
+
+### A per-model pattern target above 100 was silently reduced
+
+`pattern_targets` was clamped to 100 by the config loader and rejected above 100
+by the config endpoint, with nothing announcing either: a higher target written
+into `config.toml` came back as 100 on the next read, and distillation stopped
+there while thousands of staged traces still had patterns to give. The ceiling
+guards against a runaway configuration, and a model's own backlog bounds it long
+before 100 does. Both sites now share `MAX_PATTERN_TARGET` (1000), so the
+endpoint can no longer accept a value the loader would quietly reduce.
+
+### Status and pattern endpoints could mix two brains in one response
+
+Reasoning traces are read with an explicit `brain_id` taken from the request's brain, but the
+fiber API has no such parameter — `find_fibers`, `get_fiber` and `delete_fiber` filter on
+whatever brain the storage instance is bound to, and the server hands out the process-wide
+instance bound at startup without rebinding it per request. A request carrying an
+`X-Brain-ID` naming any other brain therefore reported one brain's traces beside another
+brain's patterns, with coverage computed from the wrong half and no indication anything was
+amiss. `DELETE /patterns?model=` was worse: it listed victims from one scope and issued the
+deletes against another, reporting a count for rows it had not removed.
+
+Pattern reads and deletes now resolve under the same scope the traces use. When the request's
+brain already matches the bound one — the common case — nothing changes and no extra
+connection is opened.
+
 ## [2.18.2] — Docs catch up with the maturation model, and the attribution rule stops contradicting itself
 
 No behavior change. Documentation and contributor-process only.

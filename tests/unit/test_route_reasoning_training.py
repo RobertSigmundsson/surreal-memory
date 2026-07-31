@@ -21,7 +21,11 @@ import surreal_memory.server.routes.reasoning_training as rt_module
 from surreal_memory.core.brain import Brain
 from surreal_memory.server.dependencies import get_brain, get_storage
 from surreal_memory.server.routes.reasoning_training import router
-from surreal_memory.unified_config import ReasoningTrainingConfig, UnifiedConfig
+from surreal_memory.unified_config import (
+    MAX_PATTERN_TARGET,
+    ReasoningTrainingConfig,
+    UnifiedConfig,
+)
 
 BRAIN_ID = "default"
 
@@ -69,9 +73,35 @@ def _reset_mining_state() -> Any:
     rt_module._mining_states = {}
 
 
+@pytest.fixture(autouse=True)
+def _no_real_isolated_storage(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Fail loudly if a test opens a real storage instead of using a mock.
+
+    Two handlers here open their own storage: the mining job always does, and
+    the read paths do whenever the request's brain differs from the one the
+    injected storage is bound to. With SURREALDB_URL set, an un-patched call
+    connects to the developer's live database and operates on real rows —
+    ``DELETE /patterns?model=`` then deletes them for real. Tests that need
+    that call patch it themselves; this makes forgetting an error rather than
+    a silent write.
+    """
+
+    async def _refuse(brain_name: str | None = None) -> None:
+        raise AssertionError(
+            f"create_isolated_storage({brain_name!r}) reached the real backend; "
+            "patch it in the test or set mock_storage.brain_id to the request scope"
+        )
+
+    monkeypatch.setattr("surreal_memory.unified_config.create_isolated_storage", _refuse)
+
+
 @pytest.fixture
 def mock_storage() -> AsyncMock:
     storage = AsyncMock()
+    # The router reads pattern fibers through the storage bound to the request's
+    # brain; an AsyncMock's auto-created brain_id would never equal the scope and
+    # would send every read down the isolated-storage path.
+    storage.brain_id = BRAIN_ID
     storage.get_reasoning_stats = AsyncMock(
         return_value={"by_model": {}, "by_category": {}, "total": 0, "unprocessed": 0}
     )
@@ -347,15 +377,33 @@ def test_config_rejects_bad_model_name(client: TestClient, config_capture: dict[
 def test_config_pattern_targets_roundtrip(
     client: TestClient, config_capture: dict[str, Any]
 ) -> None:
-    # Valid targets round-trip; an out-of-range value clamps to 0..100.
+    # Valid targets round-trip; an out-of-range value clamps to the ceiling the
+    # loader uses, so the endpoint can't accept what the next read would reduce.
     resp = client.put(
         "/api/dashboard/reasoning/config",
-        json={"pattern_targets": {"claude-fable-5": 30, "claude-sonnet-5": 150}},
+        json={
+            "pattern_targets": {
+                "claude-fable-5": 30,
+                "claude-sonnet-5": MAX_PATTERN_TARGET + 50,
+            }
+        },
     )
     assert resp.status_code == 200
     saved = config_capture["cfg"].reasoning_training.pattern_targets
-    assert saved == {"claude-fable-5": 30, "claude-sonnet-5": 100}
+    assert saved == {"claude-fable-5": 30, "claude-sonnet-5": MAX_PATTERN_TARGET}
     assert resp.json()["config"]["pattern_targets"]["claude-fable-5"] == 30
+
+
+def test_config_accepts_a_target_above_the_old_hundred_cap(
+    client: TestClient, config_capture: dict[str, Any]
+) -> None:
+    # 100 used to be the hard cap on both sides; a real backlog outgrows it.
+    resp = client.put(
+        "/api/dashboard/reasoning/config",
+        json={"pattern_targets": {"claude-fable-5": 200}},
+    )
+    assert resp.status_code == 200
+    assert config_capture["cfg"].reasoning_training.pattern_targets["claude-fable-5"] == 200
 
 
 def test_config_rejects_bad_pattern_target_name(
@@ -628,9 +676,8 @@ def realistic_client(mock_storage: AsyncMock) -> TestClient:
 class TestBrainScopeIsTheName:
     """Reasoning rows are written under the brain NAME; the UUID scope is empty.
 
-    Measured on the live brain before the fix: 196 pattern fibers, 92 neurons,
-    84 synapses and 6070 traces stranded under the UUID, while 10905 traces sat
-    under the name.
+    Mining under the UUID stranded every pattern fiber, neuron, synapse and
+    trace it produced in a scope no read path consults.
     """
 
     def test_scope_is_the_name_not_the_uuid(self) -> None:
@@ -716,3 +763,233 @@ class TestBrainScopeIsTheName:
             f"reasoning_training.py scopes on brain.id (the record UUID) at lines {offenders}; "
             "use _brain_scope(brain, storage) instead — reasoning rows live under the brain name."
         )
+
+
+# ── POST /mine reprocess ──────────────────────────────────────────────────────
+
+
+def _mining_mocks(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> tuple[AsyncMock, AsyncMock, list[str]]:
+    """Patch config + isolated storage + ingest/distill; record the call order."""
+    monkeypatch.setattr(
+        "surreal_memory.unified_config.get_config",
+        lambda: _cfg(tmp_path, mining_enabled=True),
+    )
+    storage = AsyncMock()
+    storage.close = AsyncMock()
+    monkeypatch.setattr(
+        "surreal_memory.unified_config.create_isolated_storage",
+        AsyncMock(return_value=storage),
+    )
+    order: list[str] = []
+
+    reset_mock = AsyncMock(return_value=42, side_effect=lambda *a, **k: order.append("reset") or 42)
+    ingest_mock = AsyncMock(
+        return_value=SimpleNamespace(
+            traces_ingested=1, traces_scanned=1, files_scanned=1, files_total=1
+        ),
+        side_effect=lambda *a, **k: (
+            order.append("ingest")
+            or SimpleNamespace(traces_ingested=1, traces_scanned=1, files_scanned=1, files_total=1)
+        ),
+    )
+    distill_mock = AsyncMock(
+        return_value=SimpleNamespace(patterns_learned=0, traces_processed=1, models_seen=1),
+        side_effect=lambda *a, **k: (
+            order.append("distill")
+            or SimpleNamespace(patterns_learned=0, traces_processed=1, models_seen=1)
+        ),
+    )
+    monkeypatch.setattr("surreal_memory.engine.reasoning_miner.reset_processed_traces", reset_mock)
+    monkeypatch.setattr(
+        "surreal_memory.engine.reasoning_miner.ingest_reasoning_traces", ingest_mock
+    )
+    monkeypatch.setattr(
+        "surreal_memory.engine.reasoning_distiller.distill_reasoning_patterns", distill_mock
+    )
+    return reset_mock, ingest_mock, order
+
+
+async def test_run_mining_reprocess_resets_before_ingest(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The reset must precede ingest: it is cheap and idempotent, so a failure
+    # aborts ahead of the expensive transcript scan, and ingest then adds to one
+    # consistent backlog rather than to a half-reopened one.
+    reset_mock, _ingest, order = _mining_mocks(monkeypatch, tmp_path)
+
+    await rt_module._run_mining(BRAIN_ID, False, False, None, reprocess=True)
+
+    assert reset_mock.await_count == 1
+    assert order == ["reset", "ingest", "distill"]
+
+
+async def test_run_mining_reprocess_is_ignored_for_dry_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # dry_run promises no writes, and re-opening the backlog is a write.
+    reset_mock, ingest_mock, _order = _mining_mocks(monkeypatch, tmp_path)
+
+    await rt_module._run_mining(BRAIN_ID, False, True, None, reprocess=True)
+
+    reset_mock.assert_not_awaited()
+    ingest_mock.assert_not_awaited()
+
+
+async def test_run_mining_does_not_reset_by_default(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    reset_mock, _ingest, order = _mining_mocks(monkeypatch, tmp_path)
+
+    await rt_module._run_mining(BRAIN_ID, False, False, None)
+
+    reset_mock.assert_not_awaited()
+    assert order == ["ingest", "distill"]
+
+
+def test_mine_forwards_reprocess_to_the_job(
+    client: TestClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        "surreal_memory.unified_config.get_config",
+        lambda: _cfg(tmp_path, mining_enabled=True),
+    )
+    spy = AsyncMock(return_value=None)
+    monkeypatch.setattr(rt_module, "_run_mining", spy)
+
+    resp = client.post("/api/dashboard/reasoning/mine", json={"reprocess": True})
+
+    assert resp.status_code in (200, 202)
+    assert spy.await_args.kwargs["reprocess"] is True
+
+
+def test_mine_reprocess_defaults_to_false(
+    client: TestClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        "surreal_memory.unified_config.get_config",
+        lambda: _cfg(tmp_path, mining_enabled=True),
+    )
+    spy = AsyncMock(return_value=None)
+    monkeypatch.setattr(rt_module, "_run_mining", spy)
+
+    client.post("/api/dashboard/reasoning/mine", json={})
+
+    assert spy.await_args.kwargs["reprocess"] is False
+
+
+# ── pattern reads follow the request's brain ──────────────────────────────────
+
+
+class TestPatternReadsUseTheRequestScope:
+    """Traces are read by explicit brain_id; fibers are read by the storage's binding.
+
+    When those two disagree — an X-Brain-ID naming a brain other than the one
+    the process-wide storage is bound to — a single response would carry one
+    brain's traces beside another's patterns.
+    """
+
+    @staticmethod
+    def _scoped_storage(monkeypatch: pytest.MonkeyPatch, fibers: list[Any]) -> AsyncMock:
+        scoped = AsyncMock()
+        scoped.brain_id = BRAIN_ID
+        scoped.find_fibers = AsyncMock(return_value=fibers)
+        scoped.delete_fiber = AsyncMock(return_value=True)
+        scoped.close = AsyncMock()
+        monkeypatch.setattr(
+            "surreal_memory.unified_config.create_isolated_storage",
+            AsyncMock(return_value=scoped),
+        )
+        return scoped
+
+    def test_status_reads_patterns_from_the_requested_brain(
+        self,
+        client: TestClient,
+        mock_storage: AsyncMock,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setattr("surreal_memory.unified_config.get_config", lambda: _cfg(tmp_path))
+        mock_storage.brain_id = "some-other-brain"
+        mock_storage.find_fibers.return_value = [_fiber("wrong", "claude-opus-5", "debugging")]
+        scoped = self._scoped_storage(monkeypatch, [_fiber("right", "claude-fable-5", "debugging")])
+
+        data = client.get("/api/dashboard/reasoning/status").json()
+
+        assert scoped.find_fibers.await_count == 1
+        mock_storage.find_fibers.assert_not_awaited()
+        assert data["total_patterns"] == 1
+        assert "claude-fable-5" in data["coverage_by_model"]
+
+    def test_matching_scope_reuses_the_request_storage(
+        self,
+        client: TestClient,
+        mock_storage: AsyncMock,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setattr("surreal_memory.unified_config.get_config", lambda: _cfg(tmp_path))
+        isolated = AsyncMock()
+        monkeypatch.setattr(
+            "surreal_memory.unified_config.create_isolated_storage",
+            AsyncMock(return_value=isolated),
+        )
+
+        assert client.get("/api/dashboard/reasoning/status").status_code == 200
+
+        isolated.find_fibers.assert_not_awaited()
+        assert mock_storage.find_fibers.await_count == 1
+
+    def test_delete_by_model_deletes_on_the_scoped_storage(
+        self,
+        client: TestClient,
+        mock_storage: AsyncMock,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        # delete_fiber is brain-filtered too, so deleting through the wrong
+        # binding would report success while removing nothing.
+        monkeypatch.setattr("surreal_memory.unified_config.get_config", lambda: _cfg(tmp_path))
+        mock_storage.brain_id = "some-other-brain"
+        scoped = self._scoped_storage(
+            monkeypatch,
+            [
+                _fiber("p1", "claude-fable-5", "debugging"),
+                _fiber("p2", "claude-sonnet-5", "planning"),
+            ],
+        )
+
+        resp = client.request(
+            "DELETE", "/api/dashboard/reasoning/patterns", params={"model": "claude-fable-5"}
+        )
+
+        assert resp.json()["deleted"] == 1
+        assert scoped.delete_fiber.await_args.args[0] == "p1"
+        mock_storage.delete_fiber.assert_not_awaited()
+
+    @pytest.mark.parametrize(
+        ("backend", "closed"),
+        [("surrealdb", True), ("sqlite", False)],
+    )
+    def test_scoped_storage_is_closed_only_for_surrealdb(
+        self,
+        client: TestClient,
+        mock_storage: AsyncMock,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        backend: str,
+        closed: bool,
+    ) -> None:
+        # Only SurrealDB hands out a private instance to close. SQLite and
+        # in-memory return the SHARED one, and closing that would tear it out
+        # from under concurrently-served requests.
+        cfg = _cfg(tmp_path)
+        object.__setattr__(cfg, "storage_backend", backend)
+        monkeypatch.setattr("surreal_memory.unified_config.get_config", lambda: cfg)
+        mock_storage.brain_id = "some-other-brain"
+        scoped = self._scoped_storage(monkeypatch, [])
+
+        assert client.get("/api/dashboard/reasoning/patterns").status_code == 200
+
+        assert scoped.close.await_count == (1 if closed else 0)
