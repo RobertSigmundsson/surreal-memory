@@ -319,10 +319,16 @@ async def capture_text(text: str, project_name: str | None = None) -> dict[str, 
     specific patterns are detected, ensuring every session leaves a trace.
     When ``project_name`` is given, captured memories are scoped to that
     project (and tagged ``project:<name>``) for per-project recall.
+
+    Idempotent per session (upstream #80): fragments and the session summary
+    whose normalized content was already captured earlier in this
+    ``CLAUDE_SESSION_ID`` are skipped, since this hook re-reads an
+    overlapping transcript tail on every turn.
     """
     from surreal_memory.core.memory_types import MemoryType, Priority, TypedMemory
     from surreal_memory.engine.dedup.factory import build_dedup_pipeline
     from surreal_memory.engine.encoder import MemoryEncoder
+    from surreal_memory.hooks.capture_state import content_key, load_seen, mark_seen, session_key
     from surreal_memory.mcp.auto_capture import analyze_text_for_memories
     from surreal_memory.safety.input_firewall import check_content
 
@@ -367,6 +373,25 @@ async def capture_text(text: str, project_name: str | None = None) -> dict[str, 
         if len(eligible) > 1:
             eligible = await _embedding_dedup(eligible)
 
+        # Idempotency at source (#80): drop fragments already captured this
+        # session. The Stop hook fires after every assistant turn and
+        # re-reads an overlapping transcript tail, so without this the same
+        # fragments (and session summary, below) are re-encoded every turn.
+        skey = session_key()
+        seen = load_seen(skey)
+        captured_keys: list[str] = []
+        had_candidate = bool(eligible)
+        duplicate_skipped = False
+        if seen and eligible:
+            before = len(eligible)
+            eligible = [it for it in eligible if content_key(it["content"]) not in seen]
+            duplicate_skipped = len(eligible) < before
+        # All originally-detected fragments were duplicates (none survived the
+        # filter above) -- nothing left to even attempt the gate/encode loop,
+        # so the summary fallback below must not silently substitute a fresh
+        # summary for a fragment that was correctly suppressed as a duplicate.
+        all_candidates_were_duplicates = had_candidate and not eligible
+
         brain = await storage.get_brain(config.current_brain)
         if not brain:
             return {"error": "No brain configured", "saved": 0}
@@ -376,6 +401,7 @@ async def capture_text(text: str, project_name: str | None = None) -> dict[str, 
 
         auto_redact_severity = config.safety.auto_redact_min_severity
         saved: list[str] = []
+        gate_rejected = False
 
         # Write gate check for stop hook (auto-capture path). SHADOW logs the
         # decision to gate_decision without blocking; ENFORCE rejects. The
@@ -413,6 +439,7 @@ async def capture_text(text: str, project_name: str | None = None) -> dict[str, 
                             "Stop hook write gate rejected: %s",
                             gate_result.rejection_reason,
                         )
+                        gate_rejected = True
                         continue
 
                 redacted_content, matches, _ = auto_redact_content(
@@ -445,13 +472,23 @@ async def capture_text(text: str, project_name: str | None = None) -> dict[str, 
                 )
                 await storage.add_typed_memory(typed_mem)
                 saved.append(redacted_content[:60])
+                captured_keys.append(content_key(content))
             except Exception:
                 logger.debug("Failed to save stop-hook memory", exc_info=True)
                 continue
 
-        # Always save a session summary if no patterns were detected
-        if not saved:
+        # Always save a session summary if no patterns were detected. Skipped
+        # when every detected fragment was duplicate-filtered above -- that
+        # case already has an accurate "duplicate" status; falling through
+        # here would silently replace it with a brand-new summary save.
+        summary_had_candidate = False
+        if not saved and not all_candidates_were_duplicates:
             summary = _extract_session_summary(text)
+            if summary:
+                summary_had_candidate = True
+                if content_key(summary) in seen:
+                    duplicate_skipped = True
+                    summary = None  # type: ignore[assignment]
             if summary and len(summary) > 30:
                 # Apply write gate to session summary too
                 if gate_mode != "off":
@@ -480,6 +517,7 @@ async def capture_text(text: str, project_name: str | None = None) -> dict[str, 
                             "Stop hook session summary rejected: %s",
                             gate_result.rejection_reason,
                         )
+                        gate_rejected = True
                         summary = None  # type: ignore[assignment]
 
                 if summary:
@@ -504,17 +542,33 @@ async def capture_text(text: str, project_name: str | None = None) -> dict[str, 
                         )
                         await storage.add_typed_memory(typed_mem)
                         saved.append(redacted_summary[:60])
+                        captured_keys.append(content_key(summary))
                     except Exception:
                         logger.debug("Failed to save session summary", exc_info=True)
 
+        # Persist idempotency state so the next turn's re-read skips these.
+        mark_seen(skey, captured_keys)
+
         await storage.batch_save()
+
+        if saved:
+            message = f"Session end: captured {len(saved)} memories"
+        elif duplicate_skipped and not gate_rejected:
+            message = (
+                "No memories saved: duplicate content already captured this session "
+                "(idempotency skip)"
+            )
+        elif gate_rejected:
+            message = "No memories saved: content rejected by quality gate"
+        elif had_candidate or summary_had_candidate:
+            message = "No memories saved: content failed to persist"
+        else:
+            message = "No memories saved: no memorable content in transcript"
 
         return {
             "saved": len(saved),
             "memories": saved,
-            "message": f"Session end: captured {len(saved)} memories"
-            if saved
-            else "No memories saved",
+            "message": message,
         }
     finally:
         try:
