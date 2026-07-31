@@ -120,10 +120,16 @@ async def flush_text(text: str, project_name: str | None = None) -> dict[str, An
     but runs standalone without the MCP server. When ``project_name`` is
     given, captured memories are scoped to that project (and tagged
     ``project:<name>``) so recall can be filtered per project.
+
+    Idempotent per session (upstream #80): fragments whose normalized content
+    was already captured earlier in this ``CLAUDE_SESSION_ID`` (shared with
+    the Stop hook) are skipped, since PreCompact also re-reads an overlapping
+    transcript tail on every compaction.
     """
     from surreal_memory.core.memory_types import MemoryType, Priority, TypedMemory
     from surreal_memory.engine.dedup.factory import build_dedup_pipeline
     from surreal_memory.engine.encoder import MemoryEncoder
+    from surreal_memory.hooks.capture_state import content_key, load_seen, mark_seen, session_key
     from surreal_memory.mcp.auto_capture import analyze_text_for_memories
     from surreal_memory.safety.input_firewall import check_content
     from surreal_memory.safety.sensitive import auto_redact_content
@@ -172,6 +178,29 @@ async def flush_text(text: str, project_name: str | None = None) -> dict[str, An
             for item in eligible
         ]
 
+        # Idempotency at source (#80): drop fragments already captured this
+        # session (shared seen-set with the Stop hook via CLAUDE_SESSION_ID).
+        # PreCompact re-reads an overlapping tail too, so this prevents the
+        # same fragments being re-encoded on each compaction.
+        skey = session_key()
+        seen = load_seen(skey)
+        captured_keys: list[str] = []
+        duplicate_skipped = False
+        if seen:
+            before = len(boosted)
+            boosted = [it for it in boosted if content_key(it["content"]) not in seen]
+            duplicate_skipped = len(boosted) < before
+
+        if not boosted:
+            mark_seen(skey, captured_keys)
+            message = (
+                "No memories saved: duplicate content already captured this session "
+                "(idempotency skip)"
+                if duplicate_skipped
+                else "No memories saved: no memorable content in transcript"
+            )
+            return {"saved": 0, "message": message}
+
         # Get brain for encoder
         brain = await storage.get_brain(config.current_brain)
         if not brain:
@@ -182,6 +211,7 @@ async def flush_text(text: str, project_name: str | None = None) -> dict[str, An
 
         auto_redact_severity = config.safety.auto_redact_min_severity
         saved: list[str] = []
+        gate_rejected = False
 
         # Write gate for the compaction flush (intent=auto). This path encoded
         # with NO gate at all, so junk auto-captures bypassed both telemetry
@@ -219,6 +249,7 @@ async def flush_text(text: str, project_name: str | None = None) -> dict[str, An
                             "Pre-compact write gate rejected: %s",
                             gate_result.rejection_reason,
                         )
+                        gate_rejected = True
                         continue
 
                 redacted_content, matches, _ = auto_redact_content(
@@ -253,20 +284,34 @@ async def flush_text(text: str, project_name: str | None = None) -> dict[str, An
                 )
                 await storage.add_typed_memory(typed_mem)
                 saved.append(redacted_content[:60])
+                captured_keys.append(content_key(content))
             except Exception:
                 logger.debug("Failed to save flush memory", exc_info=True)
                 continue
 
+        # Persist idempotency state so the next re-read skips these.
+        mark_seen(skey, captured_keys)
+
         await storage.batch_save()
+
+        if saved:
+            message = f"Emergency flush: captured {len(saved)} memories"
+        elif duplicate_skipped and not gate_rejected:
+            message = (
+                "No memories saved: duplicate content already captured this session "
+                "(idempotency skip)"
+            )
+        elif gate_rejected:
+            message = "No memories saved: content rejected by quality gate"
+        else:
+            message = "No memories saved: content failed to persist"
 
         return {
             "saved": len(saved),
             "memories": saved,
             "mode": "emergency_flush",
             "threshold": EMERGENCY_THRESHOLD,
-            "message": f"Emergency flush: captured {len(saved)} memories"
-            if saved
-            else "No memories saved",
+            "message": message,
         }
     finally:
         try:
