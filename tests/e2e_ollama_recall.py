@@ -161,11 +161,9 @@ async def main() -> None:
     logger.info("  Temp dir: %s", tmp_dir)
 
     from surreal_memory.core.brain import Brain, BrainConfig
-    from surreal_memory.storage.sqlite_store import SQLiteStorage
+    from surreal_memory.storage.memory_store import InMemoryStorage
 
-    db_path = Path(tmp_dir) / "test_brain.db"
-    storage = SQLiteStorage(db_path)
-    await storage.initialize()
+    storage = InMemoryStorage()
 
     brain_config = BrainConfig(
         embedding_enabled=True,
@@ -229,7 +227,6 @@ async def main() -> None:
     print("\n" + "=" * 80)
     print("E2E OLLAMA bge-m3 RECALL — BASE QUERIES (6 EN)")
     print("=" * 80)
-    print(f"DB: {db_path}")
     print(f"Neurons: {len(all_neurons)} total, {emb_count} with embeddings")
     print(f"Provider: ollama / bge-m3 | Threshold: {brain_config.embedding_similarity_threshold}")
     print(f"Training time: {train_elapsed:.1f}s")
@@ -371,7 +368,6 @@ async def main() -> None:
     print(f"\nJSON results saved: {json_path}")
 
     await storage.close()
-    print(f"DB preserved at: {db_path}")
 
 
 if __name__ == "__main__":
