@@ -18,7 +18,7 @@ from typing import Any
 
 import typer
 
-QUICKSTART_URL = "https://nhadaututtheky.github.io/surreal-memory/guides/quickstart/"
+QUICKSTART_URL = "https://acidkill.github.io/surreal-memory/guides/quickstart/"
 
 
 # ---------------------------------------------------------------------------
