@@ -2,8 +2,14 @@ repos:
   - repo: https://github.com/pre-commit/pre-commit-hooks
     rev: v5.0.0
     hooks:
+      # Both hooks rewrite file contents, so committed build output has to be out
+      # of scope: trailing-whitespace was editing five blank lines *inside* a
+      # template literal in the dashboard bundle (the injected CSS in
+      # index-vknc96KY.js), and the next dashboard build puts them straight back.
       - id: trailing-whitespace
+        exclude: ^(integrations/surrealmemory/dist/|src/surreal_memory/server/static/dist/)
       - id: end-of-file-fixer
+        exclude: ^(integrations/surrealmemory/dist/|src/surreal_memory/server/static/dist/)
       - id: check-yaml
         # mkdocs.yml carries mkdocs-material's !!python/name: tags, which safe_load
         # refuses to construct. --unsafe validates the syntax without building objects.
