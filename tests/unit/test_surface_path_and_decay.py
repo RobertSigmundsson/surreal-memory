@@ -49,8 +49,11 @@ class TestProjectRootDetection:
 
     def test_relocated_global_config_dir_is_not_a_project_root(self, tmp_path: Path) -> None:
         """SURREAL_MEMORY_DIR elsewhere must not promote its parent either."""
-        home = tmp_path / "home"
-        home.mkdir()
+        # detect_project_root walks up from cwd and stops at Path.home(), so the patched
+        # home has to be an ancestor of the patched cwd. With home outside the fixture the
+        # walk leaves tmp_path and picks up whatever markers sit above it -- which is every
+        # run where TMPDIR is under $HOME, since ~/.surrealmemory is itself a marker.
+        home = tmp_path
         data_dir = tmp_path / "srv" / "data"
         global_dir = data_dir / ".surrealmemory"
         global_dir.mkdir(parents=True)
