@@ -5,6 +5,9 @@ repos:
       - id: trailing-whitespace
       - id: end-of-file-fixer
       - id: check-yaml
+        # mkdocs.yml carries mkdocs-material's !!python/name: tags, which safe_load
+        # refuses to construct. --unsafe validates the syntax without building objects.
+        args: [--unsafe]
       - id: check-added-large-files
       - id: check-merge-conflict
       - id: check-toml
@@ -13,19 +16,33 @@ repos:
         args: [--branch, main, --branch, master]
 
   - repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: v0.9.6
+    rev: v0.16.0
     hooks:
-      - id: ruff
+      # `ruff` is only a legacy alias from 0.16 on; `ruff-check` is the current id.
+      - id: ruff-check
         args: [--fix]
       - id: ruff-format
 
   - repo: https://github.com/pre-commit/mirrors-mypy
-    rev: v1.15.0
+    rev: v2.3.0
     hooks:
       - id: mypy
+        # benchmarks/ is not a package, so handing its files to mypy alongside src/
+        # aborts the run: "Source file found twice under different module names".
+        files: ^src/
         additional_dependencies:
           - pydantic>=2.0
           - types-python-dateutil
+          # The hook runs in its own environment. Without the project's runtime
+          # dependencies each of them resolves to Any, which is where the
+          # untyped-decorator and no-any-return noise came from. Mirrors
+          # [project.dependencies] in pyproject.toml.
+          - aiohttp>=3.9.0
+          - aiosqlite>=0.19.0
+          - networkx>=3.0
+          - rich>=13.0.0
+          - typer>=0.9.0,<0.26
+          - typing_extensions>=4.0
         args: [--ignore-missing-imports]
         exclude: ^tests/
 
@@ -33,6 +50,9 @@ repos:
     rev: 1.8.3
     hooks:
       - id: bandit
+        # bandit's own exclude_dirs only applies while it walks a tree itself;
+        # pre-commit hands it explicit paths, so the scope has to be cut here.
+        files: ^src/
         args: [-c, pyproject.toml, -r, src/]
         additional_dependencies: ["bandit[toml]"]
 

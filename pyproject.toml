@@ -163,6 +163,11 @@ artifacts = [
 ]
 
 [tool.ruff]
+# Lint scope is src/ + tests/, the scope CONTRIBUTING.md documents and ci.yml runs.
+# pre-commit passes every staged file, which pulled in the dev-only trees as well:
+# ruff reports 178 pre-existing errors across benchmarks/, docs/, examples/ and
+# scripts/, none of which any gate has ever enforced.
+extend-exclude = ["benchmarks", "docs", "examples", "scripts"]
 line-length = 100
 target-version = "py311"
 
@@ -259,6 +264,15 @@ module = [
     "google.genai.*",
     "watchdog.*",
     "sentence_transformers.*",
+    # Optional extras, absent from the type-check environment - same pattern as above.
+    "spacy.*",
+    "numpy.*",
+    "openai.*",
+    "anthropic.*",
+    "pyperclip.*",
+    "langchain_core.*",
+    "tqdm.*",
+    "surreal_memory_pro.*",
 ]
 ignore_missing_imports = true
 
