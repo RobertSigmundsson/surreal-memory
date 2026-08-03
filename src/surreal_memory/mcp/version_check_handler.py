@@ -211,7 +211,9 @@ async def _fetch_latest_version() -> str | None:
         try:
             if not _PYPI_URL.startswith("https://"):
                 return None
-            req = urllib.request.Request(
+            # S310 anchors on this construction under ruff < 0.16 and on the open below
+            # from 0.16 on, so the suppression sits here and tolerates being unused.
+            req = urllib.request.Request(  # noqa: S310, RUF100
                 _PYPI_URL,
                 headers={"Accept": "application/json"},
             )
