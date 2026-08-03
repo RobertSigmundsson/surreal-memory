@@ -478,7 +478,7 @@ class SurrealDBStorage(
         namespace: str = "",
         database: str = "",
         user: str = "",
-        password: str = "",
+        password: str = "",  # nosec B107 - empty sentinel; the value comes from the env
         embedding_dim: int = 3072,
     ) -> None:
         from surreal_memory.storage.surrealdb.connection import SurrealSettings

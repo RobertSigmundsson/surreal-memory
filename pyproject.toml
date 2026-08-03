@@ -339,5 +339,21 @@ exclude_lines = [
 ]
 
 [tool.bandit]
-exclude_dirs = ["tests"]
-skips = ["B101", "B311", "B324"]
+exclude_dirs = ["tests", "benchmarks", "docs", "examples"]
+# `bandit -c pyproject.toml -r src/` reports 123 findings on a clean tree
+# (0 high, 49 medium, 74 low). Nine are false positives and carry a per-line
+# `# nosec`; the remaining 114 are whole rule classes this codebase takes on
+# purpose, listed below with the count each one contributes. This is a policy
+# choice, not a cleanup -- see the commit message.
+#   B608 (43) - SurrealQL is composed as text by design. Identifiers go through
+#     the charset validators (_brain_literal, _to_surreal_id) and values through
+#     $-bindings; 42 of the 43 sit in storage/surrealdb/.
+#   B110 (45) / B112 (4) - deliberate try/except-pass and -continue on fail-soft
+#     paths. ruff already ignores the equivalent S110/S112 in [tool.ruff.lint].
+#   B404 (6) / B603 (8) / B607 (4) - subprocess without a shell, invoking git and
+#     local binaries.
+#   B310 (4) - urlopen against endpoints built from this project's own constants
+#     or configuration; two of the four also check the URL scheme first.
+# The classes that would matter stay on, including B602 (shell=True), B301
+# (pickle) and B506 (yaml.load).
+skips = ["B101", "B311", "B324", "B110", "B112", "B310", "B404", "B603", "B607", "B608"]
