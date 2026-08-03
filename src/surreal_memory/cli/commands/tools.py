@@ -377,7 +377,7 @@ def serve(
         )
         raise typer.Exit(1)
 
-    if host in ("0.0.0.0", "::"):  # noqa: S104
+    if host in ("0.0.0.0", "::"):  # noqa: S104  # nosec B104 - the warning check, not a bind
         typer.echo(
             f"WARNING: Binding to {host} exposes the server to the network. "
             "Consider using TLS (a reverse proxy) for production deployments.",
