@@ -2619,14 +2619,15 @@ class SurrealDBStorage(
         conn = self._ensure_conn()
         did = _to_surreal_id(device_id)
 
-        from surreal_memory.sync.device import DeviceInfo
+        from surreal_memory.core.sync_records import DeviceRecord
 
+        registered_at = utcnow()
         record = {
             "id": f"{brain_id}_{did}",
             "device_id": device_id,
             "brain_id": brain_id,
             "device_name": device_name,
-            "registered_at": utcnow(),
+            "registered_at": registered_at,
             "last_sync_sequence": 0,
         }
         try:
@@ -2634,10 +2635,13 @@ class SurrealDBStorage(
         except Exception:
             await conn.merge(f"device:{brain_id}_{did}", record)
 
-        return DeviceInfo(
+        return DeviceRecord(
             device_id=device_id,
+            brain_id=brain_id,
             device_name=device_name,
-            registered_at=utcnow(),
+            last_sync_at=None,
+            last_sync_sequence=0,
+            registered_at=registered_at,
         )
 
     async def get_device(self, device_id: str) -> Any | None:
@@ -2647,11 +2651,14 @@ class SurrealDBStorage(
             result = await self._conn.select(f"device:{brain_id}_{did}")
             if result:
                 r = result[0] if isinstance(result, list) else result
-                from surreal_memory.sync.device import DeviceInfo
+                from surreal_memory.core.sync_records import DeviceRecord
 
-                return DeviceInfo(
+                return DeviceRecord(
                     device_id=str(r.get("device_id", device_id)),
+                    brain_id=str(r.get("brain_id", brain_id)),
                     device_name=str(r.get("device_name", "")),
+                    last_sync_at=_parse_datetime(r.get("last_sync_at")),
+                    last_sync_sequence=int(r.get("last_sync_sequence") or 0),
                     registered_at=_parse_datetime(r.get("registered_at")) or utcnow(),
                 )
         except Exception:
@@ -2664,12 +2671,15 @@ class SurrealDBStorage(
             "SELECT * FROM device WHERE brain_id = $brain_id ORDER BY registered_at ASC",
             brain_id=brain_id,
         )
-        from surreal_memory.sync.device import DeviceInfo
+        from surreal_memory.core.sync_records import DeviceRecord
 
         return [
-            DeviceInfo(
+            DeviceRecord(
                 device_id=str(r.get("device_id", "")),
+                brain_id=str(r.get("brain_id", brain_id)),
                 device_name=str(r.get("device_name", "")),
+                last_sync_at=_parse_datetime(r.get("last_sync_at")),
+                last_sync_sequence=int(r.get("last_sync_sequence") or 0),
                 registered_at=_parse_datetime(r.get("registered_at")) or utcnow(),
             )
             for r in rows
