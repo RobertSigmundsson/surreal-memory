@@ -2633,7 +2633,18 @@ class SurrealDBStorage(
         try:
             await conn.insert("device", record)
         except Exception:
-            await conn.merge(f"device:{brain_id}_{did}", record)
+            # Re-registration: update the name only — overwriting registered_at
+            # would lose the original registration time, and resetting
+            # last_sync_sequence would rewind the device's sync cursor. The
+            # record id must be a RecordID object: a raw "device:<key>" string
+            # is parsed as SurrealQL, where a hyphen in brain_id reads as
+            # subtraction.
+            from surrealdb import RecordID
+
+            await conn.merge(RecordID("device", f"{brain_id}_{did}"), {"device_name": device_name})
+            existing = await self.get_device(device_id)
+            if existing is not None:
+                return existing
 
         return DeviceRecord(
             device_id=device_id,
@@ -2648,7 +2659,9 @@ class SurrealDBStorage(
         brain_id = self._get_brain_id()
         did = _to_surreal_id(device_id)
         try:
-            result = await self._conn.select(f"device:{brain_id}_{did}")
+            from surrealdb import RecordID
+
+            result = await self._conn.select(RecordID("device", f"{brain_id}_{did}"))
             if result:
                 r = result[0] if isinstance(result, list) else result
                 from surreal_memory.core.sync_records import DeviceRecord
@@ -2689,8 +2702,10 @@ class SurrealDBStorage(
         brain_id = self._get_brain_id()
         did = _to_surreal_id(device_id)
         try:
+            from surrealdb import RecordID
+
             await self._conn.merge(
-                f"device:{brain_id}_{did}",
+                RecordID("device", f"{brain_id}_{did}"),
                 {
                     "last_sync_at": utcnow(),
                     "last_sync_sequence": last_sync_sequence,
@@ -2703,7 +2718,9 @@ class SurrealDBStorage(
         brain_id = self._get_brain_id()
         did = _to_surreal_id(device_id)
         try:
-            await self._conn.delete(f"device:{brain_id}_{did}")
+            from surrealdb import RecordID
+
+            await self._conn.delete(RecordID("device", f"{brain_id}_{did}"))
             return True
         except Exception:
             return False

@@ -71,3 +71,42 @@ class TestDeviceRecordShape:
         devices = await storage.list_devices()
 
         assert devices[0].last_sync_sequence == 0
+
+
+class TestReRegisterUpsert:
+    """Re-registering an existing (brain, device) pair must upsert, not 500.
+
+    The old fallback passed a raw "device:<brain>_<device>" string to merge;
+    the SDK parses that as SurrealQL, so a hyphen in the brain id reads as
+    subtraction (ValidationError) and every re-register raised. The merge must
+    target a RecordID and update the name only — never reset registered_at or
+    the device's last_sync_sequence.
+    """
+
+    @pytest.mark.asyncio
+    async def test_reregister_merges_name_only_via_record_id(self) -> None:
+        from datetime import datetime
+
+        from surrealdb import RecordID
+
+        storage = _storage()
+        conn = AsyncMock()
+        conn.insert.side_effect = Exception("Database record already exists")
+        storage._ensure_conn = lambda: conn  # type: ignore[method-assign]
+        original = DeviceRecord(
+            device_id="abc123",
+            brain_id="brain1",
+            device_name="renamed",
+            last_sync_at=None,
+            last_sync_sequence=7,
+            registered_at=datetime(2026, 1, 1),
+        )
+        storage.get_device = AsyncMock(return_value=original)  # type: ignore[method-assign]
+
+        device = await storage.register_device("abc123", "renamed")
+
+        (rid, body), _ = conn.merge.await_args
+        assert isinstance(rid, RecordID)
+        assert body == {"device_name": "renamed"}  # name only — no cursor reset
+        assert device.last_sync_sequence == 7  # preserved from the stored row
+        assert device.registered_at == datetime(2026, 1, 1)  # original kept
