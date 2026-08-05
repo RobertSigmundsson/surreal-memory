@@ -110,3 +110,53 @@ class TestReRegisterUpsert:
         assert body == {"device_name": "renamed"}  # name only — no cursor reset
         assert device.last_sync_sequence == 7  # preserved from the stored row
         assert device.registered_at == datetime(2026, 1, 1)  # original kept
+
+
+class TestChangeLogEntryShape:
+    """change_log read methods must return ChangeEntry, the interface contract.
+
+    Regression for a live 500 (E4b round 4): the SurrealDB backend returned
+    sync.protocol.SyncChange (has ``sequence``, str ``changed_at``) while both
+    SyncEngine consumers read ``c.id`` and ``c.changed_at.isoformat()`` —
+    POST /hub/sync died with AttributeError on any brain whose change_log had
+    pending entries, and passed only when there was nothing to sync.
+    """
+
+    _ROW = {
+        "sequence": 11,
+        "brain_id": "brain1",
+        "entity_type": "neuron",
+        "entity_id": "n-1",
+        "operation": "insert",
+        "device_id": "abc123",
+        "changed_at": "2026-01-01T00:00:00Z",
+        "payload": {"k": "v"},
+        "synced": False,
+    }
+
+    @pytest.mark.asyncio
+    async def test_get_changes_since_returns_change_entries(self) -> None:
+        from surreal_memory.core.sync_records import ChangeEntry
+
+        storage = _storage()
+        storage._query = AsyncMock(return_value=[dict(self._ROW)])  # type: ignore[method-assign]
+
+        changes = await storage.get_changes_since(0)
+
+        assert isinstance(changes[0], ChangeEntry)
+        # the exact attribute chain handle_hub_sync performs:
+        assert changes[0].id == 11
+        assert changes[0].changed_at.isoformat()
+
+    @pytest.mark.asyncio
+    async def test_get_unsynced_changes_returns_change_entries(self) -> None:
+        from surreal_memory.core.sync_records import ChangeEntry
+
+        storage = _storage()
+        storage._query = AsyncMock(return_value=[dict(self._ROW)])  # type: ignore[method-assign]
+
+        changes = await storage.get_unsynced_changes()
+
+        assert isinstance(changes[0], ChangeEntry)
+        assert changes[0].id == 11
+        assert changes[0].changed_at.isoformat()

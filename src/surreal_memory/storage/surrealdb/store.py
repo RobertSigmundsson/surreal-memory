@@ -2476,19 +2476,21 @@ class SurrealDBStorage(
             seq=sequence,
             limit=limit,
         )
-        from surreal_memory.sync.protocol import SyncChange
+        from surreal_memory.core.sync_records import ChangeEntry
 
         changes = []
         for r in rows:
             changes.append(
-                SyncChange(
-                    sequence=int(r.get("sequence", 0)),
+                ChangeEntry(
+                    id=int(r.get("sequence", 0)),
+                    brain_id=str(r.get("brain_id", brain_id)),
                     entity_type=str(r.get("entity_type", "")),
                     entity_id=str(r.get("entity_id", "")),
                     operation=str(r.get("operation", "")),
                     device_id=str(r.get("device_id", "")),
-                    changed_at=str(r.get("changed_at", "")),
+                    changed_at=_parse_datetime(r.get("changed_at")) or utcnow(),
                     payload=r.get("payload") or {},
+                    synced=bool(r.get("synced", False)),
                 )
             )
         return changes
@@ -2501,17 +2503,19 @@ class SurrealDBStorage(
             brain_id=brain_id,
             limit=limit,
         )
-        from surreal_memory.sync.protocol import SyncChange
+        from surreal_memory.core.sync_records import ChangeEntry
 
         return [
-            SyncChange(
-                sequence=int(r.get("sequence", 0)),
+            ChangeEntry(
+                id=int(r.get("sequence", 0)),
+                brain_id=str(r.get("brain_id", brain_id)),
                 entity_type=str(r.get("entity_type", "")),
                 entity_id=str(r.get("entity_id", "")),
                 operation=str(r.get("operation", "")),
                 device_id=str(r.get("device_id", "")),
-                changed_at=str(r.get("changed_at", "")),
+                changed_at=_parse_datetime(r.get("changed_at")) or utcnow(),
                 payload=r.get("payload") or {},
+                synced=bool(r.get("synced", False)),
             )
             for r in rows
         ]
