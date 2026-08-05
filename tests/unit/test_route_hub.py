@@ -205,3 +205,31 @@ class TestInvalidBrainId:
         resp = client.get("/hub/status/../etc")
 
         assert resp.status_code in (404, 422)
+
+
+class TestOverlongIds:
+    """Length bounds on hub path/body ids (charset-valid but over-long ids used
+    to pass the regex and surface as 500 from the storage layer)."""
+
+    def test_status_rejects_129_char_brain_id(self, client: TestClient) -> None:
+        resp = client.get(f"/hub/status/{'a' * 129}")
+
+        assert resp.status_code == 422
+
+    def test_devices_rejects_129_char_brain_id(self, client: TestClient) -> None:
+        resp = client.get(f"/hub/devices/{'a' * 129}")
+
+        assert resp.status_code == 422
+
+    def test_validator_accepts_128_char_brain_id(self) -> None:
+        from surreal_memory.server.routes.hub import _validate_brain_id
+
+        _validate_brain_id("a" * 128)  # boundary: must not raise
+
+    def test_register_rejects_33_char_device_id(self, client: TestClient) -> None:
+        resp = client.post(
+            "/hub/register",
+            json={"device_id": "a" * 33, "device_name": "laptop", "brain_id": BOUND_BRAIN},
+        )
+
+        assert resp.status_code == 422

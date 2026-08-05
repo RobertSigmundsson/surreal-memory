@@ -28,6 +28,12 @@ logger = logging.getLogger(__name__)
 _BRAIN_ID_PATTERN = re.compile(r"^[a-zA-Z0-9_\-\.]+$")
 _DEVICE_ID_PATTERN = re.compile(r"^[a-fA-F0-9]+$")
 
+# SurrealDB rejects identifiers longer than 128 characters; without this bound a
+# charset-valid but over-long brain_id passes validation and the storage error
+# surfaces as a 500 instead of a 422 (measured live: 128 passes, 129 fails).
+_BRAIN_ID_MAX_LEN = 128
+_DEVICE_ID_MAX_LEN = 32
+
 
 router = APIRouter(
     prefix="/hub",
@@ -80,13 +86,13 @@ class HubMerkleSyncRequest(BaseModel):
 
 def _validate_brain_id(brain_id: str) -> None:
     """Raise HTTPException if brain_id is invalid."""
-    if not _BRAIN_ID_PATTERN.match(brain_id):
+    if len(brain_id) > _BRAIN_ID_MAX_LEN or not _BRAIN_ID_PATTERN.match(brain_id):
         raise HTTPException(status_code=422, detail="Invalid brain_id format")
 
 
 def _validate_device_id(device_id: str) -> None:
     """Raise HTTPException if device_id is invalid (must be hex, max 32 chars)."""
-    if not _DEVICE_ID_PATTERN.match(device_id):
+    if len(device_id) > _DEVICE_ID_MAX_LEN or not _DEVICE_ID_PATTERN.match(device_id):
         raise HTTPException(
             status_code=422, detail="Invalid device_id format: must be hex characters only"
         )
