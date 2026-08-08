@@ -101,6 +101,18 @@ class BrainConfig:
     lazy_entity_enabled: bool = True
     lazy_entity_promotion_threshold: int = 2
     lazy_entity_prune_days: int = 90
+    # Lazy concept promotion: same idea for keyword/concept neurons, which until now
+    # became permanent on their FIRST appearance while entities had to earn it. Because
+    # the keyword extractor emits mostly adjacent-word bi-grams, that asymmetry is what
+    # fills a brain with debris like "normy przedmiarowej" or "architektura silnika".
+    # Measured on a production brain (1199 real memories, replayed): 82 % of concept
+    # creations were for a keyword that never recurred; at threshold 3 it is 92 %.
+    # Recurrence is read from the keyword_document_frequency table that the encoder
+    # already maintains, so nothing new has to be tracked. Deferring costs nothing
+    # permanent: the memory itself is stored either way, and the concept neuron appears
+    # as soon as the keyword shows up in enough memories to look like a real theme.
+    lazy_concept_enabled: bool = True
+    lazy_concept_promotion_threshold: int = 2
     # Recall quality: recency sigmoid halflife (hours)
     recency_halflife_hours: float = 168.0  # 7 days (was hardcoded 72h)
     # Recall quality: tag-aware scoring boost
