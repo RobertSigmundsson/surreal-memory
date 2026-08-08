@@ -470,6 +470,11 @@ class MemoryEncoder:
                 "dropped_short": ctx.dropped_short,
                 "dropped_noise": ctx.dropped_noise,
                 "dropped_duplicate_entity": ctx.dropped_duplicate_entity,
+                # Held back by lazy promotion rather than rejected on quality. Without
+                # this the caller sees zero new concepts and cannot tell "nothing worth
+                # keeping was found" from "everything found is still waiting for a
+                # second mention" -- two states that call for opposite reactions.
+                "deferred_concepts": len(ctx.deferred_concepts),
             },
             pending_supersessions=list(ctx.pending_supersessions),
         )
