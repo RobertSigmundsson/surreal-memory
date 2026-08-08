@@ -340,9 +340,47 @@ class ExtractConceptNeuronsStep:
             valid_keywords, type=NeuronType.CONCEPT
         )
 
+        # Lazy promotion, mirroring ExtractEntityNeuronsStep: a keyword earns a permanent
+        # neuron only once it has shown up in enough *previous* memories to look like a
+        # theme rather than a passing phrase. The counter is the document-frequency table
+        # the encoder already maintains -- and it is incremented later in the pipeline
+        # (CreateSynapsesStep), so the value read here excludes the memory being encoded.
+        # That is exactly the "seen before" semantics count_entity_refs() gives entities.
+        # Coerce both knobs: `config` is a plain object here, and a caller passing a
+        # stand-in (or a hand-built config) can put anything on those attributes. An
+        # unvalidated value would only blow up later, mid-loop, in an arithmetic
+        # comparison -- far from the place that actually got it wrong.
+        lazy_enabled = bool(getattr(config, "lazy_concept_enabled", True))
+        raw_threshold = getattr(config, "lazy_concept_promotion_threshold", 2)
+        try:
+            promotion_threshold = int(raw_threshold)
+        except (TypeError, ValueError):
+            promotion_threshold = 2
+        df_map: dict[str, int] = {}
+        if lazy_enabled and valid_keywords:
+            try:
+                raw_df = await storage.get_keyword_df_batch([kw.lower() for kw in valid_keywords])
+                # Same shape guard the IDF path below uses (see CreateSynapsesStep): a
+                # storage double, or a backend without the DF table, can hand back
+                # something that is not a dict, and comparing that to an int later would
+                # blow up inside the loop instead of here.
+                df_map = raw_df if isinstance(raw_df, dict) else {}
+            except Exception:
+                # Fail OPEN, like the entity path: a broken counter must not silently
+                # stop concept extraction altogether. Louder debris beats a mute brain.
+                logger.debug("keyword DF lookup failed; promoting concepts", exc_info=True)
+                lazy_enabled = False
+
         for keyword in valid_keywords:
             if keyword in existing_map:
                 continue
+            if lazy_enabled:
+                seen = df_map.get(keyword.lower(), 0)
+                if not isinstance(seen, (int, float)):
+                    seen = 0
+                if seen < promotion_threshold - 1:
+                    ctx.deferred_concepts.append(keyword)
+                    continue
             neuron = Neuron.create(type=NeuronType.CONCEPT, content=keyword)
             await storage.add_neuron(neuron)
             ctx.concept_neurons.append(neuron)

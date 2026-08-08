@@ -7,6 +7,7 @@ concept neurons from short common words, entity duplicates, and
 
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import datetime
 
 import pytest
@@ -19,9 +20,16 @@ from surreal_memory.storage.memory_store import InMemoryStorage
 
 @pytest.fixture
 async def encoder() -> tuple[MemoryEncoder, InMemoryStorage]:
-    """Create an encoder with in-memory storage."""
+    """Create an encoder with in-memory storage.
+
+    Lazy concept promotion is switched OFF here on purpose. These tests assert that
+    specific junk does NOT become a concept, and every one of them encodes a single
+    memory -- under lazy promotion a first-seen keyword is deferred regardless of
+    quality, so the whole file would pass while testing nothing. Isolating the filter
+    under test is the point; lazy promotion has its own file.
+    """
     storage = InMemoryStorage()
-    config = BrainConfig()
+    config = replace(BrainConfig(), lazy_concept_enabled=False)
     brain = Brain.create(name="test", config=config)
     await storage.save_brain(brain)
     storage.set_brain(brain.id)
