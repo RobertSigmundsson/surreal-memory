@@ -940,9 +940,15 @@ class SurrealDBStorage(
 
         if time_range is not None:
             start, end = time_range
+            # Datetime objects, not isoformat strings — same cross-type ranking
+            # trap as get_enhanced_stats below. Here it bit harder than a wrong
+            # count: ``created_at <= '<string>'`` is unconditionally FALSE, so
+            # the whole predicate could never match and every time-ranged neuron
+            # lookup returned an empty list on SurrealDB. Measured on the
+            # production brain: 0 rows with the strings, 453 with the datetimes.
             conditions.append("created_at >= $time_start AND created_at <= $time_end")
-            params["time_start"] = start.isoformat()
-            params["time_end"] = end.isoformat()
+            params["time_start"] = start
+            params["time_end"] = end
 
         if ephemeral is not None:
             conditions.append("ephemeral = $ephemeral")
@@ -2223,13 +2229,23 @@ class SurrealDBStorage(
         # The remaining four fields mirror InMemoryStorage.get_enhanced_stats
         # (storage/memory_store.py) so both backends report the same shape.
         # Independent queries, run concurrently like get_stats does above.
+        # Bind the datetime OBJECT, never ``.isoformat()``. SurrealDB compares
+        # across types by type rank rather than erroring, and datetime outranks
+        # string — so ``created_at >= '<any string>'`` is unconditionally true
+        # (and ``<=`` unconditionally false). Measured on 3.2.3:
+        # ``RETURN d'2000-01-01T00:00:00Z' >= '2099-06-01'`` -> true. With the
+        # isoformat string this counted EVERY fiber ever written (1680 of 1680
+        # on the production brain, against 30 actually created that day), so the
+        # dashboard's "today" figure was the all-time total. ``type::datetime($t)``
+        # is not the fix either: it rejects ``utcnow()``'s naive isoformat
+        # ("Could not cast into `datetime`") because it carries no offset.
         today = utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
         today_rows, hot_state_rows, oldest_rows, newest_rows = await asyncio.gather(
             self._query(
                 "SELECT count() AS c FROM fiber "
                 "WHERE brain_id = $bid AND created_at >= $today GROUP ALL",
                 bid=brain_id,
-                today=today.isoformat(),
+                today=today,
             ),
             self._query(
                 "SELECT * FROM neuron_state WHERE brain_id = $bid "
