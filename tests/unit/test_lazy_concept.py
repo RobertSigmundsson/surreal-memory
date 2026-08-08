@@ -118,6 +118,23 @@ class TestLazyConceptPromotion:
         assert ctx.concept_neurons == []
         assert ctx.deferred_concepts, "deferred keywords must be recorded for observability"
 
+    async def test_deferral_count_reaches_the_caller(self) -> None:
+        """Recording deferrals on the context is worthless if nothing surfaces them.
+
+        Without this the counter is write-only: `extraction_stats` would report three
+        kinds of drop and stay silent about the one that now accounts for most of them,
+        so a caller seeing zero new concepts still cannot tell "found nothing worth
+        keeping" from "everything is waiting for a second mention".
+        """
+        enc, _ = await _encoder()
+        result = await enc.encode(_TEXT, timestamp=datetime(2024, 2, 4, 15, 0))
+
+        stats = result.extraction_stats
+        assert stats is not None
+        assert stats.get("deferred_concepts", 0) > 0, (
+            f"first sighting defers keywords, so the count must be visible; got {stats}"
+        )
+
     async def test_disabled_restores_eager_creation(self) -> None:
         enc, _ = await _encoder(lazy_concept_enabled=False)
         result = await enc.encode(_TEXT, timestamp=datetime(2024, 2, 4, 15, 0))
