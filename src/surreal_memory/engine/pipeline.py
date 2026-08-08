@@ -78,6 +78,12 @@ class PipelineContext:
     # Entities stored here are first-mentions — not yet promoted to neurons
     deferred_entity_refs: list[str] = field(default_factory=list)
 
+    # Keywords held back by lazy concept promotion: seen too few times so far to earn a
+    # permanent neuron. Not a loss — the memory is stored regardless and the keyword's
+    # document frequency still rises, so a genuine theme gets promoted on a later mention.
+    # Recorded so "nothing was created" stays distinguishable from "nothing was found".
+    deferred_concepts: list[str] = field(default_factory=list)
+
     # Concept extraction observability — incremented by ExtractConceptNeuronsStep.
     # Surfaced through EncodingResult.extraction_stats only when callers opt in.
     dropped_short: int = 0
