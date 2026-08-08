@@ -108,9 +108,16 @@ class BrainConfig:
     # Measured on a production brain (1199 real memories, replayed): 82 % of concept
     # creations were for a keyword that never recurred; at threshold 3 it is 92 %.
     # Recurrence is read from the keyword_document_frequency table that the encoder
-    # already maintains, so nothing new has to be tracked. Deferring costs nothing
-    # permanent: the memory itself is stored either way, and the concept neuron appears
-    # as soon as the keyword shows up in enough memories to look like a real theme.
+    # already maintains, so nothing new has to be tracked. The memory itself is stored
+    # either way; only the keyword's own index entry waits for a second mention.
+    #
+    # NOT full parity with the entity path, and the difference is lossy: entities get
+    # _retroactive_entity_link() so earlier memories are wired to an entity once it is
+    # promoted, while a promoted concept is linked only from the memory that promoted it.
+    # The FIRST memory mentioning a keyword permanently loses that one activation hop.
+    # Accepted deliberately -- it costs an index edge, not content, and the anchor keeps
+    # both its text and its embedding -- but a retroactive concept link is the obvious
+    # next step if recall quality on first-mention memories ever regresses.
     lazy_concept_enabled: bool = True
     lazy_concept_promotion_threshold: int = 2
     # Recall quality: recency sigmoid halflife (hours)
