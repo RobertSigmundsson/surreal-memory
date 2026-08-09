@@ -395,3 +395,89 @@ class TestIdempotencyFuzz:
 
         assert actual_total_saved == expected_total_saved
         assert actual_total_saved == len(seen_options)
+
+
+class TestRejectedContentNotResubmitted:
+    """A refusal must be remembered, not only a save.
+
+    Until this was fixed only *successful* encodes were marked seen, so a
+    fragment the gate turned down came back on every subsequent invocation and
+    was judged -- and logged to ``gate_decision`` -- again. Measured on the live
+    brain 2026-08-08: 499 auto decisions over 24h carried just 134 distinct
+    contents, one fragment appearing 36 times between 07:30 and 17:34. Because
+    the accept rate is computed over those rows, the inflated denominator made
+    the gate look ~4x more hostile than it was (0.39% vs ~1.4%).
+    """
+
+    async def _count_gate_calls(self, monkeypatch: pytest.MonkeyPatch) -> list[str]:
+        """Count every gate decision actually logged, in call order.
+
+        ``log_gate_decision`` is what writes the ``gate_decision`` row, so it is
+        the exact quantity that inflated the denominator -- assert on it rather
+        than on a proxy.
+        """
+        from surreal_memory.engine import gate_telemetry
+
+        calls: list[str] = []
+        real = gate_telemetry.log_gate_decision
+
+        async def counting(*args: object, **kwargs: object):  # type: ignore[no-untyped-def]
+            calls.append(str(kwargs.get("reason", "")))
+            return await real(*args, **kwargs)  # type: ignore[arg-type]
+
+        # The hooks do a function-local ``from ... import log_gate_decision``,
+        # which resolves the attribute at call time -- so patching the module
+        # attribute is enough and no import-order trickery is needed.
+        monkeypatch.setattr(gate_telemetry, "log_gate_decision", counting)
+        return calls
+
+    async def test_stop_hook_does_not_rejudge_rejected_content(
+        self, isolated_brain_gate_enforce: str, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        calls = await self._count_gate_calls(monkeypatch)
+
+        first = await stop_hook.capture_text(_TEXT_A, project_name=None)
+        assert first["saved"] == 0
+        after_first = len(calls)
+        assert after_first >= 1, "the first call must actually reach the gate"
+
+        second = await stop_hook.capture_text(_TEXT_A, project_name=None)
+        assert second["saved"] == 0
+        assert len(calls) == after_first, (
+            "identical content already refused this session must not be judged "
+            f"again; gate was invoked {len(calls) - after_first} extra time(s)"
+        )
+
+    async def test_pre_compact_honours_refusal_recorded_by_stop(
+        self, isolated_brain_gate_enforce: str, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The seen-set is shared, so PreCompact must not re-judge Stop's refusal."""
+        calls = await self._count_gate_calls(monkeypatch)
+
+        await stop_hook.capture_text(_TEXT_A, project_name=None)
+        after_stop = len(calls)
+        assert after_stop >= 1
+
+        await pre_compact_hook.flush_text(_TEXT_A, project_name=None)
+        assert len(calls) == after_stop, (
+            "PreCompact re-judged content the Stop hook had already refused"
+        )
+
+    async def test_new_content_still_reaches_the_gate(
+        self, isolated_brain_gate_enforce: str, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Positive control: suppression must be specific, not a blanket mute.
+
+        Without this, a bug that silenced *everything* after the first call would
+        pass both assertions above.
+        """
+        calls = await self._count_gate_calls(monkeypatch)
+
+        await stop_hook.capture_text(_TEXT_A, project_name=None)
+        after_first = len(calls)
+
+        await stop_hook.capture_text(_TEXT_B, project_name=None)
+        assert len(calls) > after_first, (
+            "different content must still be judged -- the refusal cache is "
+            "keyed on content, not on 'anything already tried'"
+        )
