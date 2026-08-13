@@ -292,9 +292,23 @@ _ALL_TOOL_SCHEMAS: list[dict[str, Any]] = [
                                 "type": "string",
                                 "description": "Link to a registered source",
                             },
+                            "context": {
+                                "type": "object",
+                                "description": "Structured context dict merged into content "
+                                "server-side using type-specific templates. Same behavior as "
+                                "smem_remember's context field.",
+                                "additionalProperties": True,
+                            },
                             "ephemeral": {
                                 "type": "boolean",
                                 "description": "Session-scoped memory (auto-expires, never synced)",
+                            },
+                            "tier": {
+                                "type": "string",
+                                "enum": ["hot", "warm", "cold"],
+                                "description": "Memory tier: hot (always in context, slow decay), "
+                                "warm (default, semantic match), cold (explicit recall only, "
+                                "fast decay). Boundary type auto-promotes to hot.",
                             },
                             "location": {
                                 "type": "object",
@@ -1010,7 +1024,7 @@ _ALL_TOOL_SCHEMAS: list[dict[str, Any]] = [
         "contradictions, low-evidence (low trust) facts, superseded facts, soon-expiring memories, and drift. "
         "Separate from smem_conflicts (which is CRUD). Read-only. Note: low_evidence/superseded sample the "
         "most-recent ~200 typed memories (see response 'scan.typed_scan_truncated'); contradiction count is "
-        "capped. Drift is not yet implemented on this backend.",
+        "capped. Drift clusters appear once a detect_drift consolidation pass has run.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -1839,7 +1853,8 @@ _ALL_TOOL_SCHEMAS: list[dict[str, Any]] = [
         "summarize (cluster topic neurons), mature (episodic→semantic), infer (co-activation synapses), "
         "enrich (metadata extraction), dream (synthetic bridges), learn_habits (workflow patterns), "
         "dedup (merge near-duplicates), semantic_link (cross-domain connections), compress (old fibers), "
-        "process_tool_events, all (run all in dependency order). "
+        "process_tool_events, detect_drift (recompute tag-cooccurrence drift clusters), "
+        "all (run all in dependency order). "
         "Use dry_run=true to preview without applying changes.",
         "inputSchema": {
             "type": "object",
@@ -1859,6 +1874,7 @@ _ALL_TOOL_SCHEMAS: list[dict[str, Any]] = [
                         "semantic_link",
                         "compress",
                         "process_tool_events",
+                        "detect_drift",
                         "all",
                     ],
                     "description": "Consolidation strategy to run (default: all)",

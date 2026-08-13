@@ -8,6 +8,7 @@ SurrealDB is the supported backend (see ``docker-compose.surrealdb.yml``).
 
 from __future__ import annotations
 
+import random
 from collections import defaultdict
 from datetime import datetime, timedelta
 from typing import Any, Literal
@@ -30,6 +31,7 @@ from surreal_memory.engine.depth_prior import DepthPrior
 from surreal_memory.storage.base import NeuralStorage
 from surreal_memory.storage.memory_brain_ops import InMemoryBrainMixin
 from surreal_memory.storage.memory_collections import InMemoryCollectionsMixin
+from surreal_memory.storage.memory_drift import InMemoryDriftMixin
 from surreal_memory.storage.memory_knowledge import InMemoryKnowledgeMixin
 from surreal_memory.storage.memory_lifecycle_ops import InMemoryLifecycleMixin
 from surreal_memory.storage.memory_pinning import InMemoryPinningMixin
@@ -43,6 +45,7 @@ class InMemoryStorage(
     InMemoryReviewsMixin,
     InMemoryCollectionsMixin,
     InMemoryPinningMixin,
+    InMemoryDriftMixin,
     InMemoryBrainMixin,
     InMemoryKnowledgeMixin,
     InMemorySyncMixin,
@@ -87,6 +90,8 @@ class InMemoryStorage(
         self._compression_backups: dict[str, dict[str, dict[str, Any]]] = defaultdict(dict)
         self._neuron_snapshots: dict[str, dict[str, dict[str, Any]]] = defaultdict(dict)
         self._hot_index: dict[str, list[dict[str, Any]]] = defaultdict(list)
+        self._tag_cooccurrence: dict[str, dict[tuple[str, str], dict[str, Any]]] = defaultdict(dict)
+        self._drift_clusters: dict[str, dict[str, dict[str, Any]]] = defaultdict(dict)
         self._current_brain_id: str | None = None
 
     @property
@@ -217,6 +222,14 @@ class InMemoryStorage(
     async def get_all_neuron_states(self) -> list[NeuronState]:
         brain_id = self._get_brain_id()
         return list(self._states[brain_id].values())
+
+    async def get_dormant_neuron_states(self, limit: int = 20) -> list[NeuronState]:
+        """Sample dormant (never-recalled) states without copying the whole table."""
+        brain_id = self._get_brain_id()
+        dormant = [s for s in self._states[brain_id].values() if s.access_frequency == 0]
+        if len(dormant) <= limit:
+            return dormant
+        return random.sample(dormant, limit)
 
     async def suggest_neurons(
         self,
@@ -1140,5 +1153,7 @@ class InMemoryStorage(
         self._co_activations[brain_id].clear()
         self._action_events[brain_id].clear()
         self._review_schedules.pop(brain_id, None)
+        self._tag_cooccurrence.pop(brain_id, None)
+        self._drift_clusters.pop(brain_id, None)
         self._brains.pop(brain_id, None)
         # Note: versions are NOT cleared — they survive rollbacks (matches SQLite behavior)

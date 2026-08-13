@@ -847,6 +847,90 @@ class TestMCPToolCalls:
         assert result["dry_run"] is True
 
     @pytest.mark.asyncio
+    async def test_consolidate_exposes_raw_dedup_counters(self, server: MCPServer) -> None:
+        """The dedup counters must be machine-readable, not only inside the prose summary.
+
+        A client asking "did dedup do nothing because there was nothing to do, or
+        because every attempt failed?" should not have to parse ``summary``.
+        """
+        from surreal_memory.engine.consolidation import ConsolidationReport
+
+        report = ConsolidationReport(duplicates_found=3, new_alias_links=1, alias_links_existing=1)
+        report.extra["alias_checks_failed"] = 1
+        report.extra["dedup_anchors_truncated"] = True
+        # Belongs to another strategy: the MCP contract must not widen every
+        # time some unrelated pass grows an `extra` key.
+        report.extra["timed_out_strategies"] = ["prune"]
+
+        mock_storage = AsyncMock()
+        mock_storage._current_brain_id = "test-brain"
+        mock_storage.brain_id = "test-brain"
+        mock_storage.get_brain = AsyncMock(
+            return_value=MagicMock(id="test-brain", name="test", config=MagicMock())
+        )
+
+        mock_delta = MagicMock()
+        mock_delta.to_dict.return_value = {"before": {}, "after": {}, "delta": {}}
+        mock_delta.report = report
+
+        with (
+            patch.object(server, "get_storage", return_value=mock_storage),
+            patch(
+                "surreal_memory.engine.consolidation_delta.run_with_delta",
+                new_callable=AsyncMock,
+                return_value=mock_delta,
+            ),
+        ):
+            result = await server.call_tool("smem_consolidate", {"strategy": "dedup"})
+
+        assert result["report"] == {
+            "duplicates_found": 3,
+            "new_alias_links": 1,
+            "alias_links_existing": 1,
+            "drift_clusters_found": 0,
+            "extra": {"alias_checks_failed": 1, "dedup_anchors_truncated": True},
+        }
+        assert "1 checks FAILED (state unknown)" in result["summary"]
+
+    @pytest.mark.asyncio
+    async def test_consolidate_exposes_drift_cluster_count(self, server: MCPServer) -> None:
+        """detect_drift's count must reach the caller in BOTH surfaces.
+
+        A bare 0 is ambiguous — "no drift exists" versus "detection never ran" —
+        which is the exact ambiguity this whole feature was rebuilt to remove.
+        Leaving the counter out of the machine-readable ``report`` (and out of
+        ``summary``) would have reinstated it one layer up from storage.
+        """
+        from surreal_memory.engine.consolidation import ConsolidationReport
+
+        report = ConsolidationReport(drift_clusters_found=2)
+
+        mock_storage = AsyncMock()
+        mock_storage._current_brain_id = "test-brain"
+        mock_storage.brain_id = "test-brain"
+        mock_storage.get_brain = AsyncMock(
+            return_value=MagicMock(id="test-brain", name="test", config=MagicMock())
+        )
+
+        mock_delta = MagicMock()
+        mock_delta.to_dict.return_value = {"before": {}, "after": {}, "delta": {}}
+        mock_delta.report = report
+
+        with (
+            patch.object(server, "get_storage", return_value=mock_storage),
+            patch(
+                "surreal_memory.engine.consolidation_delta.run_with_delta",
+                new_callable=AsyncMock,
+                return_value=mock_delta,
+            ),
+        ):
+            result = await server.call_tool("smem_consolidate", {"strategy": "detect_drift"})
+
+        assert result["report"]["drift_clusters_found"] == 2
+        assert "Drift clusters found: 2" in result["summary"]
+        assert "Why nothing changed" not in result["summary"]
+
+    @pytest.mark.asyncio
     async def test_consolidate_invalid_strategy(self, server: MCPServer) -> None:
         """Test smem_consolidate with invalid strategy returns error."""
         mock_storage = AsyncMock()
@@ -1149,6 +1233,113 @@ class TestMCPProtocol:
         mock_call.assert_called_once()
         call_args = mock_call.call_args[0]
         assert call_args[1] == {"content": "some plain text"}
+
+    @staticmethod
+    def _storage_capturing_tool_events() -> AsyncMock:
+        """Mock storage whose insert_tool_events calls can be inspected."""
+        storage = AsyncMock()
+        storage.get_brain = AsyncMock(return_value=MagicMock(id="brain-1"))
+        storage.insert_tool_events = AsyncMock()
+        return storage
+
+    @pytest.mark.asyncio
+    async def test_timeout_records_a_diagnosable_reason(self, server: MCPServer) -> None:
+        """The dominant failure mode for smem_remember_batch: a call that times
+        out has duration_ms land within milliseconds of the 30s timeout, not a
+        validation reject or an auth failure. Before this fix, task_context
+        stayed "" for that case — indistinguishable from those other causes."""
+        storage = self._storage_capturing_tool_events()
+
+        with (
+            patch.object(server, "get_storage", return_value=storage),
+            patch.object(server, "call_tool", new_callable=AsyncMock) as mock_call,
+        ):
+            mock_call.side_effect = TimeoutError()
+            message = {
+                "jsonrpc": "2.0",
+                "id": 10,
+                "method": "tools/call",
+                "params": {"name": "smem_remember_batch", "arguments": {"memories": []}},
+            }
+            response = await handle_message(server, message)
+
+        assert response["error"]["code"] == -32000
+        assert "timed out" in response["error"]["message"]
+        events = storage.insert_tool_events.call_args.args[1]
+        assert events[0]["success"] is False
+        assert "timed out" in events[0]["task_context"]
+
+    @pytest.mark.asyncio
+    async def test_storage_auth_error_records_its_own_safe_string(self, server: MCPServer) -> None:
+        from surreal_memory.storage.surrealdb.connection import StorageAuthError
+
+        storage = self._storage_capturing_tool_events()
+
+        with (
+            patch.object(server, "get_storage", return_value=storage),
+            patch.object(server, "call_tool", new_callable=AsyncMock) as mock_call,
+        ):
+            mock_call.side_effect = StorageAuthError("auth failed", hint="check SURREALDB_PASS")
+            message = {
+                "jsonrpc": "2.0",
+                "id": 11,
+                "method": "tools/call",
+                "params": {"name": "smem_recall", "arguments": {}},
+            }
+            response = await handle_message(server, message)
+
+        assert response["error"]["code"] == -32001
+        events = storage.insert_tool_events.call_args.args[1]
+        assert events[0]["task_context"] == response["error"]["message"]
+
+    @pytest.mark.asyncio
+    async def test_unexpected_exception_records_class_name_never_message(
+        self, server: MCPServer
+    ) -> None:
+        """A generic exception's message can carry argument/content data, so
+        only the class name — never str(exc) — is safe to persist here."""
+        storage = self._storage_capturing_tool_events()
+
+        with (
+            patch.object(server, "get_storage", return_value=storage),
+            patch.object(server, "call_tool", new_callable=AsyncMock) as mock_call,
+        ):
+            mock_call.side_effect = ValueError("token=super-secret-value")
+            message = {
+                "jsonrpc": "2.0",
+                "id": 12,
+                "method": "tools/call",
+                "params": {"name": "smem_context", "arguments": {}},
+            }
+            await handle_message(server, message)
+
+        events = storage.insert_tool_events.call_args.args[1]
+        assert events[0]["task_context"] == "ValueError"
+        assert "super-secret-value" not in events[0]["task_context"]
+
+    @pytest.mark.asyncio
+    async def test_tool_reported_error_is_recorded_as_the_reason(self, server: MCPServer) -> None:
+        """The happy-path branch: a tool that completes but reports its own
+        error (e.g. remember_batch's new "All N item(s) failed") should have
+        that string land in task_context, not an empty field."""
+        storage = self._storage_capturing_tool_events()
+
+        with (
+            patch.object(server, "get_storage", return_value=storage),
+            patch.object(server, "call_tool", new_callable=AsyncMock) as mock_call,
+        ):
+            mock_call.return_value = {"error": "All 3 item(s) failed"}
+            message = {
+                "jsonrpc": "2.0",
+                "id": 13,
+                "method": "tools/call",
+                "params": {"name": "smem_remember_batch", "arguments": {"memories": []}},
+            }
+            await handle_message(server, message)
+
+        events = storage.insert_tool_events.call_args.args[1]
+        assert events[0]["success"] is False
+        assert events[0]["task_context"] == "All 3 item(s) failed"
 
     @pytest.mark.asyncio
     async def test_notifications_initialized(self, server: MCPServer) -> None:

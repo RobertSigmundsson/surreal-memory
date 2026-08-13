@@ -5,6 +5,68 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.4.0] — 2026-08-13 — dedup honesty, native drift detection, and a 3D graph
+
+### Added
+
+- **Native SurrealDB drift detection.** Tag-cooccurrence + Jaccard-similarity clustering —
+  removed from the codebase along with the SQLite backend, leaving `smem_uncertainty` and the
+  dashboard's Drift card silently reporting "0 clusters" indistinguishably from a real analysis
+  that found nothing — is back as a first-class SurrealDB feature. New `detect_drift`
+  consolidation strategy; the Drift card no longer claims the feature is "SQLite-only".
+- **3D force graph.** The Graph page moved from a flat 2D sigma.js layout to a 3D force-directed
+  graph (particle flow along links, click-to-focus on a neuron's neighbourhood with camera
+  fly-to). The node-count slider is bounded by what the API can actually return and its
+  annotation names the real brain total, not a sampled count.
+
+### Fixed
+
+- **Dedup consolidation reported "0 new alias links" identically for "already fully linked"
+  and "every attempt failed".** The report now distinguishes the two, with machine-readable
+  counters alongside the prose summary.
+- **Cloud Sync's Devices card always showed zero devices**, and the local machine never
+  self-registered — both were a silent `AttributeError` on fields `DeviceInfo` didn't carry,
+  swallowed by a bare `except`.
+- **`remember_batch` under-reported success**: a batch where every item failed validation was
+  still counted as a success at the top level, because failure was only detected via an
+  `"error"` key the handler never set. Also fixed: `trust_score`/`source_id`/`context` were
+  silently dropped from the persisted item; a non-string `content` field crashed the whole
+  batch instead of failing just that item.
+- **`auto_capture` only recognized English causal phrasing** and truncated captured text
+  mid-sentence rather than at the last sentence boundary.
+- **`semantic_discovery` always attacked the same ~26% of a large brain.** Candidate selection
+  read the first N neurons off a pagination order that never changes between runs; it now
+  prioritizes the least-connected neurons first, so repeated consolidation passes actually
+  reach the rest of the graph.
+- **A dashboard read of a non-default brain (`GET /brains`, `GET /stats`) could permanently
+  repoint the shared storage connection to that brain**, so a concurrent MCP call or background
+  job racing with the dashboard could silently read or write the wrong brain's data. Reading a
+  specific brain's diagnostics now goes through an isolated, scoped connection instead of
+  mutating shared state.
+- **Deleting a typed memory could silently no-op** when given the folded record-id form that
+  `find_fibers` returns, rather than the dashed field form — the delete matched nothing and
+  reported success anyway. Both id forms are now recognized.
+- **Consolidation's dormant-neuron replay scanned every neuron in the brain** to build a small,
+  bounded sample; the sample is now taken directly from storage instead of loading the full set
+  into Python first.
+- **Keyword document-frequency counts could silently stop updating.** A formatting bug in a
+  batched write statement made every count update a no-op instead of an increment; a second,
+  related issue could make the write collide with a legacy record id left over from an old
+  brain rename. Both are fixed — the write now matches by keyword content instead of by a
+  computed id, so it can no longer collide with a stale id shape.
+- **`remember`'s content-length limit could be bypassed** by supplying enough extra context that
+  the combined, merged text exceeded the configured maximum — the length check ran before the
+  context merge, not after.
+- Dev tooling: **the project's Python interpreter version was unpinned**, so `mypy` parsed
+  third-party type stubs (e.g. a newer numpy's) against whatever Python version `uv` happened to
+  resolve on a given machine, rather than the version this project targets. A `.python-version`
+  file now pins it.
+
+### Changed
+
+- CI/release: the dashboard's unit-test suite now runs before the dashboard build, in both the
+  CI and release pipelines — previously nothing ran it.
+
 ## [3.3.2] — 2026-08-06 — `smem info` and the dashboard stop reporting five fields as always-empty on SurrealDB
 
 ### Fixed
