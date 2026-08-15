@@ -5,17 +5,83 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [3.5.1] — 2026-08-15 — `smem consolidate` stops exhausting the socket table
 
-### Fixed — `initialize()` survives a transient reset during signin
+A full consolidation pass could spend minutes stalled and then flood the terminal with
+`[Errno 104] Connection reset by peer`, ending in a report of zeros that looked exactly
+like "there was nothing to do". Several independent defects fed that one symptom; they
+are fixed here.
 
-- **Signin/`use` now retry with backoff on connection-class errors** (3 attempts,
-  0/1/3 s), mirroring the retry `_query` already had for dropped transports (S-01).
-  The Integration CI job showed a single SurrealDB hiccup mid-run aborting whichever
-  live-gated test happened to be signing in at that moment — `Errno 104` at signin,
-  a different test set each run, and the job red on `main` for it. Credential errors
-  still fail fast on the first attempt; non-connection errors still propagate
+### Fixed
+- **`smem consolidate` "Connection reset by peer" loop (port exhaustion).** The
+  surrealdb SDK's HTTP transport opens a brand-new TCP connection for every RPC
+  (`async with aiohttp.ClientSession()` per `_send`). Consolidation strategies
+  that issue tens of thousands of small queries (`compress`, `semantic_link`)
+  exhausted the ephemeral port range within minutes — measured 39,720 sockets in
+  TIME_WAIT against the DB port — after which the kernel RST'd every new
+  connection, including the SDK's own reconnect/signin, and the client spun in
+  `[Errno 104] Connection reset by peer` forever. The store now rewrites
+  `http(s)://` URLs to `ws(s)://` so the SDK multiplexes all RPCs over one
+  persistent WebSocket connection. Measured on the same workload, the WebSocket
+  transport opens **zero** additional sockets where the HTTP transport opened two
+  per query, and the consolidation pass that previously never completed now
+  finishes. An explicit `ws://`/`wss://`/embedded URL always passes through
   unchanged.
+- **One dropped connection no longer costs one reconnect per concurrent caller.**
+  The re-auth lock serialised the callers but did not deduplicate them, so every
+  query in a batch fan-out that failed on the same dead connection built its own
+  replacement, retried three times and logged its own warning. Reconnects are now
+  single-flight behind a generation counter: the first caller repairs the
+  connection, the rest re-run their query on it. Only the path that actually
+  reconnected warns. The replaced connection is closed (it used to leak a socket,
+  and on the WebSocket transport an orphaned receive task), and the backoff grid
+  carries a small jitter.
+- **A reconnect no longer cancels its siblings' in-flight queries.** Closing a
+  WebSocket connection cancels every RPC future still pending on it, not just the
+  one that triggered the close — and `asyncio.CancelledError` is a
+  `BaseException`, so it bypassed the retry path and tore down whole batches. A
+  cancellation the task did not request is now treated as a dropped transport and
+  retried; a real cancellation still propagates.
+- **A storage instance reused from a second event loop repairs itself.** The SDK
+  creates its response futures on the loop that opened the socket, so a cached
+  storage singleton driven by a later `asyncio.run()` failed every query with
+  `RuntimeError: … Future … attached to a different loop` — neither an auth nor a
+  transport error, so nothing retried it and the connection stayed broken for the
+  life of the process. The connection's loop is now checked and the connection
+  rebuilt when it differs.
+- **Consolidation stops fetching embedding vectors it never reads.** `find_neurons`
+  includes them by default, so `dream` pulled 10 000 of them in a single response
+  and the two `interference` scans carried one per row across the whole brain.
+- **`semantic_link` no longer scans the whole neuron table, nor holds the event
+  loop.** It pages per neuron type so the filter runs in the database index, with a
+  smaller page because those rows must carry their vector; and the similarity pass
+  now yields periodically. Holding the loop for minutes was long enough to miss the
+  WebSocket keepalive, after which the peer drops the connection.
+- **The numpy-less similarity fallback is bounded, yields, and says so.** The
+  semantic-link strategy runs by default, but numpy — which makes it vectorised —
+  is optional (`embeddings-openai`). Without it the pass fell into a pure-python
+  O(n²·d) double loop that cannot finish at the shipped caps and that the
+  per-strategy timeout cannot interrupt, because the loop never awaits: the pass
+  hung instead of completing. It now processes a bounded slice, hands the event
+  loop back periodically, and logs a warning naming numpy when it truncates.
+  numpy stays optional deliberately: numpy >= 2.5 ships stubs written in 3.12
+  syntax that mypy at this project's `python_version` (3.11) cannot parse, so
+  making it mandatory would break `mypy src/` for every consumer.
+- **The consolidation report says what failed.** A strategy raising anything other
+  than a timeout used to abort the whole pass. Failures are now recorded per
+  strategy, the remaining strategies still run, and both failures and timeouts are
+  named in the summary — the latter were already recorded but never printed. A
+  clean run prints neither. `smem consolidate` exits non-zero when a stage
+  failed, so automation that gates on the exit code still sees the failure now
+  that the command no longer crashes on it.
+- **`initialize()` survives a transient reset during signin.** Signin and `use` now
+  retry with backoff on connection-class errors (3 attempts, 0/1/3 s), mirroring the
+  retry `_query` already had for dropped transports (S-01). The Integration CI job
+  showed a single SurrealDB hiccup mid-run aborting whichever live-gated test
+  happened to be signing in at that moment — `Errno 104` at signin, a different test
+  set each run. Credential errors still fail fast on the first attempt;
+  non-connection errors still propagate unchanged. Both paths share one backoff
+  constant so they cannot drift apart.
 - **The retry now covers the whole connect-and-prepare window, not just signin.** The
   flake simply moved: with signin protected, the next Integration failure landed at
   `INFO FOR DB` inside `apply_migrations` — a handshake query on the raw connection,

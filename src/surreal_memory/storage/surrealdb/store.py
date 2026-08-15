@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 import logging
+import random
 import re
 from collections.abc import Iterator
 from datetime import datetime
@@ -152,6 +153,32 @@ _BRAIN_ID_SAFE = re.compile(r"^[a-zA-Z0-9_.\-]+$")
 # sockets).
 _BATCH_FETCH_CONCURRENCY = 16
 
+
+def _prefer_ws_transport(url: str) -> str:
+    """Rewrite http(s):// URLs to ws(s):// for the SDK connection.
+
+    The surrealdb SDK's HTTP transport opens a brand-new aiohttp.ClientSession
+    (a brand-new TCP connection) for every single RPC call -- there is no
+    connection pool and no keep-alive reuse. Workloads that issue many small
+    queries (consolidation's compress/semantic_link run per-id batch selects
+    and per-row writes across tens of thousands of records) exhaust the
+    ephemeral port range within minutes: measured 39,720 sockets stuck in
+    TIME_WAIT against :8001, after which the kernel RSTs every new connection
+    -- including the SDK's own reconnect/signin -- and the client spins in
+    "Connection reset by peer" forever (the long-standing `smem consolidate`
+    failure). The WebSocket transport multiplexes all RPCs over one
+    persistent connection and eliminates the port churn entirely.
+
+    Callers that already pass ws:// or wss:// (or a non-http scheme) are
+    returned unchanged, so an explicit override always wins.
+    """
+    if url.startswith("http://"):
+        return "ws://" + url[len("http://") :]
+    if url.startswith("https://"):
+        return "wss://" + url[len("https://") :]
+    return url
+
+
 # Rows per multi-statement write round-trip (update_synapses_batch /
 # update_neuron_states_batch). Matches the ~500 already proven by
 # update_neuron_embeddings: big enough that the per-round-trip cost (~2ms of
@@ -159,6 +186,17 @@ _BATCH_FETCH_CONCURRENCY = 16
 # neither blow the server's request-body limit nor lose more than 500 rows if
 # the statement batch fails.
 _BATCH_WRITE_CHUNK = 500
+
+# Backoff grid for the reconnect retry in _query. A dropped transport usually
+# needs a moment before it accepts a new connection, so the first retry is
+# immediate and the next two wait.
+_RECONNECT_BACKOFF = (0.0, 1.0, 3.0)
+
+# Random slack added to each non-zero backoff step. With a fan-out of
+# _BATCH_FETCH_CONCURRENCY callers the generation counter already collapses the
+# storm to one reconnect; the jitter keeps the losers from re-converging on the
+# same instant if a second drop happens while they are retrying.
+_RECONNECT_JITTER_SECONDS = 0.5
 
 _T = TypeVar("_T")
 
@@ -523,7 +561,7 @@ class SurrealDBStorage(
         from surreal_memory.storage.surrealdb.connection import SurrealSettings
 
         settings = SurrealSettings.from_env()
-        self._url = url or settings.url
+        self._url = _prefer_ws_transport(url or settings.url)
         self._namespace = namespace or settings.namespace
         self._database = database or settings.database
         self._user = user or settings.user
@@ -539,6 +577,22 @@ class SurrealDBStorage(
         # Serializes token re-auth so concurrent queries that all hit an
         # expired-token 401 trigger a single reconnect, not a storm.
         self._reauth_lock = asyncio.Lock()
+        # asyncio.Lock binds itself to the loop it is first awaited on, so a
+        # storage singleton reused from a second asyncio.run() would raise
+        # "bound to a different event loop" before it ever got to reconnect.
+        # Track the owner and mint a fresh lock when the loop changes.
+        self._reauth_lock_loop: asyncio.AbstractEventLoop | None = None
+        # Bumped by every successful _reconnect(). A caller whose query failed at
+        # generation N and finds the counter already past N knows a peer already
+        # rebuilt the connection while it waited on the lock, so it re-runs the
+        # query instead of building a second connection. This is what turns 16
+        # simultaneous failures into ONE reconnect instead of sixteen.
+        self._conn_generation: int = 0
+        # The event loop the live connection belongs to. The SDK creates its
+        # response futures on the loop that opened the socket; awaiting them
+        # from a different loop raises "attached to a different loop" and the
+        # cached connection is unusable until the process restarts.
+        self._conn_loop: asyncio.AbstractEventLoop | None = None
         # ISO GQL (SurrealDB 3.2+) capability, detected once at initialize().
         # get_path uses a GQL SHORTEST-path fast-path when available and falls
         # back to BFS otherwise. See _get_path_gql for the 3.2.0 scoping caveat.
@@ -569,14 +623,20 @@ class SurrealDBStorage(
         # migrations), so the whole attempt can simply re-run on a fresh
         # connection. Credential errors still fail fast: they never fix
         # themselves, and neither do version-gate rejections.
-        delays = (0.0, 1.0, 3.0)
-        for attempt, delay in enumerate(delays, start=1):
+        # Same backoff grid as the reconnect path in _query, from one constant so
+        # the two cannot drift apart.
+        for attempt, delay in enumerate(_RECONNECT_BACKOFF, start=1):
             if delay:
                 await asyncio.sleep(delay)
             try:
                 self._conn = AsyncSurreal(self._url)
                 await self._conn.signin({"username": self._user, "password": self._password})
                 await self._conn.use(self._namespace, self._database)
+                # Remember which loop owns this connection before anything runs
+                # on it: the SDK creates its response futures here, and awaiting
+                # them from another loop is an error _query has to detect and
+                # repair.
+                self._conn_loop = asyncio.get_running_loop()
                 await self._prepare_database()
                 break
             except Exception as exc:
@@ -585,12 +645,12 @@ class SurrealDBStorage(
                         f"SurrealDB authentication failed for user '{self._user}' at {self._url}.",
                         hint=AUTH_HINT,
                     ) from exc
-                if not _is_connection_error(exc) or attempt == len(delays):
+                if not _is_connection_error(exc) or attempt == len(_RECONNECT_BACKOFF):
                     raise
                 logger.warning(
                     "SurrealDB connect attempt %d/%d failed: %s",
                     attempt,
-                    len(delays),
+                    len(_RECONNECT_BACKOFF),
                     exc,
                 )
 
@@ -675,6 +735,7 @@ class SurrealDBStorage(
             )
         finally:
             self._conn = None
+            self._conn_loop = None
 
     @property
     def brain_id(self) -> str | None:
@@ -709,25 +770,114 @@ class SurrealDBStorage(
     # Query helper
     # ================================================================
 
+    def _lock_for_current_loop(self) -> asyncio.Lock:
+        """Return the re-auth lock, re-minted if the event loop changed.
+
+        ``asyncio.Lock`` binds to the loop it is first awaited on. A storage
+        singleton reused from a second ``asyncio.run()`` would therefore raise
+        "bound to a different event loop" the moment it tried to reconnect —
+        before it could repair anything.
+
+        The swap below contains no ``await``, so coroutines sharing one OS
+        thread cannot interleave inside it and end up with competing locks.
+        That is the supported shape: one storage instance driven by one thread
+        at a time, sequentially across loops. Driving the same instance from two
+        threads concurrently is NOT supported — the GIL can preempt between the
+        read and the write and reintroduce exactly the divergence this guards
+        against.
+        """
+        running = asyncio.get_running_loop()
+        if self._reauth_lock_loop is not running:
+            self._reauth_lock = asyncio.Lock()
+            self._reauth_lock_loop = running
+        return self._reauth_lock
+
+    async def _ensure_conn_on_current_loop(self) -> None:
+        """Rebuild the connection if it belongs to a different event loop.
+
+        The SDK creates its response futures on the loop that opened the socket.
+        Awaiting one of those futures from another loop raises
+        ``RuntimeError: … got Future … attached to a different loop`` — which is
+        neither an auth error nor a transport error, so the retry path never saw
+        it and every query failed until the process restarted. Detect the
+        mismatch up front and rebuild instead.
+
+        The old connection is NOT closed: ``close()`` would await on the foreign
+        loop's objects. Only the reference is dropped.
+        """
+        if self._conn is None or self._conn_loop is None:
+            return
+        if self._conn_loop is asyncio.get_running_loop():
+            return
+        generation = self._conn_generation
+        async with self._lock_for_current_loop():
+            if self._conn_generation == generation:
+                logger.debug("SurrealDB connection belongs to a different event loop; rebuilding")
+                await self._reconnect(close_previous=False)
+
+    async def _run_query(self, sql: str, params: dict[str, Any]) -> Any:
+        """One query attempt, with a peer-induced cancellation made retryable.
+
+        Closing a WebSocket connection cancels the SDK's receive task, and its
+        cleanup cancels EVERY future still pending on that connection — not just
+        the one belonging to whoever triggered the close. Those futures belong to
+        other coroutines multiplexed over the same shared connection, so one
+        caller's reconnect lands an `asyncio.CancelledError` in unrelated,
+        otherwise-healthy siblings. `CancelledError` is a `BaseException`, so it
+        slips past every `except Exception` on the way out — including the guard
+        in `get_neurons_batch`'s per-id fetch — and `asyncio.gather` without
+        `return_exceptions=True` then tears down the whole batch.
+
+        A cancellation this task did not ask for is really "the connection went
+        away underneath me", which is precisely what the retry path exists to
+        absorb. Translate it. A cancellation the task DID ask for (`task.cancel()`,
+        `asyncio.wait_for` expiring) still propagates untouched.
+        """
+        try:
+            return await self._ensure_conn().query(sql, params)
+        except asyncio.CancelledError:
+            task = asyncio.current_task()
+            if task is None or task.cancelling() > 0:
+                raise
+            raise ConnectionResetError(
+                104, "SurrealDB connection was closed while the query was in flight"
+            ) from None
+
     async def _query_response(self, sql: str, **params: Any) -> Any:
         """Execute a SurrealQL query and return the SDK's result for the first
         statement, as-is.
 
-        Retries once after re-authenticating if the cached connection's token
-        has expired. SurrealDB issues root tokens with a ~1h TTL and the SDK's
-        HTTP connection never refreshes them, so a long-lived server connection
-        starts returning 401 after an hour — which silently broke the dashboard
-        until the container was restarted. Reconnecting on 401 keeps the cached
-        connection alive without a restart.
+        Retries after re-authenticating if the cached connection's token has
+        expired. SurrealDB issues root tokens with a ~1h TTL and the SDK's HTTP
+        connection never refreshes them, so a long-lived server connection starts
+        returning 401 after an hour — which silently broke the dashboard until the
+        container was restarted. Reconnecting on 401 keeps the cached connection
+        alive without a restart.
 
         Also reconnects on a dropped transport (WebSocket closed by a DB restart):
         that surfaces as a connection error, not a 401, so without this the dead
         cached connection fails every query until the process restarts (S-01).
+
+        The reconnect is single-flight. ``_reauth_lock`` alone only serialised the
+        callers — each one still built its own connection, so a fan-out of
+        ``_BATCH_FETCH_CONCURRENCY`` queries hitting one dead transport produced
+        up to that many reconnects per attempt and filled the terminal with
+        identical warnings. A caller now records the connection generation it
+        failed on and, once inside the lock, reconnects only if nobody has already
+        moved the counter past it; the rest simply re-run the query on the
+        connection their peer just built.
         """
         from surreal_memory.storage.surrealdb.connection import StorageAuthError
 
+        generation = self._conn_generation
+
         try:
-            result = await self._ensure_conn().query(sql, params)
+            # Inside the try on purpose: rebuilding for a loop change can hit the
+            # very same transient reset as any other connect, and it deserves the
+            # same three attempts with backoff as the rest of this method rather
+            # than failing the caller on the first blip.
+            await self._ensure_conn_on_current_loop()
+            result = await self._run_query(sql, params)
         except Exception as exc:
             if not (_is_auth_error(exc) or _is_connection_error(exc)):
                 raise
@@ -738,22 +888,41 @@ class SurrealDBStorage(
             # single transient blip. Retry the reconnect with a short backoff.
             last_exc: Exception = exc
             result = None
-            for attempt, delay in enumerate((0.0, 1.0, 3.0), start=1):
+            attempts = len(_RECONNECT_BACKOFF)
+            for attempt, delay in enumerate(_RECONNECT_BACKOFF, start=1):
                 if delay:
-                    await asyncio.sleep(delay)
+                    jitter = random.uniform(0.0, _RECONNECT_JITTER_SECONDS)
+                    await asyncio.sleep(delay + jitter)
+                reconnected_here = False
                 try:
-                    async with self._reauth_lock:
-                        await self._reconnect()
-                    result = await self._ensure_conn().query(sql, params)
+                    async with self._lock_for_current_loop():
+                        if self._conn_generation == generation:
+                            await self._reconnect()
+                            reconnected_here = True
+                        generation = self._conn_generation
+                    result = await self._run_query(sql, params)
                     break
                 except StorageAuthError:
                     # Bad credentials never fix themselves — fail fast.
                     raise
                 except Exception as retry_exc:  # re-raised below
                     last_exc = retry_exc
-                    logger.warning(
-                        "SurrealDB reconnect attempt %d/3 failed: %s", attempt, retry_exc
-                    )
+                    if reconnected_here:
+                        logger.warning(
+                            "SurrealDB reconnect attempt %d/%d failed: %s",
+                            attempt,
+                            attempts,
+                            retry_exc,
+                        )
+                    else:
+                        # One warning per genuine reconnect is the signal; a copy
+                        # of it from every waiter is the flood this replaces.
+                        logger.debug(
+                            "SurrealDB retry %d/%d failed on a peer-rebuilt connection: %s",
+                            attempt,
+                            attempts,
+                            retry_exc,
+                        )
             else:
                 raise last_exc
         return result
@@ -789,12 +958,23 @@ class SurrealDBStorage(
         result = await self._query_response(sql, **params)
         return result if isinstance(result, list) else []
 
-    async def _reconnect(self) -> None:
-        """Re-establish the SurrealDB connection after a token expiry / 401.
+    async def _reconnect(self, *, close_previous: bool = True) -> None:
+        """Re-establish the SurrealDB connection after a token expiry / drop.
 
         Re-signin + re-select the namespace/database on a fresh connection so
         the cached singleton keeps working. Schema is already applied, so it is
         not re-run here.
+
+        The connection this replaces is closed and the generation counter is
+        bumped. Leaving the old one open leaked a socket (and, on the WebSocket
+        transport, an orphaned receive task) per reconnect, and under a fan-out
+        failure that is one leak per concurrent caller per attempt.
+
+        Args:
+            close_previous: Close the connection being replaced. Pass False when
+                the previous connection belongs to a different event loop —
+                awaiting its ``close()`` from here would touch that loop's
+                objects; dropping the reference is all that is safe.
         """
         from surrealdb import AsyncSurreal
 
@@ -804,6 +984,8 @@ class SurrealDBStorage(
             is_credential_error,
         )
 
+        previous = self._conn
+        previous_loop = self._conn_loop
         conn = AsyncSurreal(self._url)
         try:
             await conn.signin({"username": self._user, "password": self._password})
@@ -816,7 +998,32 @@ class SurrealDBStorage(
             raise
         await conn.use(self._namespace, self._database)
         self._conn = conn
-        logger.info("SurrealDB reconnected after token expiry: %s", self._url)
+        self._conn_loop = asyncio.get_running_loop()
+        self._conn_generation += 1
+
+        # Never close a connection owned by another loop, whatever the caller
+        # asked for: its close() awaits that loop's objects. Dropping the
+        # reference is the only safe move, and the caller cannot always know
+        # which case it is in.
+        may_close = (
+            close_previous
+            and previous is not None
+            and previous is not conn
+            and previous_loop is asyncio.get_running_loop()
+        )
+        if may_close:
+            # Same tolerance as close(): the HTTP transport has no socket to tear
+            # down and raises. A failure to close must never mask the successful
+            # reconnect the caller is waiting for.
+            try:
+                await previous.close()
+            except Exception:
+                logger.debug(
+                    "Could not close the replaced SurrealDB connection; dropping it",
+                    exc_info=True,
+                )
+
+        logger.info("SurrealDB reconnected: %s", self._url)
 
     # ================================================================
     # Neuron Operations
