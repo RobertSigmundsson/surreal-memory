@@ -165,6 +165,7 @@ LLM-powered deduplication settings.
 | `llm_max_pairs_per_encode` | `int` | `3` |  |
 | `merge_strategy` | `str` | `keep_newer` |  |
 | `max_candidates` | `int` | `30` | wider search (was 10) |
+| `consolidation_max_anchors` | `int` | `2000` |  |
 
 ## `[tool_tier]`
 
