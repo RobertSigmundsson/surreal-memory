@@ -358,7 +358,7 @@ class TestEditRefreshesDerivedFields:
                 "surreal_memory.engine.semantic_discovery._create_provider",
                 side_effect=RuntimeError("no provider"),
             ),
-            caplog.at_level(logging.WARNING, logger="surreal_memory.mcp.lifecycle_handler"),
+            caplog.at_level(logging.WARNING, logger="surreal_memory.utils.content_refresh"),
         ):
             result = await server.call_tool(
                 "smem_edit", {"memory_id": neuron.id, "content": "new content"}

@@ -386,6 +386,14 @@ async def discover_semantic_synapses(
             for n in batch:
                 if not n.content.strip():
                     continue
+                # GRAPH_ONLY tombstones all share the literal placeholder as
+                # content, so their stored vectors are identical brain-wide —
+                # cosine 1.0 between memories that have nothing in common.
+                # Linking them would persist a false SIMILAR_TO edge on every
+                # consolidation pass; the dedup census skips these anchors for
+                # the same reason (their content_hash carries the 0 sentinel).
+                if n.content == "[graph-only]":
+                    continue
                 emb = n.metadata.get("_embedding")
                 if emb:
                     type_neurons.append(n)

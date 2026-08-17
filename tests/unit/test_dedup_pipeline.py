@@ -58,6 +58,39 @@ class TestTier1SimHash:
         assert result.similarity_score > 0.8
 
     @pytest.mark.asyncio
+    async def test_legacy_tombstone_never_canonicalises_a_new_save(self) -> None:
+        """A new memory must not be deduplicated onto a GRAPH_ONLY tombstone.
+
+        A tombstone written before the hash sentinel existed carries the
+        SimHash of its DELETED original text. A new save whose content
+        near-duplicates that deleted text lands within threshold — and the
+        pipeline would make the tombstone the canonical anchor, so the new
+        fiber anchors to "[graph-only]" and the new text survives only as an
+        alias neuron. Candidate search genuinely reaches tombstones (the FTS
+        analyzer tokenises the placeholder into "graph"/"only"), so the
+        candidate filter itself must refuse them, ahead of every tier.
+        """
+        deleted_text = "Only use the staging cluster for load tests"
+        legacy = Neuron(
+            id="tombstone-1",
+            type=NeuronType.CONCEPT,
+            content="[graph-only]",
+            metadata={"is_anchor": True},
+            content_hash=simhash(deleted_text),
+        )
+        cfg = DedupConfig(enabled=True, simhash_threshold=10)
+        storage = _make_storage([legacy])
+
+        pipeline = DedupPipeline(config=cfg, storage=storage)
+        result = await pipeline.check_duplicate("Only use the staging cluster for load testing")
+
+        assert result.is_duplicate is False, (
+            "the tombstone's fingerprint describes deleted text — treating the new "
+            "memory as its duplicate buries the new content under a placeholder anchor"
+        )
+        assert result.existing_neuron_id != "tombstone-1"
+
+    @pytest.mark.asyncio
     async def test_near_duplicate_detected(self) -> None:
         original = "We decided to use PostgreSQL for the database"
         similar = "We decided to use PostgreSQL for the databases"

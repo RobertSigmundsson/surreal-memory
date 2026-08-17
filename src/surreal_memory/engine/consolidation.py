@@ -2431,11 +2431,21 @@ class ConsolidationEngine:
                 await asyncio.sleep(0)
             if anchor_a.content_hash is None or anchor_a.content_hash == 0:
                 continue
+            # GRAPH_ONLY tombstones written before the hash sentinel existed
+            # still carry the SimHash of their deleted original text — a
+            # fingerprint of content that is no longer there, which can
+            # near-duplicate-match a genuine memory and persist a false ALIAS
+            # edge. Guard on content like every other fingerprint consumer;
+            # tombstones stamped with the sentinel are already skipped above.
+            if anchor_a.content == "[graph-only]":
+                continue
 
             for anchor_b in anchors[i + 1 :]:
                 if anchor_b.id in seen:
                     continue
                 if anchor_b.content_hash is None or anchor_b.content_hash == 0:
+                    continue
+                if anchor_b.content == "[graph-only]":
                     continue
 
                 if is_near_duplicate(

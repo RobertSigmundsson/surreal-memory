@@ -81,6 +81,37 @@ class TestComputeSurpriseBonus:
         assert result == 1.0
 
     @pytest.mark.asyncio
+    async def test_legacy_tombstone_does_not_deflate_novelty(
+        self, mock_storage: AsyncMock, mock_config: MagicMock
+    ) -> None:
+        """A tombstone must not make a new memory look familiar.
+
+        A GRAPH_ONLY tombstone written before the hash sentinel carries the
+        SimHash of its DELETED text. A new memory resembling that deleted text
+        would score hamming ~0 against it and be stored with zero surprise —
+        low arousal for content the brain no longer actually holds.
+        """
+        content = "PostgreSQL is fast for OLTP workloads"
+        tombstone = MagicMock()
+        tombstone.id = "tombstone-1"
+        tombstone.content = "[graph-only]"
+        tombstone.content_hash = simhash(content)  # stale hash of the deleted text
+
+        mock_storage.find_neurons = AsyncMock(return_value=[tombstone])
+
+        result = await compute_surprise_bonus(
+            content=content,
+            tags={"postgres"},
+            content_hash=simhash(content),
+            storage=mock_storage,
+            config=mock_config,
+        )
+        assert result >= 2.0, (
+            "with only a tombstone as 'evidence' the content is effectively novel — "
+            "a fingerprint of deleted text must not count as familiarity"
+        )
+
+    @pytest.mark.asyncio
     async def test_redundant_content(self, mock_storage: AsyncMock, mock_config: MagicMock) -> None:
         """Near-duplicate content → surprise ~0."""
         content = "PostgreSQL is fast for OLTP workloads"

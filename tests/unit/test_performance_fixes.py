@@ -185,6 +185,51 @@ class TestEmbeddingFallback:
         result = await pipeline._find_embedding_anchors("test query")
         assert result == []
 
+    @pytest.mark.asyncio
+    async def test_graph_only_tombstones_never_enter_the_anchor_set(
+        self, mock_storage, mock_config
+    ):
+        """Tombstones share one placeholder vector, so for any query near that
+        region they tie with each other and would crowd genuine memories out of
+        the top-k anchor slots. They must be excluded before scoring."""
+        mock_provider = AsyncMock()
+        mock_provider.embed = AsyncMock(return_value=[0.5, 0.5, 0.0])
+        # Every candidate scores above threshold — ordering alone decides.
+        mock_provider.similarity = AsyncMock(return_value=0.9)
+
+        tombstones = [
+            Neuron.create(
+                type=NeuronType.CONCEPT,
+                content="[graph-only]",
+                neuron_id=f"tomb-{i}",
+                metadata={"_embedding": [0.5, 0.5, 0.0]},
+            )
+            for i in range(12)
+        ]
+        genuine = Neuron.create(
+            type=NeuronType.CONCEPT,
+            content="the genuine memory about the same topic",
+            neuron_id="genuine-1",
+            metadata={"_embedding": [0.5, 0.49, 0.01]},
+        )
+        mock_storage.find_neurons = AsyncMock(return_value=[*tombstones, genuine])
+
+        pipeline = ReflexPipeline(
+            storage=mock_storage,
+            config=mock_config,
+            embedding_provider=mock_provider,
+        )
+
+        anchors = await pipeline._find_embedding_anchors("that topic", top_k=10)
+
+        assert "genuine-1" in anchors, (
+            "the genuine memory must not be displaced from the anchor set"
+        )
+        assert not any(a.startswith("tomb-") for a in anchors), (
+            "a tombstone's vector describes a placeholder, not a memory — it must "
+            "never occupy an anchor slot"
+        )
+
 
 # -- Retrieval: Query Expansion ----------------------------------------------
 

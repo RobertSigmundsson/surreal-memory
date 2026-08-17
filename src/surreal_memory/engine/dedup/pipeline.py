@@ -128,11 +128,19 @@ class DedupPipeline:
             limit=max_candidates,
         )
 
-        # Filter to anchor neurons only
+        # Filter to anchor neurons only. GRAPH_ONLY tombstones are excluded
+        # here, ahead of every tier: legacy ones still carry the SimHash of
+        # their DELETED text, so tier 1 could canonicalise a brand-new memory
+        # onto a tombstone — the new fiber would anchor to "[graph-only]" and
+        # its text survive only as an alias neuron. (The FTS analyzer happily
+        # tokenises the placeholder into "graph"/"only", so tombstones do turn
+        # up in this candidate search.) Same guard the census uses.
         return [
             n
             for n in candidates
-            if n.metadata.get("is_anchor", False) and n.type == NeuronType.CONCEPT
+            if n.metadata.get("is_anchor", False)
+            and n.type == NeuronType.CONCEPT
+            and n.content != "[graph-only]"
         ]
 
     def _tier1_simhash(

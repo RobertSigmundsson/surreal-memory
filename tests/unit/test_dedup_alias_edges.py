@@ -420,6 +420,51 @@ class FakeEncodeStorage(FakeStorage):
 
 class TestConsolidationDedupCallSite:
     @pytest.mark.asyncio
+    async def test_legacy_stale_hash_tombstone_is_never_aliased(self) -> None:
+        # A tombstone written before the sentinel existed carries the SimHash
+        # of its DELETED original text. A genuine memory whose content
+        # near-duplicates that deleted text would hash within threshold — and
+        # without a content guard the census would persist an ALIAS edge from a
+        # real memory to a tombstone, "deduplicating" it against content that
+        # no longer exists. Fibers already at GRAPH_ONLY never re-enter the
+        # compression path, so no stamping can repair these rows: the census
+        # itself must refuse to fingerprint a placeholder.
+        from surreal_memory.utils.simhash import simhash
+
+        deleted_text = "deployment notes for the old cluster"
+        legacy = _anchor("[graph-only]", content_hash=simhash(deleted_text))
+        genuine = _anchor(deleted_text, content_hash=simhash(deleted_text))
+        storage = FakeAnchorStorage([legacy, genuine])
+        engine = ConsolidationEngine(storage)
+
+        report = ConsolidationReport()
+        await engine._dedup(report, dry_run=False)
+
+        assert [s for s in storage.synapses if s.type is SynapseType.ALIAS] == [], (
+            "a genuine memory must never be aliased to a tombstone — the "
+            "tombstone's fingerprint describes text that was deleted"
+        )
+        assert report.duplicates_found == 0
+
+    @pytest.mark.asyncio
+    async def test_graph_only_tombstone_anchors_are_never_aliased(self) -> None:
+        # GRAPH_ONLY compression writes the placeholder with the no-fingerprint
+        # sentinel (content_hash = 0) precisely so this census cannot pair two
+        # unrelated tombstones — hamming(h, h) is 0 for any shared constant, so
+        # without the sentinel skip every tombstone pair would read as an exact
+        # duplicate and persist a false ALIAS edge. Pin that skip.
+        a = _anchor("[graph-only]", content_hash=0)
+        b = _anchor("[graph-only]", content_hash=0)
+        storage = FakeAnchorStorage([a, b])
+        engine = ConsolidationEngine(storage)
+
+        report = ConsolidationReport()
+        await engine._dedup(report, dry_run=False)
+
+        assert [s for s in storage.synapses if s.type is SynapseType.ALIAS] == []
+        assert report.duplicates_found == 0
+
+    @pytest.mark.asyncio
     async def test_repeated_runs_leave_one_row_per_pair(self) -> None:
         # The production shape exactly: consolidation re-derives the same
         # duplicate pair on every run. Three runs, one row.

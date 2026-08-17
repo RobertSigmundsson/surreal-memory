@@ -12,15 +12,19 @@ Covers:
 
 from __future__ import annotations
 
-from unittest.mock import AsyncMock, MagicMock
+from dataclasses import replace as dc_replace
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from surreal_memory.core.brain import Brain
 from surreal_memory.engine.encoder import (
     _extract_trigger_patterns,
     _inject_instruction_metadata,
 )
 from surreal_memory.mcp.server import MCPServer
+from surreal_memory.storage.memory_store import InMemoryStorage
+from surreal_memory.utils.simhash import simhash
 
 # ──────────────────── Shared helpers ────────────────────
 
@@ -845,3 +849,121 @@ class TestBackwardCompatibility:
 
         assert "error" not in result
         assert result["status"] == "refined"
+
+
+# ──────────────────── smem_refine: content-derived field refresh ────────────────────
+
+
+async def _refine_test_store() -> InMemoryStorage:
+    """Real (non-mock) InMemoryStorage with a brain activated."""
+    store = InMemoryStorage()
+    brain = Brain.create(name="test-refine-refresh-brain")
+    await store.save_brain(brain)
+    store.set_brain(brain.id)
+    return store
+
+
+async def _seeded_instruction(store: InMemoryStorage, content: str, vector: list[float]):
+    from surreal_memory.core.fiber import Fiber
+    from surreal_memory.core.memory_types import MemoryType, Priority, TypedMemory
+    from surreal_memory.core.neuron import Neuron, NeuronType
+
+    anchor = Neuron.create(
+        type=NeuronType.CONCEPT, content=content, metadata={"_embedding": list(vector)}
+    )
+    anchor = dc_replace(anchor, content_hash=simhash(content))
+    await store.add_neuron(anchor)
+    fiber = Fiber.create(
+        neuron_ids={anchor.id},
+        synapse_ids=set(),
+        anchor_neuron_id=anchor.id,
+        fiber_id="fiber-instr-refresh",
+    )
+    await store.add_fiber(fiber)
+    typed_mem = TypedMemory.create(
+        fiber_id=fiber.id,
+        memory_type=MemoryType.INSTRUCTION,
+        priority=Priority.NORMAL,
+        source="test",
+    )
+    await store.add_typed_memory(typed_mem)
+    return anchor, fiber
+
+
+class TestRefineRefreshesDerivedFields:
+    """A content refine (``smem_refine``) must refresh content-derived fields.
+
+    ``_refine`` did ``dc_replace(anchor, content=new_content)`` straight into
+    ``update_neuron`` — re-saving the OLD ``content_hash`` and the OLD embedding
+    vector next to the NEW content, the same pattern #166 fixed for ``smem_edit``
+    but left standing on the instruction-refinement path.
+    """
+
+    @pytest.mark.asyncio
+    async def test_refine_recomputes_content_hash_and_vector(self) -> None:
+        server = _make_server()
+        store = await _refine_test_store()
+        old_vec = [0.1, 0.2, 0.3]
+        orig = "always double-check totals before reporting them"
+        anchor, fiber = await _seeded_instruction(store, orig, old_vec)
+        server.get_storage = AsyncMock(return_value=store)
+
+        fresh_vec = [5.0, 5.0, 5.0]
+        provider = MagicMock()
+        provider.embed_batch = AsyncMock(return_value=[list(fresh_vec)])
+        new_content = "always double-check totals AND currency before reporting them"
+        with patch(
+            "surreal_memory.engine.semantic_discovery._create_provider", return_value=provider
+        ):
+            result = await server.call_tool(
+                "smem_refine", {"neuron_id": fiber.id, "new_content": new_content}
+            )
+
+        assert result["status"] == "refined"
+        saved = await store.get_neuron(anchor.id)
+        assert saved.content == new_content
+        assert saved.content_hash == simhash(new_content), (
+            "content_hash must be the fingerprint of the NEW content — keeping the old "
+            "one feeds near-duplicate detection the SimHash of text that no longer exists"
+        )
+        assert saved.metadata["_embedding"] == fresh_vec, (
+            "the vector saved with the new content must describe the new content — "
+            "re-saving the old one keeps the memory retrievable by what it used to say"
+        )
+        provider.embed_batch.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_refine_survives_provider_unavailable_but_warns(self, caplog) -> None:
+        import logging
+
+        server = _make_server()
+        store = await _refine_test_store()
+        old_vec = [0.1, 0.2]
+        orig = "always double-check totals before reporting them"
+        anchor, fiber = await _seeded_instruction(store, orig, old_vec)
+        server.get_storage = AsyncMock(return_value=store)
+
+        with (
+            patch(
+                "surreal_memory.engine.semantic_discovery._create_provider",
+                side_effect=RuntimeError("no provider"),
+            ),
+            caplog.at_level(logging.WARNING, logger="surreal_memory.utils.content_refresh"),
+        ):
+            result = await server.call_tool(
+                "smem_refine", {"neuron_id": fiber.id, "new_content": "new content here"}
+            )
+
+        assert result["status"] == "refined", "refine must not depend on embedder availability"
+        saved = await store.get_neuron(anchor.id)
+        assert saved.content == "new content here"
+        assert saved.content_hash == simhash("new content here"), (
+            "content_hash has no provider dependency and must still be refreshed"
+        )
+        assert saved.metadata["_embedding"] == old_vec, (
+            "with no provider available the old vector must be kept, not dropped or guessed"
+        )
+        assert any("reindex" in r.message for r in caplog.records), (
+            "a stale vector left behind must be reported loudly, with the remediation "
+            "command — silence here is indistinguishable from a successful refresh"
+        )
