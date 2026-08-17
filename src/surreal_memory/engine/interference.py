@@ -113,6 +113,15 @@ async def detect_interference(
         if candidate.id == new_neuron.id:
             continue
 
+        # GRAPH_ONLY tombstones carry the no-fingerprint sentinel (hash 0),
+        # and the recompute fallback below would resurrect exactly the shared
+        # constant that sentinel suppresses - every tombstone would then sit
+        # the same Hamming distance from the new memory, and one save could
+        # persist a CONTRADICTS edge to all of them at once. The fallback is
+        # for real content that merely lost its hash; a placeholder is not that.
+        if candidate.content == "[graph-only]":
+            continue
+
         cand_hash = candidate.content_hash or simhash(candidate.content)
         dist = hamming_distance(new_hash, cand_hash)
 

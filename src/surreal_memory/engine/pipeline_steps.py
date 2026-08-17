@@ -255,6 +255,12 @@ async def _find_similar_entity(storage: NeuralStorage, text: str) -> Neuron | No
         if len(first_word) >= 3:
             nearby = await storage.find_neurons(content_contains=first_word, limit=10)
             for candidate in nearby:
+                # A GRAPH_ONLY tombstone written before the hash sentinel still
+                # carries the SimHash of its deleted text; reusing it here would
+                # bind the new entity reference to a placeholder. Same guard as
+                # the census and the dedup pipeline.
+                if candidate.content == "[graph-only]":
+                    continue
                 if candidate.content_hash and is_near_duplicate(text_hash, candidate.content_hash):
                     return candidate
     return None

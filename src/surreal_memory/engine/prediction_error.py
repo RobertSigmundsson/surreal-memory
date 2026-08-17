@@ -136,6 +136,12 @@ async def compute_surprise_bonus(
     min_hamming = 64  # worst case
 
     for neuron in unique[:20]:  # cap to avoid perf issues
+        # A GRAPH_ONLY tombstone has no content to be surprised by - and a
+        # legacy one still carries the SimHash of its deleted text, which would
+        # deflate the novelty of a new memory resembling content that is gone.
+        if neuron.content == "[graph-only]":
+            continue
+
         # Contradiction check
         if _detects_reversal(content, neuron.content):
             max_reversal_score = 2.5

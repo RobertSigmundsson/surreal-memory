@@ -57,6 +57,45 @@ class TestDetectInterference:
         assert results == []
 
     @pytest.mark.asyncio
+    async def test_graph_only_tombstones_never_interfere(self) -> None:
+        """A tombstone's sentinel hash must not be recomputed around.
+
+        GRAPH_ONLY tombstones carry content_hash 0 precisely so hash consumers
+        skip them; the recompute fallback would resurrect the shared constant
+        simhash of the placeholder, and any new memory whose fingerprint lands
+        in the interference window would then CONTRADICTS-link to every
+        tag-overlapping tombstone in the brain at once.
+        """
+        from dataclasses import replace
+
+        from surreal_memory.utils.simhash import hamming_distance, simhash
+
+        config = MagicMock()
+        config.interference_detection_enabled = True
+        config.fan_effect_threshold = 15
+
+        # Precondition, asserted so the test cannot rot silently: this content's
+        # fingerprint sits inside the 8..18 interference window relative to the
+        # placeholder's - i.e. WITHOUT the skip it would register interference.
+        content = "graph-only compression tier notes"
+        dist = hamming_distance(simhash(content), simhash("[graph-only]"))
+        assert 8 <= dist <= 18, f"precondition drifted: distance {dist} not in window"
+
+        new_neuron = _make_neuron(content, ["memory"])
+        tombstone = _make_neuron("[graph-only]", ["memory"], created_offset_hours=24)
+        tombstone = replace(tombstone, content_hash=0)
+
+        storage = AsyncMock()
+        storage.find_neurons = AsyncMock(return_value=[tombstone])
+
+        results = await detect_interference(new_neuron, storage, config)
+        non_fan = [r for r in results if r.interference_type != InterferenceType.FAN_EFFECT]
+        assert non_fan == [], (
+            "a tombstone has no fingerprint to interfere with - recomputing one "
+            "from the placeholder pairs the new memory with every tombstone at once"
+        )
+
+    @pytest.mark.asyncio
     async def test_similar_retroactive(self) -> None:
         config = MagicMock()
         config.interference_detection_enabled = True
