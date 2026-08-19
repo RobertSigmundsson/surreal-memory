@@ -1234,9 +1234,14 @@ class SurrealDBStorage(
 
         if time_range is not None:
             start, end = time_range
+            # Bind datetimes, not ISO strings: created_at is a datetime column, and
+            # SurrealDB resolves a cross-type comparison by type rank rather than by
+            # value, so a string bound here makes the predicate CONSTANT — and which
+            # constant depends on the operator: `datetime >= string` is always true,
+            # `datetime <= string` always false. Here the two combine to match nothing.
             conditions.append("created_at >= $time_start AND created_at <= $time_end")
-            params["time_start"] = start.isoformat()
-            params["time_end"] = end.isoformat()
+            params["time_start"] = start
+            params["time_end"] = end
 
         if ephemeral is not None:
             conditions.append("ephemeral = $ephemeral")
@@ -2572,7 +2577,10 @@ class SurrealDBStorage(
                 "SELECT count() AS c FROM fiber "
                 "WHERE brain_id = $bid AND created_at >= $today GROUP ALL",
                 bid=brain_id,
-                today=today.isoformat(),
+                # Bind the datetime, not an ISO string — see find_neurons above.
+                # Here the comparison is one-sided (>=), where a string bound makes
+                # the predicate constantly TRUE, so the count silently became "all".
+                today=today,
             ),
             self._query(
                 "SELECT * FROM neuron_state WHERE brain_id = $bid "
