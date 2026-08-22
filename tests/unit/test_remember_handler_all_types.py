@@ -33,6 +33,9 @@ from surreal_memory.core.memory_types import (
 
 # Types intentionally excluded from the auto-classifier.
 COGNITIVE_ONLY = {MemoryType.HYPOTHESIS, MemoryType.PREDICTION, MemoryType.SCHEMA}
+# ERROR is also explicit-only: it carries a deletion TTL, so the
+# classifier never assigns it from keywords (see suggest_memory_type).
+AUTO_EXCLUDED = COGNITIVE_ONLY | {MemoryType.ERROR}
 
 
 @pytest.mark.parametrize("mtype", list(MemoryType), ids=lambda m: m.value)
@@ -77,13 +80,14 @@ def test_auto_classifier_never_emits_cognitive_only_types() -> None:
         )
 
 
-def test_classifier_covers_all_twelve_non_cognitive_types() -> None:
-    """The 12 non-cognitive types must each be reachable from the classifier.
+def test_classifier_covers_all_eleven_auto_detectable_types() -> None:
+    """The 11 auto-detectable types must each be reachable from the classifier.
 
     If a future refactor drops a branch (e.g. removes the BOUNDARY
     branch by accident), this test catches it before it reaches users.
+    ERROR is excluded on purpose — it is explicit-only.
     """
-    expected_reachable = set(MemoryType) - COGNITIVE_ONLY
+    expected_reachable = set(MemoryType) - AUTO_EXCLUDED
     seen: set[MemoryType] = set()
 
     # One characteristic sentence per type. Mirrors the corpus in
@@ -93,7 +97,6 @@ def test_classifier_covers_all_twelve_non_cognitive_types() -> None:
         MemoryType.BOUNDARY: "Never use eval() in production",
         MemoryType.TODO: "TODO: refactor the auth module",
         MemoryType.DECISION: "Decided to use PostgreSQL",
-        MemoryType.ERROR: "Bug: pagination skips the last page",
         MemoryType.INSIGHT: "Realized the cache hit rate drops on Mondays",
         MemoryType.INSTRUCTION: "Always use type hints in Python",
         MemoryType.PREFERENCE: "I prefer tabs over spaces",
@@ -104,7 +107,7 @@ def test_classifier_covers_all_twelve_non_cognitive_types() -> None:
         MemoryType.FACT: "Python 3.11 was released in October 2022",
     }
     assert set(samples.keys()) == expected_reachable, (
-        "samples must cover every non-cognitive MemoryType exactly once"
+        "samples must cover every auto-detectable MemoryType exactly once"
     )
 
     for expected, sentence in samples.items():

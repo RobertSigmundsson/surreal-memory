@@ -1,8 +1,13 @@
 """Parametrized corpus tests for suggest_memory_type.
 
-Locks the 12-of-15-types coverage of the keyword classifier:
-    FACT (default), TODO, DECISION, ERROR, INSIGHT, INSTRUCTION,
+Locks the 11-of-15-types coverage of the keyword classifier:
+    FACT (default), TODO, DECISION, INSIGHT, INSTRUCTION,
     PREFERENCE, WORKFLOW, REFERENCE, BOUNDARY, TOOL, CONTEXT.
+
+ERROR is intentionally NOT auto-detected: it carries a deletion TTL,
+so a keyword misfire on durable content (post-mortems, audit reports)
+would silently schedule that content for deletion. ERROR only comes
+from an explicit `type=` argument.
 
 Edge-case section covers known precedence collisions where naive
 ordering would silently misclassify safety-critical content.
@@ -52,18 +57,6 @@ CLASSIFIER_CORPUS: dict[MemoryType, list[str]] = {
         "Rejected GraphQL in favor of REST",
         "Went with Postgres trigram for fuzzy search",
         "Chose Redis over Memcached for the cache",
-    ],
-    MemoryType.ERROR: [
-        "The API returns a 500 error on empty payload",
-        "Bug: pagination skips the last page",
-        "Crash on macOS when opening the export dialog",
-        "Exception thrown by the parser on malformed JSON",
-        "Traceback indicates a stale connection pool",
-        "Build failed because of a missing dependency",
-        "Encoder crashed with an OOM exception",
-        "Login flow is broken on Safari iOS",
-        "Migration failed mid-run leaving partial state",
-        "Bug in the rate limiter — leaks tokens on retry",
     ],
     MemoryType.INSIGHT: [
         "Learned that the encoder is the bottleneck",
@@ -196,6 +189,52 @@ def test_cognitive_only_types_excluded_from_corpus() -> None:
     """
     cognitive_only = {MemoryType.HYPOTHESIS, MemoryType.PREDICTION, MemoryType.SCHEMA}
     assert cognitive_only.isdisjoint(CLASSIFIER_CORPUS.keys())
+
+
+# ---- ERROR is never auto-detected ---------------------------------------
+
+# Error-keyword sentences that historically classified as ERROR. ERROR
+# gets a deletion TTL, so auto-assigning it destroys durable content;
+# these must now land on TTL-free types instead.
+ERROR_KEYWORD_SENTENCES: list[tuple[str, MemoryType]] = [
+    ("The API returns a 500 error on empty payload", MemoryType.FACT),
+    ("Bug: pagination skips the last page", MemoryType.FACT),
+    ("Crash on macOS when opening the export dialog", MemoryType.FACT),
+    ("Exception thrown by the parser on malformed JSON", MemoryType.FACT),
+    ("Traceback indicates a stale connection pool", MemoryType.FACT),
+    ("Build failed because of a missing dependency", MemoryType.FACT),
+    ("Encoder crashed with an OOM exception", MemoryType.FACT),
+    ("Login flow is broken on Safari iOS", MemoryType.WORKFLOW),
+    ("Migration failed mid-run leaving partial state", MemoryType.FACT),
+    ("Bug in the rate limiter — leaks tokens on retry", MemoryType.FACT),
+]
+
+
+@pytest.mark.parametrize(("content", "expected"), ERROR_KEYWORD_SENTENCES)
+def test_error_keywords_do_not_auto_classify_as_error(content: str, expected: MemoryType) -> None:
+    result = suggest_memory_type(content)
+    assert result != MemoryType.ERROR, f"auto-detected ERROR for {content!r}"
+    assert result == expected
+
+
+def test_error_type_excluded_from_corpus() -> None:
+    """ERROR must not be in the auto-classifier corpus (explicit-only type)."""
+    assert MemoryType.ERROR not in CLASSIFIER_CORPUS
+
+
+def test_classifier_never_emits_error() -> None:
+    """No input may auto-classify as ERROR — including report-like prose
+    that merely mentions failures (the 2026-08-22 defect: an audit
+    report auto-typed `error` and got a 30-day deletion TTL)."""
+    report_like = (
+        "AUDYT SMEM 2026-08-22: pelny raport z dowodami, bramka danych "
+        "przeszla, error handling zweryfikowany (raport)"
+    )
+    all_sentences = [s for samples in CLASSIFIER_CORPUS.values() for s in samples]
+    all_sentences += [s for s, _ in ERROR_KEYWORD_SENTENCES]
+    all_sentences.append(report_like)
+    offenders = [s for s in all_sentences if suggest_memory_type(s) == MemoryType.ERROR]
+    assert offenders == []
 
 
 # ---- Precedence collision tests -----------------------------------------
