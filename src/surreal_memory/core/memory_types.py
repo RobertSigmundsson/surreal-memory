@@ -587,16 +587,20 @@ def _has_keyword(content_lower: str, keyword: str) -> bool:
 def suggest_memory_type(content: str) -> MemoryType:
     """Suggest a memory type based on content analysis.
 
-    Heuristic keyword-based classifier. Returns 12 of the 15 MemoryType
+    Heuristic keyword-based classifier. Returns 11 of the 15 MemoryType
     values directly from raw content:
-        FACT (default), TODO, DECISION, ERROR, INSIGHT, INSTRUCTION,
+        FACT (default), TODO, DECISION, INSIGHT, INSTRUCTION,
         PREFERENCE, WORKFLOW, REFERENCE, BOUNDARY, TOOL, CONTEXT.
 
-    The remaining 3 types — HYPOTHESIS, PREDICTION, SCHEMA — are produced
-    by dedicated cognitive flows (cognitive_handler, knowledge_gaps), not
-    inferred from raw user content, so they are intentionally excluded
-    here. Callers needing to create those types must pass an explicit
-    `type=` argument to smem_remember.
+    HYPOTHESIS, PREDICTION and SCHEMA are produced by dedicated
+    cognitive flows (cognitive_handler, knowledge_gaps), not inferred
+    from raw user content, so they are intentionally excluded here.
+    ERROR is also never auto-detected: it carries a deletion TTL
+    (DEFAULT_EXPIRY_DAYS), so a keyword misfire on durable content
+    (post-mortems, audit reports, root-cause notes routinely contain
+    "error"/"failed") would silently schedule that content for
+    deletion. Callers needing any of these four types must pass an
+    explicit `type=` argument to smem_remember.
 
     Branch precedence is significant. BOUNDARY wins over INSTRUCTION
     because safety rules ("never use eval()") must not be silently
@@ -661,13 +665,10 @@ def suggest_memory_type(content: str) -> MemoryType:
     ):
         return MemoryType.DECISION
 
-    # Error patterns — problem/failure language (check BEFORE insight,
-    # since errors may contain "root cause" or "found that")
-    if any(
-        _has_keyword(content_lower, kw)
-        for kw in ["error", "bug", "crash", "exception", "traceback", "failed", "broken"]
-    ):
-        return MemoryType.ERROR
+    # ERROR is deliberately NOT auto-detected here: ERROR entries get a
+    # deletion TTL, so a keyword misfire on durable content would
+    # silently delete it. ERROR requires an explicit type= from the
+    # caller (see docstring).
 
     # Insight patterns — causal/discovery language
     if any(

@@ -315,11 +315,15 @@ class TestSuggestMemoryType:
         assert suggest_memory_type("I like dark themes") == MemoryType.PREFERENCE
         assert suggest_memory_type("I hate verbose code") == MemoryType.PREFERENCE
 
-    def test_suggests_error(self) -> None:
-        """Test suggesting ERROR type."""
-        assert suggest_memory_type("API returns 429 error on rate limit") == MemoryType.ERROR
-        assert suggest_memory_type("Bug in auth module causes crash") == MemoryType.ERROR
-        assert suggest_memory_type("Exception when parsing JSON") == MemoryType.ERROR
+    def test_never_suggests_error(self) -> None:
+        """ERROR is explicit-only: it carries a deletion TTL, so the
+        classifier must not assign it from keywords (error-keyword
+        content falls through to the TTL-free FACT default)."""
+        assert suggest_memory_type("API returns 429 error on rate limit") == MemoryType.FACT
+        assert suggest_memory_type("Bug in auth module causes crash") == MemoryType.FACT
+        assert suggest_memory_type("Exception when parsing JSON") == MemoryType.FACT
+        # Explicit request still works — only auto-detection is off.
+        assert MemoryType("error") is MemoryType.ERROR
 
     def test_suggests_workflow(self) -> None:
         """Test suggesting WORKFLOW type."""
