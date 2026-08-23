@@ -30,6 +30,7 @@ _CONTRACT = (
     "pin_fibers",
     "get_pinned_neuron_ids",
     "list_pinned_fibers",
+    "count_pinned_fibers",
     "get_graph_density",
     "upsert_training_file",
     "get_training_file_by_hash",
