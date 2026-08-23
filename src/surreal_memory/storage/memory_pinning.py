@@ -68,6 +68,16 @@ class InMemoryPinningMixin:
                 result.update(fiber.neuron_ids)
         return result
 
+    async def count_pinned_fibers(self) -> int:
+        """Count pinned fibers for the current brain.
+
+        Counts the store directly rather than measuring ``list_pinned_fibers``,
+        which caps at ``_MAX_LIST_LIMIT`` and so would saturate at 200 — the
+        same reason the SurrealDB mixin counts in the query engine.
+        """
+        brain_id = self._get_brain_id()
+        return sum(1 for fiber in self._fibers[brain_id].values() if fiber.pinned)
+
     async def list_pinned_fibers(self, limit: int = 50) -> list[dict[str, Any]]:
         """List pinned fibers for the current brain, newest first."""
         brain_id = self._get_brain_id()

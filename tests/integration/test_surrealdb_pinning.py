@@ -172,6 +172,53 @@ class TestListPinnedFibers:
         assert await store.list_pinned_fibers() == []
 
 
+class TestCountPinnedFibers:
+    """``count()`` has its own SurrealQL traps, so it needs a live server too."""
+
+    async def test_empty_brain_counts_zero(self, store: SurrealDBStorage) -> None:
+        """GROUP ALL over an empty match set returns no rows at all, not a 0 row."""
+        assert await store.count_pinned_fibers() == 0
+
+    async def test_counts_only_pinned(self, store: SurrealDBStorage) -> None:
+        pinned = [await _fiber_with_neuron(store, f"kb {i}") for i in range(3)]
+        await _fiber_with_neuron(store, "ordinary")
+        await store.pin_fibers([f.id for f in pinned], pinned=True)
+
+        assert await store.count_pinned_fibers() == 3
+
+    async def test_aggregates_instead_of_returning_a_row_per_fiber(
+        self, store: SurrealDBStorage
+    ) -> None:
+        """Regression: ``count()`` without ``GROUP ALL`` yields one row per
+        record, each holding 1, so reading ``rows[0]["cnt"]`` reports 1 for any
+        non-empty brain — right for a single pinned fiber, silently wrong for
+        every larger one.
+        """
+        fibers = [await _fiber_with_neuron(store, f"kb {i}") for i in range(4)]
+        await store.pin_fibers([f.id for f in fibers], pinned=True)
+
+        assert await store.count_pinned_fibers() == 4
+
+    async def test_count_is_scoped_to_the_current_brain(self, store: SurrealDBStorage) -> None:
+        fiber = await _fiber_with_neuron(store, "brain one kb")
+        await store.pin_fibers([fiber.id], pinned=True)
+        assert await store.count_pinned_fibers() == 1
+
+        other = Brain.create(name="pin-it-count-other")
+        await store.save_brain(other)
+        store.set_brain(other.id)
+
+        assert await store.count_pinned_fibers() == 0
+
+    async def test_unpinning_lowers_the_count(self, store: SurrealDBStorage) -> None:
+        fiber = await _fiber_with_neuron(store, "kb fact")
+        await store.pin_fibers([fiber.id], pinned=True)
+        assert await store.count_pinned_fibers() == 1
+
+        await store.pin_fibers([fiber.id], pinned=False)
+        assert await store.count_pinned_fibers() == 0
+
+
 class TestGraphDensity:
     async def test_empty_brain_is_zero(self, store: SurrealDBStorage) -> None:
         assert await store.get_graph_density() == 0.0
