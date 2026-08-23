@@ -131,6 +131,25 @@ class SurrealDBPinningMixin:
             result.update(str(nid) for nid in row.get("neuron_ids") or ())
         return result
 
+    async def count_pinned_fibers(self) -> int:
+        """Count pinned fibers for the current brain.
+
+        Counted in the query engine rather than by measuring
+        ``list_pinned_fibers``: that one is capped at ``_MAX_LIST_LIMIT``, so
+        its length saturates at 200 and would under-report a brain holding
+        more — silently, since a capped list looks exactly like a short one.
+
+        ``count()`` needs ``GROUP ALL`` to aggregate over the whole match set;
+        without it SurrealDB returns one row per record, each holding 1.
+        """
+        brain_id = self._get_brain_id()
+        rows = await self._query(
+            "SELECT count() AS cnt FROM fiber "
+            "WHERE brain_id = $brain_id AND pinned = true GROUP ALL",
+            brain_id=brain_id,
+        )
+        return int(rows[0]["cnt"]) if rows else 0
+
     async def list_pinned_fibers(self, limit: int = 50) -> list[dict[str, Any]]:
         """List pinned fibers for the current brain, newest first."""
         brain_id = self._get_brain_id()

@@ -363,3 +363,71 @@ class TestPinUnpin:
         await storage.add_fiber(fiber)
 
         assert await storage.list_pinned_fibers() == []
+
+
+class TestCountPinnedFibers:
+    """How many fibers are pinned — the number the dashboard reports.
+
+    Separate from ``list_pinned_fibers`` because that one is capped at
+    ``_MAX_LIST_LIMIT`` (200) so ``smem_pin(action="list")`` cannot drag an
+    unbounded set through the MCP layer. Measuring the capped list is therefore
+    a counter that stops counting at 200 and says nothing about it — and the
+    production brain was already holding 320 when this was added, so that
+    shortcut would have under-reported by 120 while looking perfectly healthy.
+    """
+
+    async def _pinned_fiber(self, storage, content: str, *, pinned: bool):
+        neuron = Neuron.create(type=NeuronType.ENTITY, content=content)
+        await storage.add_neuron(neuron)
+        fiber = Fiber.create(neuron_ids={neuron.id}, synapse_ids=set(), anchor_neuron_id=neuron.id)
+        await storage.add_fiber(fiber)
+        if pinned:
+            await storage.pin_fibers([fiber.id], pinned=True)
+        return fiber
+
+    async def test_empty_brain_counts_zero(self, pin_storage) -> None:
+        assert await pin_storage.count_pinned_fibers() == 0
+
+    async def test_counts_only_pinned_fibers(self, pin_storage) -> None:
+        await self._pinned_fiber(pin_storage, "kb one", pinned=True)
+        await self._pinned_fiber(pin_storage, "kb two", pinned=True)
+        await self._pinned_fiber(pin_storage, "ordinary", pinned=False)
+
+        assert await pin_storage.count_pinned_fibers() == 2
+
+    async def test_unpinning_lowers_the_count(self, pin_storage) -> None:
+        fiber = await self._pinned_fiber(pin_storage, "kb fact", pinned=True)
+        assert await pin_storage.count_pinned_fibers() == 1
+
+        await pin_storage.pin_fibers([fiber.id], pinned=False)
+        assert await pin_storage.count_pinned_fibers() == 0
+
+    async def test_counts_past_the_list_limit(self, pin_storage) -> None:
+        """The regression this method exists for.
+
+        ``len(await list_pinned_fibers(limit=...))`` saturates at
+        ``_MAX_LIST_LIMIT``; the count must not. Sized just over the cap so a
+        capped implementation reports 200 here instead of 201.
+        """
+        from surreal_memory.storage.memory_pinning import _MAX_LIST_LIMIT
+
+        over_cap = _MAX_LIST_LIMIT + 1
+        for i in range(over_cap):
+            await self._pinned_fiber(pin_storage, f"kb fact {i}", pinned=True)
+
+        assert await pin_storage.count_pinned_fibers() == over_cap
+        # The list really is capped — this is what makes measuring it wrong.
+        assert len(await pin_storage.list_pinned_fibers(limit=over_cap)) == _MAX_LIST_LIMIT
+
+    async def test_count_is_scoped_to_the_current_brain(self, pin_storage) -> None:
+        """A pinned fiber in another brain must not be counted."""
+        from surreal_memory.core.brain import Brain
+
+        await self._pinned_fiber(pin_storage, "brain one kb", pinned=True)
+        assert await pin_storage.count_pinned_fibers() == 1
+
+        other = Brain.create(name="pin-test-brain-other")
+        await pin_storage.save_brain(other)
+        pin_storage.set_brain(other.id)
+
+        assert await pin_storage.count_pinned_fibers() == 0

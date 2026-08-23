@@ -57,6 +57,10 @@ class BrainSummary(BaseModel):
     neuron_count: int = 0
     synapse_count: int = 0
     fiber_count: int = 0
+    #: Pinned (permanent KB) fibers in this brain. Defaults to 0 so backends
+    #: without pinning, and the placeholder built on the error path below, stay
+    #: constructible — the value is always present in the response either way.
+    pinned_fiber_count: int = 0
     grade: str = "F"
     purity_score: float = 0.0
     is_active: bool = False
@@ -70,6 +74,7 @@ class DashboardStats(BaseModel):
     total_neurons: int = 0
     total_synapses: int = 0
     total_fibers: int = 0
+    total_pinned_fibers: int = 0
     health_grade: str = "F"
     purity_score: float = 0.0
     brains: list[BrainSummary] = Field(default_factory=list)
@@ -143,6 +148,19 @@ async def get_stats(
                 # Counts are cheap (indexed count()) — always compute them live so
                 # the neuron/synapse/fiber numbers are never stale.
                 stats = await brain_storage.get_stats(name)
+                # Counted in the query engine, never as len(list_pinned_fibers()):
+                # that listing caps at 200, so measuring it would have reported
+                # 200 for the production brain's 320 pinned fibers.
+                try:
+                    pinned = await brain_storage.count_pinned_fibers()
+                except Exception:
+                    # WARNING, not debug, for the reason the outer handler
+                    # already documents: a swallowed storage error that reads
+                    # back as 0 is indistinguishable from "nothing is pinned",
+                    # which is how a misconfiguration hides. The other counts
+                    # stay live — one failed metric must not zero the rest.
+                    logger.warning("Pinned-fiber count failed for %s", name, exc_info=True)
+                    pinned = 0
                 grade = "—"
                 purity = 0.0
                 if is_active:
@@ -159,6 +177,7 @@ async def get_stats(
                 neuron_count=stats.get("neuron_count", 0),
                 synapse_count=stats.get("synapse_count", 0),
                 fiber_count=stats.get("fiber_count", 0),
+                pinned_fiber_count=pinned,
                 grade=grade,
                 purity_score=purity,
                 is_active=is_active,
@@ -180,6 +199,7 @@ async def get_stats(
     total_n = sum(b.neuron_count for b in brains)
     total_s = sum(b.synapse_count for b in brains)
     total_f = sum(b.fiber_count for b in brains)
+    total_pinned = sum(b.pinned_fiber_count for b in brains)
     active_grade = "F"
     active_purity = 0.0
     for b in brains:
@@ -194,6 +214,7 @@ async def get_stats(
         total_neurons=total_n,
         total_synapses=total_s,
         total_fibers=total_f,
+        total_pinned_fibers=total_pinned,
         health_grade=active_grade,
         purity_score=active_purity,
         brains=brains,

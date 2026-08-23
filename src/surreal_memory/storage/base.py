@@ -2245,6 +2245,21 @@ class NeuralStorage(ABC):
         """List pinned fibers for the current brain, newest first."""
         return []
 
+    async def count_pinned_fibers(self) -> int:
+        """Count pinned fibers in the current brain.
+
+        Separate from ``list_pinned_fibers`` on purpose: that one caps at 200
+        results so ``smem_pin(action="list")`` cannot pull an unbounded set
+        through the MCP layer, so ``len(await list_pinned_fibers())`` silently
+        reports 200 for any brain that holds more — the production brain held
+        320 when this was added. Backends count in the query engine instead.
+
+        Same concrete-with-a-safe-default treatment as the three above, for the
+        same reason: ``SharedStorage`` keeps no local tables, and "nothing is
+        pinned" is the honest answer for a backend that stores none of this.
+        """
+        return 0
+
     # ========== Semantic Drift Detection ==========
     #
     # Port of the SQLite-only mixin removed in 3524066d — every caller probed
