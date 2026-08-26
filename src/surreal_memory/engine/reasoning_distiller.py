@@ -550,6 +550,11 @@ def _merge_pattern_into(fiber: Fiber, pattern: dict[str, Any], sig: str) -> Fibe
         # anchor CONCEPT neuron, which merging must not orphan.
         md["_reasoning_description"] = pattern["description"]
         md["_reasoning_strategy"] = pattern["strategy"]
+        # The strategy line now shown IS the measured one, so the provenance
+        # travels with it. Keeping a legacy stamp here would understate a chain
+        # we did walk; moving it without the text would overstate one we did not.
+        md["_reasoning_chain"] = list(pattern.get("chain") or ())
+        md["_reasoning_chain_source"] = "measured"
     return replace(fiber, metadata=md)
 
 
@@ -637,6 +642,9 @@ async def _materialize_pattern(
             # no-op and the retro-merge can account for what it absorbed.
             "_reasoning_signatures": [sig],
             "_reasoning_chain": list(pattern.get("chain") or ()),
+            # Walked out of the text by segment_moves, not parsed back out of a
+            # rendered line — injection renders arrows only for this provenance.
+            "_reasoning_chain_source": "measured",
             "_reasoning_merge_key": key,
         },
     )
