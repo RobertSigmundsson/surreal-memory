@@ -186,14 +186,18 @@ def _mark_unverified_order(metadata: dict[str, Any], strategy: str) -> str:
     derived from a dictionary iteration, and it was rendered with arrows either
     way. On the live corpus that rendered order disagreed with the text in 67.5%
     of the traces that had one — so these lines teach a sequence that may never
-    have happened. They are identifiable: only patterns built after the fix
-    carry ``_reasoning_chain``.
+    have happened. Only a pattern whose chain was actually walked out of the
+    text carries ``_reasoning_chain_source == "measured"``; a chain recovered by
+    parsing an old rendered line is stamped ``"legacy-parsed"`` and is NOT
+    evidence of order — the old renderer used arrows for the frequency top-3
+    too, so a parse cannot tell the two apart. An absent stamp downgrades as
+    well: unknown provenance is not proof.
 
     The bank is not rewritten (its history is what it is). The claim is
     downgraded where it is read, and disappears by itself as those patterns are
     merged into measured ones.
     """
-    if "_reasoning_chain" in metadata:
+    if metadata.get("_reasoning_chain_source") == "measured":
         return strategy
     head, sep, rest = strategy.partition("\n")
     if not head.startswith(_MOVES_PREFIX) or "->" not in head:
