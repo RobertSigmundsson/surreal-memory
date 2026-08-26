@@ -1152,6 +1152,17 @@ class TestMergeKey:
         assert merge_key("m", "c", [], "same title") == merge_key("m", "c", [], "Same   Title")
         assert merge_key("m", "c", [], "one") != merge_key("m", "c", [], "two")
 
+    def test_a_single_move_is_not_an_identity(self) -> None:
+        from surreal_memory.engine.reasoning_distiller import merge_key
+
+        # One shared move is a presence, not a sequence: two clusters whose only
+        # commonality is "verify" are not the same strategy, and must stay apart.
+        assert merge_key("m", "verification", ["verify"], "one") != merge_key(
+            "m", "verification", ["verify"], "two"
+        )
+        # ...and it keys the same as having no chain at all.
+        assert merge_key("m", "c", ["verify"], "t") == merge_key("m", "c", [], "t")
+
     def test_chain_is_recovered_from_a_legacy_strategy_line(self) -> None:
         from surreal_memory.engine.reasoning_distiller import chain_from_strategy
 
