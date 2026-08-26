@@ -632,7 +632,8 @@ async def test_a_measured_chain_still_renders_as_a_chain(tmp_path: Path) -> None
     # Mark it as measured, exactly as the distiller now does.
     fibers = await storage.find_fibers(metadata_key="_reasoning_pattern", limit=10)
     await storage.update_fiber_metadata(
-        fibers[0].id, {"_reasoning_chain": ["verify", "restate-goal"]}
+        fibers[0].id,
+        {"_reasoning_chain": ["verify", "restate-goal"], "_reasoning_chain_source": "measured"},
     )
 
     cfg = _ucfg(tmp_path, injection_map=(("claude-opus-*", "claude-fable-5"),))
@@ -659,3 +660,34 @@ async def test_an_unordered_legacy_line_is_left_alone(tmp_path: Path) -> None:
 
     # It already says it has no order; nothing to downgrade.
     assert "Moves (unordered): verify, backtrack" in block
+
+
+async def test_a_chain_recovered_by_parsing_is_not_a_measured_chain(tmp_path: Path) -> None:
+    # The retro-merge stamps _reasoning_chain on legacy fibers too, recovered by
+    # parsing their rendered line. That parse cannot distinguish a real chain
+    # from the old top-3 fallback, so it must not buy the fiber its arrows back.
+    storage = InMemoryStorage()
+    storage.set_brain(BRAIN)
+    await _add_pattern(
+        storage,
+        "claude-fable-5",
+        "debugging",
+        "debugging: verify, restate-goal",
+        "Moves: verify -> restate-goal\nmedoid",
+        1.0,
+        3,
+    )
+    fibers = await storage.find_fibers(metadata_key="_reasoning_pattern", limit=10)
+    await storage.update_fiber_metadata(
+        fibers[0].id,
+        {
+            "_reasoning_chain": ["verify", "restate-goal"],
+            "_reasoning_chain_source": "legacy-parsed",
+        },
+    )
+
+    cfg = _ucfg(tmp_path, injection_map=(("claude-opus-*", "claude-fable-5"),))
+    block = await build_injection_context(storage, "claude-opus-4-8", cfg)
+
+    assert "Moves (order unverified): verify, restate-goal" in block
+    assert "->" not in block
