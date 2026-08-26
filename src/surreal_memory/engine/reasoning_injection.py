@@ -176,6 +176,34 @@ def _resolve_source_models(
     return ()
 
 
+_MOVES_PREFIX = "Moves: "
+
+
+def _mark_unverified_order(metadata: dict[str, Any], strategy: str) -> str:
+    """Stop a pre-measurement pattern from claiming an order nobody measured.
+
+    Patterns distilled before ``segment_moves`` walked the text carry a chain
+    derived from a dictionary iteration, and it was rendered with arrows either
+    way. On the live corpus that rendered order disagreed with the text in 67.5%
+    of the traces that had one — so these lines teach a sequence that may never
+    have happened. They are identifiable: only patterns built after the fix
+    carry ``_reasoning_chain``.
+
+    The bank is not rewritten (its history is what it is). The claim is
+    downgraded where it is read, and disappears by itself as those patterns are
+    merged into measured ones.
+    """
+    if "_reasoning_chain" in metadata:
+        return strategy
+    head, sep, rest = strategy.partition("\n")
+    if not head.startswith(_MOVES_PREFIX) or "->" not in head:
+        return strategy
+    moves = [p.strip() for p in head[len(_MOVES_PREFIX) :].split("->") if p.strip()]
+    if not moves:
+        return strategy
+    return f"Moves (order unverified): {', '.join(moves)}{sep}{rest}"
+
+
 async def build_injection_context(
     storage: NeuralStorage,
     model: str,
@@ -268,6 +296,7 @@ async def build_injection_context(
             body = str(
                 md.get("_reasoning_strategy") or md.get("_reasoning_description", "")
             ).strip()
+            body = _mark_unverified_order(md, body)
             body = " ".join(body.split())  # collapse whitespace/newlines to one line
             entry = f"{i}. **{title}** — {body}" if body else f"{i}. **{title}**"
             # Always include the first entry; later ones respect the char budget.

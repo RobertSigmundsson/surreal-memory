@@ -585,3 +585,77 @@ async def test_selection_is_deterministic_when_ranks_tie(tmp_path: Path) -> None
     # Ties resolve by title, so the choice is explainable rather than incidental.
     assert "debugging: a" in blocks[0] and "debugging: b" in blocks[0]
     assert "debugging: c" not in blocks[0]
+
+
+# ── Legacy patterns must not claim a measured order (defect 2 residue) ───────
+#
+# Found by the U2 checker: patterns distilled before segment_moves walked the
+# text still sit in the bank rendering "Moves: a -> b -> c", and re-distillation
+# will not overwrite them (their signature keys on the trace set). On the live
+# corpus that rendered order disagreed with the text in 67.5% of traces that had
+# one, so the injected block was teaching a sequence that may never have run.
+
+
+async def test_a_pattern_without_a_measured_chain_does_not_claim_one(tmp_path: Path) -> None:
+    storage = InMemoryStorage()
+    storage.set_brain(BRAIN)
+    # No _reasoning_chain in metadata → distilled before the chain was measured.
+    await _add_pattern(
+        storage,
+        "claude-fable-5",
+        "debugging",
+        "debugging: verify, restate-goal",
+        "Moves: verify -> restate-goal\nmedoid text",
+        1.0,
+        3,
+    )
+    cfg = _ucfg(tmp_path, injection_map=(("claude-opus-*", "claude-fable-5"),))
+    block = await build_injection_context(storage, "claude-opus-4-8", cfg)
+
+    assert "Moves (order unverified): verify, restate-goal" in block
+    assert "->" not in block
+    assert "medoid text" in block  # the rest of the strategy survives
+
+
+async def test_a_measured_chain_still_renders_as_a_chain(tmp_path: Path) -> None:
+    storage = InMemoryStorage()
+    storage.set_brain(BRAIN)
+    await _add_pattern(
+        storage,
+        "claude-fable-5",
+        "debugging",
+        "debugging: verify, restate-goal",
+        "Moves: verify -> restate-goal\nmedoid text",
+        1.0,
+        3,
+    )
+    # Mark it as measured, exactly as the distiller now does.
+    fibers = await storage.find_fibers(metadata_key="_reasoning_pattern", limit=10)
+    await storage.update_fiber_metadata(
+        fibers[0].id, {"_reasoning_chain": ["verify", "restate-goal"]}
+    )
+
+    cfg = _ucfg(tmp_path, injection_map=(("claude-opus-*", "claude-fable-5"),))
+    block = await build_injection_context(storage, "claude-opus-4-8", cfg)
+
+    assert "Moves: verify -> restate-goal" in block
+    assert "order unverified" not in block
+
+
+async def test_an_unordered_legacy_line_is_left_alone(tmp_path: Path) -> None:
+    storage = InMemoryStorage()
+    storage.set_brain(BRAIN)
+    await _add_pattern(
+        storage,
+        "claude-fable-5",
+        "debugging",
+        "debugging: verify",
+        "Moves (unordered): verify, backtrack\nmedoid",
+        1.0,
+        3,
+    )
+    cfg = _ucfg(tmp_path, injection_map=(("claude-opus-*", "claude-fable-5"),))
+    block = await build_injection_context(storage, "claude-opus-4-8", cfg)
+
+    # It already says it has no order; nothing to downgrade.
+    assert "Moves (unordered): verify, backtrack" in block
