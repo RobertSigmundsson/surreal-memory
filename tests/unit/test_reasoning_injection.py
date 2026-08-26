@@ -691,3 +691,43 @@ async def test_a_chain_recovered_by_parsing_is_not_a_measured_chain(tmp_path: Pa
 
     assert "Moves (order unverified): verify, restate-goal" in block
     assert "->" not in block
+
+
+async def test_two_sources_do_not_deliver_the_same_strategy_twice(tmp_path: Path) -> None:
+    # A sonnet/haiku session is mapped to two source models. Both banks hold a
+    # pattern with the same title, and the block-level dedup could not see it:
+    # each block was fine on its own while the session got the strategy twice in
+    # one prompt. Measured on the live bank before this fix.
+    storage = InMemoryStorage()
+    storage.set_brain(BRAIN)
+    shared = "debugging: restate-goal, verify, backtrack"
+    await _add_pattern(storage, "claude-fable-5", "debugging", shared, "s", 1.0, 9)
+    await _add_pattern(storage, "claude-opus-5", "debugging", shared, "s", 1.0, 9)
+    await _add_pattern(storage, "claude-opus-5", "planning", "planning: distinct", "s", 1.0, 8)
+
+    cfg = _ucfg(tmp_path, injection_map=(("claude-sonnet-5", "claude-fable-5,claude-opus-5"),))
+    block = await build_injection_context(storage, "claude-sonnet-5", cfg)
+
+    assert block.count(shared) == 1
+    # The second source still contributes — it just spends the slot on
+    # something the session does not already have.
+    assert "planning: distinct" in block
+    assert block.count("## Reasoning strategies") == 2
+
+
+async def test_a_source_whose_every_pattern_was_already_delivered_adds_no_header(
+    tmp_path: Path,
+) -> None:
+    storage = InMemoryStorage()
+    storage.set_brain(BRAIN)
+    shared = "debugging: only one"
+    await _add_pattern(storage, "claude-fable-5", "debugging", shared, "s", 1.0, 9)
+    await _add_pattern(storage, "claude-opus-5", "debugging", shared, "s", 1.0, 9)
+
+    cfg = _ucfg(tmp_path, injection_map=(("claude-sonnet-5", "claude-fable-5,claude-opus-5"),))
+    block = await build_injection_context(storage, "claude-sonnet-5", cfg)
+
+    # No empty second header (the existing rule: a source with nothing to say
+    # contributes nothing).
+    assert block.count("## Reasoning strategies") == 1
+    assert block.count(shared) == 1
