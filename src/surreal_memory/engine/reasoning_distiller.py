@@ -75,9 +75,14 @@ _PATTERN_FETCH_LIMIT = 20_000
 # restate-goal. Precision first; the measured rate is reported, not forced.
 _REASONING_MOVES: dict[str, re.Pattern[str]] = {
     "restate-goal": re.compile(
+        # "the (user|X) wants" once required the article before BOTH names, so
+        # the second alternative could never fire — dead regex, and it hid the
+        # phrases that carry this move. Dropping the article (and the proper
+        # noun, which has no business in a library) takes this from 2.7% to
+        # 5.4%: into the band, with no generic discourse re-admitted.
         r"(?i)(\bthe goal (is|here is|was)\b|\bthe task (is|here is|was)\b|\bobjective is\b"
-        r"|\bthe (user|robert) (wants|asked|is asking|said)\b"
-        r"|\bwhat (he|she|they) (wants|asked|is asking)\b"
+        r"|\b(the )?(user|he|she|they) (wants|asked|is asking|said)\b"
+        r"|\b(wants|asked) me to\b"
         r"|\bwhat (i'?m|we'?re) (trying|being asked) to\b"
         r"|\bthe (ask|request|requirement|instruction) is\b|\bmy job (is|here is)\b"
         r"|\bso,? (the|what) (goal|task|ask|question|requirement)\b"
@@ -110,8 +115,12 @@ _REASONING_MOVES: dict[str, re.Pattern[str]] = {
     "test-first": re.compile(
         r"(?i)(\bwrit(e|ing|ten) an? (failing )?test\b|\btest[- ]first\b|\bfailing test\b"
         r"|\bred test\b|\btdd\b|\badd(ing|ed)? an? test\b|\bnegative control\b"
+        # Dropped: bare "test first"/"test before" (37 traces, nearly all "a quick
+        # connection test first" — a test run early, not a test written first)
+        # and "golden set/file" (a data set, not a move; golden here is
+        # regression only).
         r"|\breproduc\w+ (test|case)\b|\bregression test\b|\btest that (fails|would fail)\b"
-        r"|\bprove it fails\b|\bmust fail on\b|\btest (first|before)\b|\bgolden (test|set|file)\b)"
+        r"|\bprove it fails\b|\bmust fail on\b|\bgolden test\b)"
     ),
     "check-edge-cases": re.compile(
         r"(?i)(\bedge cases?\b|\bcorner cases?\b|\bboundary (case|condition)\b"
@@ -126,7 +135,9 @@ _REASONING_MOVES: dict[str, re.Pattern[str]] = {
         r"|\bactually,? (no|wait|that|the|it|i)\b|\bthat'?s not right\b"
         r"|\bno[,—-] (wait|actually|that)\b"
         r"|\blet me re-?(examine|check|look|read|visit|assess|think)\b|\bon reflection\b"
-        r"|\bhmm,? (but|wait|actually)\b|\breconsider\w*\b|\brevisit(ing)?\b"
+        # "revisit" alone is deferral ("something to revisit later"), not a
+        # reversal — only the first-person form is a backtrack.
+        r"|\bhmm,? (but|wait|actually)\b|\breconsider\w*\b|\blet me revisit\b"
         r"|\bchange[d]? my mind\b|\bbacktrack\w*\b)"
     ),
     "compare-alternatives": re.compile(
