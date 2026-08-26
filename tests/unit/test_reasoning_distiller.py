@@ -903,3 +903,101 @@ class TestValidatedEndpointIsTheUsedEndpoint:
 
         assert embedder is not None
         assert "127.0.0.1" in (getattr(embedder, "_base_url", "") or "")
+
+
+# ── Temporal move chain (audit defect 2) ─────────────────────────────────────
+#
+# `segment_moves` used to iterate the move dictionary, so it returned the SET of
+# moves present, emitted in fixed vocabulary order, and `_build_pattern` rendered
+# that with arrows. Every pattern therefore claimed a sequence that nothing had
+# measured. These tests pin the temporal reading and the honest rendering.
+
+
+class TestTemporalMoveChain:
+    def test_sequence_follows_the_text_not_the_vocabulary(self) -> None:
+        # "verify" precedes "backtrack" in _REASONING_MOVES, but this text does
+        # the opposite: it backtracks first, then verifies.
+        assert segment_moves("Wait, let me reconsider. Now I verify the fix.") == [
+            "backtrack",
+            "verify",
+        ]
+
+    def test_adjacent_repeats_collapse_to_one_step(self) -> None:
+        # Three verification markers in a row are one verification move.
+        moves = segment_moves("Verify this. Confirm that. Double-check it. I need to move on.")
+        assert moves == ["verify", "restate-goal"]
+
+    def test_a_later_return_to_a_move_is_kept(self) -> None:
+        # Coming BACK to a move after a different one is part of the shape.
+        assert segment_moves("Verify the output. Actually, wait. Verify it again.") == [
+            "verify",
+            "backtrack",
+            "verify",
+        ]
+
+    def test_empty_text_has_no_moves(self) -> None:
+        assert segment_moves("") == []
+
+
+class TestStrategyRendering:
+    """`_build_pattern` must not render a frequency list as if it were a chain."""
+
+    @staticmethod
+    def _pattern(cluster_moves: list[list[str]]) -> dict[str, object]:
+        from surreal_memory.engine.reasoning_distiller import _build_pattern
+
+        traces = [
+            {"content": f"trace {i}", "trace_hash": f"h{i}"} for i in range(len(cluster_moves))
+        ]
+        return _build_pattern(traces, None, cluster_moves, "m", "debugging", len(traces))
+
+    def test_shared_chain_renders_with_arrows(self) -> None:
+        strategy = str(
+            self._pattern([["backtrack", "verify"], ["backtrack", "verify"]])["strategy"]
+        )
+        assert strategy.startswith("Moves: backtrack -> verify")
+
+    def test_no_shared_chain_renders_unordered_without_arrows(self) -> None:
+        # Disjoint move sets: the LCS is empty, so there is no chain to show.
+        strategy = str(self._pattern([["verify"], ["backtrack"]])["strategy"])
+        assert strategy.startswith("Moves (unordered): ")
+        assert "->" not in strategy
+
+    def test_no_moves_at_all_says_so(self) -> None:
+        strategy = str(self._pattern([[], []])["strategy"])
+        assert strategy.startswith("Moves: (none detected)")
+        assert "->" not in strategy
+
+    def test_title_ranks_moves_by_how_many_traces_made_them(self) -> None:
+        # One verbose trace repeats verify/backtrack; two quiet traces both
+        # hypothesize. The title must follow the traces, not the repetitions.
+        pattern = self._pattern(
+            [
+                ["verify", "backtrack", "verify", "backtrack", "verify"],
+                ["hypothesize"],
+                ["hypothesize"],
+            ]
+        )
+        assert str(pattern["title"]).startswith("debugging: hypothesize")
+
+
+# 3 debugging traces whose shared TEMPORAL order is backtrack -> verify, which
+# is the reverse of the vocabulary order the old implementation would emit.
+_BACKTRACK_THEN_VERIFY_TRACES = [
+    "Wait, let me reconsider the traceback. Now I verify the exception is gone.",
+    "Hold on, let me reconsider this traceback. I verify the exception no longer fires.",
+    "Actually, let me reconsider that traceback. Verify the exception is handled.",
+]
+
+
+async def test_pattern_fiber_records_the_measured_chain(tmp_path: Path, no_embedder: None) -> None:
+    storage = InMemoryStorage()
+    storage.set_brain(BRAIN)
+    await _seed(storage, "claude-fable-5", _BACKTRACK_THEN_VERIFY_TRACES)
+
+    result = await distill_reasoning_patterns(storage, BRAIN, _ucfg(tmp_path))
+    assert result.patterns_learned == 1
+
+    fibers = await storage.find_fibers(metadata_key="_reasoning_pattern", limit=100)
+    strategy = str(fibers[0].metadata["_reasoning_strategy"])
+    assert strategy.startswith("Moves: backtrack -> verify")
