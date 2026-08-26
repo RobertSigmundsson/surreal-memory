@@ -1276,6 +1276,17 @@ class TestMoveVocabulary:
             # Phrases mined from the corpus for the moves that were dead.
             ("decompose", "Let me split this into three phases.", "The store is decomposable."),
             ("test-first", "Add a negative control before the fix.", "The tests are green."),
+            # The narrowing needs its own guard: the character class in
+            # "test[- ]first" also matched a SPACE, so a run early is not a
+            # test written first. 19 traces sat in this move on that alone.
+            (
+                "test-first",
+                "We follow a test-first discipline here.",
+                "Let me run a quick connection test first.",
+            ),
+            # "revisit" alone is deferral, not reversal — but "let me revisit"
+            # must keep matching, via the let-me-re-* alternative.
+            ("backtrack", "Let me revisit the ledger.", "Something worth a revisit later."),
         ],
     )
     def test_marker_is_the_move_not_the_discourse(
