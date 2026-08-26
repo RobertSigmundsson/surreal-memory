@@ -113,7 +113,11 @@ _REASONING_MOVES: dict[str, re.Pattern[str]] = {
         r"|sanity[- ]check|validate)\b"
     ),
     "test-first": re.compile(
-        r"(?i)(\bwrit(e|ing|ten) an? (failing )?test\b|\btest[- ]first\b|\bfailing test\b"
+        # "test-first" with a HYPHEN only: the character class [- ] also matched a
+        # space, so removing the "test (first|before)" alternative narrowed
+        # nothing for "a quick connection test first" — a test run early, not a
+        # test written first. Measured: 19 of the 37 traces stayed in.
+        r"(?i)(\bwrit(e|ing|ten) an? (failing )?test\b|\btest-first\b|\bfailing test\b"
         r"|\bred test\b|\btdd\b|\badd(ing|ed)? an? test\b|\bnegative control\b"
         # Dropped: bare "test first"/"test before" (37 traces, nearly all "a quick
         # connection test first" — a test run early, not a test written first)
@@ -135,9 +139,11 @@ _REASONING_MOVES: dict[str, re.Pattern[str]] = {
         r"|\bactually,? (no|wait|that|the|it|i)\b|\bthat'?s not right\b"
         r"|\bno[,—-] (wait|actually|that)\b"
         r"|\blet me re-?(examine|check|look|read|visit|assess|think)\b|\bon reflection\b"
-        # "revisit" alone is deferral ("something to revisit later"), not a
-        # reversal — only the first-person form is a backtrack.
-        r"|\bhmm,? (but|wait|actually)\b|\breconsider\w*\b|\blet me revisit\b"
+        # Bare "revisit" was deferral ("worth revisiting later"), not a reversal,
+        # so it is gone. No first-person replacement is added: "let me revisit"
+        # is ALREADY covered by the "let me re-?(...|visit|...)" alternative
+        # above — measured contribution of adding it separately was 0 traces.
+        r"|\bhmm,? (but|wait|actually)\b|\breconsider\w*\b"
         r"|\bchange[d]? my mind\b|\bbacktrack\w*\b)"
     ),
     "compare-alternatives": re.compile(
