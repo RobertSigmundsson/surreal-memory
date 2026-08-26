@@ -731,3 +731,62 @@ async def test_a_source_whose_every_pattern_was_already_delivered_adds_no_header
     # contributes nothing).
     assert block.count("## Reasoning strategies") == 1
     assert block.count(shared) == 1
+
+
+async def test_the_same_moves_in_a_different_order_are_not_two_strategies(
+    tmp_path: Path,
+) -> None:
+    # Two source banks hold the same three moves in different orders, and
+    # NEITHER has a measured chain — both render "(order unverified)". Serving
+    # both spends two slots on one strategy, which is what the block-level and
+    # then the literal-title dedup both missed. Measured on the live bank:
+    # four of ten slots on a sonnet route.
+    storage = InMemoryStorage()
+    storage.set_brain(BRAIN)
+    await _add_pattern(
+        storage,
+        "claude-fable-5",
+        "debugging",
+        "debugging: restate-goal, verify, backtrack",
+        "Moves: a -> b\nx",
+        1.0,
+        9,
+    )
+    await _add_pattern(
+        storage,
+        "claude-opus-5",
+        "debugging",
+        "debugging: backtrack, restate-goal, verify",
+        "Moves: b -> a\nx",
+        1.0,
+        9,
+    )
+    await _add_pattern(storage, "claude-opus-5", "planning", "planning: distinct", "s", 1.0, 8)
+
+    cfg = _ucfg(tmp_path, injection_map=(("claude-sonnet-5", "claude-fable-5,claude-opus-5"),))
+    block = await build_injection_context(storage, "claude-sonnet-5", cfg)
+
+    assert "debugging: restate-goal, verify, backtrack" in block
+    assert "debugging: backtrack, restate-goal, verify" not in block
+    assert "planning: distinct" in block  # the second source still contributes
+
+
+async def test_a_measured_order_is_still_its_own_strategy(tmp_path: Path) -> None:
+    # The mirror case: when the order WAS measured, a different route through
+    # the same moves is a genuinely different strategy and must survive.
+    storage = InMemoryStorage()
+    storage.set_brain(BRAIN)
+    await _add_pattern(
+        storage, "claude-fable-5", "debugging", "debugging: verify, backtrack", "s", 1.0, 9
+    )
+    await _add_pattern(
+        storage, "claude-opus-5", "debugging", "debugging: backtrack, verify", "s", 1.0, 9
+    )
+    for f in await storage.find_fibers(metadata_key="_reasoning_pattern", limit=10):
+        await storage.update_fiber_metadata(f.id, {"_reasoning_chain_source": "measured"})
+
+    cfg = _ucfg(tmp_path, injection_map=(("claude-sonnet-5", "claude-fable-5,claude-opus-5"),))
+    block = await build_injection_context(storage, "claude-sonnet-5", cfg)
+
+    assert "debugging: verify, backtrack" in block
+    assert "debugging: backtrack, verify" in block

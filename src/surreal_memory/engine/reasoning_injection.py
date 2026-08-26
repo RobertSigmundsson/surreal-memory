@@ -179,6 +179,30 @@ def _resolve_source_models(
 _MOVES_PREFIX = "Moves: "
 
 
+def _delivery_key(metadata: dict[str, Any]) -> str:
+    """Identity of a strategy for "did this prompt already say it".
+
+    Keying on the literal title is blind to permutation: two source banks held
+    "debugging: restate-goal, verify, backtrack" and "debugging: backtrack,
+    restate-goal, verify", and a sonnet session received both — four of its ten
+    slots spent on two strategies. Neither entry has a measured order; both
+    render "(order unverified)". Calling them different because their move
+    lists are in a different order contradicts what the render itself admits.
+
+    So: when the order WAS measured it is part of the identity — a different
+    route through the same moves is a different strategy, and that is the point
+    of measuring it. When it was not, only the SET of moves counts.
+    """
+    title = str(metadata.get("_reasoning_title", "")).strip()
+    if metadata.get("_reasoning_chain_source") == "measured":
+        return title
+    category, _, moves = title.partition(":")
+    parts = sorted(p.strip().lower() for p in moves.split(",") if p.strip())
+    if not parts:
+        return title
+    return f"{category.strip().lower()}|{'|'.join(parts)}"
+
+
 def _mark_unverified_order(metadata: dict[str, Any], strategy: str) -> str:
     """Stop a pre-measurement pattern from claiming an order nobody measured.
 
@@ -266,7 +290,7 @@ async def build_injection_context(
             f
             for f in fibers
             if f.metadata.get("_source_model") == source
-            and str(f.metadata.get("_reasoning_title", "")).strip() not in delivered
+            and _delivery_key(f.metadata) not in delivered
         ]
         if not candidates:
             continue
@@ -320,7 +344,7 @@ async def build_injection_context(
                 break
             parts.append(entry)
             total += len(entry) + 1
-            delivered.add(title)
+            delivered.add(_delivery_key(md))
         blocks.append("\n".join(parts))
 
     return "\n\n".join(blocks)
