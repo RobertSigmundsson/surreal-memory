@@ -206,11 +206,16 @@ async def build_injection_context(
             sources,
         )
 
-    def _rank(f: Any) -> float:
+    def _rank(f: Any) -> tuple[float, str, str]:
+        # Negative rank first so a plain ascending sort is best-first, then
+        # title and id as tie-breaks: find_fibers does not promise a stable row
+        # order, so without them two runs over the same bank could inject
+        # different strategies and neither would be wrong.
         md = f.metadata
-        return float(md.get("_reasoning_confidence", 0.0)) * float(
+        score = float(md.get("_reasoning_confidence", 0.0)) * float(
             md.get("_reasoning_frequency", 0.0)
         )
+        return (-score, str(md.get("_reasoning_title", "")), str(getattr(f, "id", "")))
 
     # One block per source, each with its own patterns/char budget — a model
     # mapped to several sources (learn-from-the-stronger doctrine) gets every
@@ -221,18 +226,36 @@ async def build_injection_context(
         candidates = [f for f in fibers if f.metadata.get("_source_model") == source]
         if not candidates:
             continue
-        candidates.sort(key=_rank, reverse=True)
+        candidates.sort(key=_rank)
 
-        per_category: dict[str, int] = {}
-        chosen: list[Any] = []
+        # Take the best of each category in turn, rather than the globally best
+        # five. confidence is a SHARE of a category (size / traces_in_category),
+        # so confidence x frequency reduces to size^2 / traces_in_category and
+        # systematically rewards whichever category is rarest — measured
+        # 2026-08-26, the top 8 for BOTH opus-5 and fable-5 were 8/8
+        # "verification". Only _MAX_PER_CATEGORY stopped the block from being
+        # five of the same thing; it stays here as a safety belt, but the
+        # diversity now comes from the selection itself.
+        by_category: dict[str, list[Any]] = {}
         for f in candidates:
-            category = str(f.metadata.get("_reasoning_category", ""))
-            if per_category.get(category, 0) >= _MAX_PER_CATEGORY:
-                continue
-            per_category[category] = per_category.get(category, 0) + 1
-            chosen.append(f)
-            if len(chosen) >= rt.injection_max_patterns:
+            by_category.setdefault(str(f.metadata.get("_reasoning_category", "")), []).append(f)
+
+        # dict preserves insertion order, and candidates are already best-first,
+        # so categories are visited in order of their strongest candidate.
+        chosen: list[Any] = []
+        depth = 0
+        while len(chosen) < rt.injection_max_patterns and depth < _MAX_PER_CATEGORY:
+            took_one = False
+            for items in by_category.values():
+                if depth >= len(items):
+                    continue
+                chosen.append(items[depth])
+                took_one = True
+                if len(chosen) >= rt.injection_max_patterns:
+                    break
+            if not took_one:
                 break
+            depth += 1
         if not chosen:
             continue
 

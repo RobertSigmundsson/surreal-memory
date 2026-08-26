@@ -495,3 +495,93 @@ def test_marker_dir_honors_env_override(monkeypatch: pytest.MonkeyPatch, tmp_pat
     mark_injected("sess-env")
     assert (data_dir / "reasoning_injected" / "sess-env").exists()
     assert already_injected("sess-env") is True
+
+
+# ── Round-robin across categories (audit defect 4) ───────────────────────────
+#
+# confidence is a SHARE of a category (size / traces_in_category), so ranking by
+# confidence x frequency reduces to size^2 / traces_in_category and rewards
+# whichever category is rarest. Measured 2026-08-26: the top 8 for both opus-5
+# and fable-5 were 8/8 "verification"; only the per-category cap kept the
+# injected block from being five of the same thing.
+
+
+async def test_top_slots_are_shared_across_categories(tmp_path: Path) -> None:
+    storage = InMemoryStorage()
+    storage.set_brain(BRAIN)
+    # A bank dominated by one category, with more categories than slots. Taking
+    # the globally best five spends two slots on the dominant category before
+    # reaching the fourth, so the two weakest categories never appear at all.
+    for i in range(3):
+        await _add_pattern(
+            storage, "claude-fable-5", "verification", f"verification: v{i}", "s", 1.0, 100 - i
+        )
+    for name, freq in (
+        ("debugging", 50),
+        ("planning", 40),
+        ("research", 30),
+        ("refactoring", 20),
+        ("architecture", 10),
+    ):
+        await _add_pattern(storage, "claude-fable-5", name, f"{name}: only", "s", 1.0, freq)
+
+    cfg = _ucfg(tmp_path, injection_map=(("claude-opus-*", "claude-fable-5"),))
+    block = await build_injection_context(storage, "claude-opus-4-8", cfg)
+
+    # Five slots, five different categories — one strategy each, not two of the
+    # loudest and none of the quietest.
+    assert block.count("verification:") == 1
+    for name in ("debugging", "planning", "research", "refactoring"):
+        assert f"{name}: only" in block, name
+
+
+async def test_the_per_category_safety_belt_still_holds(tmp_path: Path) -> None:
+    # Round-robin provides the diversity; _MAX_PER_CATEGORY stays as the belt.
+    storage = InMemoryStorage()
+    storage.set_brain(BRAIN)
+    for i in range(8):
+        await _add_pattern(
+            storage, "claude-fable-5", "verification", f"verification: v{i}", "s", 1.0, 100 - i
+        )
+    await _add_pattern(storage, "claude-fable-5", "debugging", "debugging: d", "s", 0.4, 2)
+
+    cfg = _ucfg(tmp_path, injection_map=(("claude-opus-*", "claude-fable-5"),))
+    block = await build_injection_context(storage, "claude-opus-4-8", cfg)
+
+    assert block.count("verification:") == 2
+    assert "debugging: d" in block
+
+
+async def test_a_single_category_bank_is_unchanged(tmp_path: Path) -> None:
+    storage = InMemoryStorage()
+    storage.set_brain(BRAIN)
+    for i in range(4):
+        await _add_pattern(
+            storage, "claude-fable-5", "debugging", f"debugging: {i}", "s", 1.0, 10 - i
+        )
+    cfg = _ucfg(tmp_path, injection_map=(("claude-opus-*", "claude-fable-5"),))
+    block = await build_injection_context(storage, "claude-opus-4-8", cfg)
+
+    # Nothing to round-robin with: the two best of the only category, as before.
+    assert block.count("debugging:") == 2
+    assert "debugging: 0" in block and "debugging: 1" in block
+
+
+async def test_selection_is_deterministic_when_ranks_tie(tmp_path: Path) -> None:
+    # Same confidence x frequency for every pattern: without an explicit
+    # tie-break the row order from storage would decide what gets injected.
+    blocks = []
+    for _ in range(3):
+        storage = InMemoryStorage()
+        storage.set_brain(BRAIN)
+        for name in ("c", "a", "b", "d"):
+            await _add_pattern(
+                storage, "claude-fable-5", "debugging", f"debugging: {name}", "s", 0.5, 4
+            )
+        cfg = _ucfg(tmp_path, injection_map=(("claude-opus-*", "claude-fable-5"),))
+        blocks.append(await build_injection_context(storage, "claude-opus-4-8", cfg))
+
+    assert blocks[0] == blocks[1] == blocks[2]
+    # Ties resolve by title, so the choice is explainable rather than incidental.
+    assert "debugging: a" in blocks[0] and "debugging: b" in blocks[0]
+    assert "debugging: c" not in blocks[0]
