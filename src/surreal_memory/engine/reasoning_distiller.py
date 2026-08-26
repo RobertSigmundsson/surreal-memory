@@ -50,6 +50,8 @@ _CLUSTER_COSINE = 0.75  # fallback only; reasoning_training.cluster_cosine wins
 _CATEGORY_COS_THRESHOLD = 0.35
 _MOVE_JACCARD = 0.6
 _CLASSIFY_CHARS = 500
+# Moves needed before a chain counts as a pattern's identity (see merge_key).
+_MIN_CHAIN_FOR_IDENTITY = 2
 _BATCH_PER_MODEL = 200
 # Ceiling on existing pattern fibers fetched for dedup/existing-count/coverage.
 # Raised from 5000 for full-corpus mining across many models (u008).
@@ -390,10 +392,19 @@ def merge_key(model: str, category: str, chain: Sequence[str], title: str) -> st
     CONTENT, so every fresh batch of traces minted a "new" pattern and the bank
     filled with duplicate titles (measured 2026-08-26: 47% of the opus-5 slots).
 
-    Falls back to the title when the cluster shares no chain: with no common
-    order, the top moves are the only stable description of what it is.
+    A chain shorter than ``_MIN_CHAIN_FOR_IDENTITY`` is NOT an identity: one
+    move is a presence, not a sequence, so "the only move both clusters share
+    is verify" says nothing about whether they are the same strategy. Those
+    fall back to the title, as an empty chain does. Measured on the live bank:
+    keying on a one-move chain would have folded 26 groups of DIFFERENT titles
+    into one — "verification: verify, restate-goal, backtrack" and
+    "verification: verify, restate-goal, gather-evidence" are not the same
+    strategy. Requiring two moves drops that to 4 groups, all of which really
+    do share a measured chain.
     """
-    spine = " -> ".join(m.strip().lower() for m in chain if m.strip())
+    spine = ""
+    if len([m for m in chain if m.strip()]) >= _MIN_CHAIN_FOR_IDENTITY:
+        spine = " -> ".join(m.strip().lower() for m in chain if m.strip())
     if not spine:
         spine = "title:" + " ".join(title.strip().lower().split())
     return f"{model.strip().lower()}|{category.strip().lower()}|{spine}"
