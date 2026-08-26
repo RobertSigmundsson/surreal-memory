@@ -90,7 +90,10 @@ _THREE_CLUSTERS = [
 
 
 def test_segment_moves_detects_closed_vocab() -> None:
-    moves = segment_moves("I need to fix it. Let me check the logs. Then I verify the result.")
+    # "I need to" used to count as restate-goal; it names the next action, not
+    # the goal, and carried 45.8% of the whole corpus (U5 calibration). The
+    # move still exists — it now needs a marker that actually restates a goal.
+    moves = segment_moves("The goal is to fix it. Let me check the logs. Then I verify the result.")
     assert "restate-goal" in moves
     assert "gather-evidence" in moves
     assert "verify" in moves
@@ -924,7 +927,7 @@ class TestTemporalMoveChain:
 
     def test_adjacent_repeats_collapse_to_one_step(self) -> None:
         # Three verification markers in a row are one verification move.
-        moves = segment_moves("Verify this. Confirm that. Double-check it. I need to move on.")
+        moves = segment_moves("Verify this. Confirm that. Double-check it. The task is to move on.")
         assert moves == ["verify", "restate-goal"]
 
     def test_a_later_return_to_a_move_is_kept(self) -> None:
@@ -1240,3 +1243,78 @@ class TestMergeArithmetic:
             _merge_pattern_into(self._fiber(3, 0.5, "s0"), self._incoming(3, 0.5, "s0"), "s0")
             is None
         )
+
+
+# ── Move vocabulary calibration (audit defect 3) ─────────────────────────────
+#
+# Four of twelve moves were effectively dead (decompose 0, test-first 0,
+# check-edge-cases 0, self-correct 1 across 295 titles) while restate-goal
+# appeared in 218 of them. The regexes matched generic discourse — an artifact
+# of base rate, not a strategy. Each pair below is one phrase the vocabulary
+# must catch and one it must NOT, both taken from the measured corpus.
+
+
+class TestMoveVocabulary:
+    @pytest.mark.parametrize(
+        ("move", "caught", "not_caught"),
+        [
+            # "i need to" fired on 45.8% of the corpus: it names the next action,
+            # not the goal.
+            ("restate-goal", "The goal is to migrate the store.", "I need to read the file."),
+            # bare "actually" fired on 31.6% and is usually emphasis.
+            ("backtrack", "Actually, wait — that is wrong.", "The value is actually 42."),
+            # bare "boundary" matched 470 times, nearly all about scope, not values.
+            (
+                "check-edge-cases",
+                "What happens if the input is an empty list?",
+                "The scope boundary between the two modules is unclear.",
+            ),
+            # "correction" as a noun was 456 of this move's 516 hits.
+            ("self-correct", "I misread the ledger.", "Correction A: the patch is fine."),
+            # "make sure" is an imperative about care, not an act of verifying.
+            ("verify", "Let me double-check the output.", "Make sure you read it."),
+            # Phrases mined from the corpus for the moves that were dead.
+            ("decompose", "Let me split this into three phases.", "The store is decomposable."),
+            ("test-first", "Add a negative control before the fix.", "The tests are green."),
+        ],
+    )
+    def test_marker_is_the_move_not_the_discourse(
+        self, move: str, caught: str, not_caught: str
+    ) -> None:
+        assert move in segment_moves(caught), f"{move} should match: {caught!r}"
+        assert move not in segment_moves(not_caught), f"{move} should NOT match: {not_caught!r}"
+
+    def test_every_move_in_the_vocabulary_still_has_a_golden_case(self) -> None:
+        """The closed vocabulary is 12 moves; none may quietly disappear."""
+        from surreal_memory.engine.reasoning_distiller import _REASONING_MOVES
+
+        assert len(_REASONING_MOVES) == 12
+
+
+class TestTitleIdf:
+    def test_a_move_the_whole_batch_makes_loses_to_a_rarer_one(self) -> None:
+        from surreal_memory.engine.reasoning_distiller import _build_pattern, _move_idf
+
+        # verify is in every trace of the batch, so it says nothing about which
+        # cluster this is; check-edge-cases is in one. Raw frequency would put
+        # verify first (2 traces vs 1) — this is how restate-goal reached 218 of
+        # 295 titles.
+        batch = [["verify", "backtrack"], ["verify", "check-edge-cases"], ["verify"], ["verify"]]
+        idf = _move_idf(batch)
+        cluster = [["verify", "backtrack"], ["verify", "check-edge-cases"]]
+        traces = [{"content": "c", "trace_hash": "h1"}, {"content": "c", "trace_hash": "h2"}]
+
+        weighted = _build_pattern(traces, None, cluster, "m", "debugging", 2, move_idf=idf)
+        raw = _build_pattern(traces, None, cluster, "m", "debugging", 2)
+
+        assert str(raw["title"]).startswith("debugging: verify")
+        assert not str(weighted["title"]).startswith("debugging: verify")
+
+    def test_idf_is_defined_even_when_every_trace_shares_a_move(self) -> None:
+        from surreal_memory.engine.reasoning_distiller import _move_idf
+
+        # log(N/df) would be exactly 0 here and erase the move from the title;
+        # the smoothed form keeps it ranked, merely discounted.
+        idf = _move_idf([["verify"], ["verify"]])
+        assert idf["verify"] > 0.0
+        assert _move_idf([]) == {}

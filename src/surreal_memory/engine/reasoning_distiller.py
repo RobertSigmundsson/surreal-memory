@@ -58,12 +58,40 @@ _BATCH_PER_MODEL = 200
 _PATTERN_FETCH_LIMIT = 20_000
 
 # ── Reasoning moves (closed vocabulary; regex discourse markers) ──────────────
+#
+# Calibrated 2026-08-26 against 35 733 real traces (per-move base rates and the
+# quoted corpus evidence behind every phrase below live in the audit trail).
+# The rule the old vocabulary broke: a marker must name the reasoning MOVE, not
+# the discourse it happens to sit in. Three examples of what that cost:
+#   * "i need to" alone fired on 45.8% of all traces and carried essentially the
+#     whole restate-goal rate (46.0%). "I need to read the wiki" states the next
+#     action, not the goal — it belongs to plan-steps if anywhere.
+#   * bare "actually" fired on 31.6% and carried backtrack (34.4%). Most of those
+#     are emphasis, not a reversal.
+#   * bare "boundary" fired 470 times inside check-edge-cases, mostly on "scope
+#     boundary" and similar — nothing to do with a boundary VALUE.
+# A move that fires on nearly every trace cannot distinguish one strategy from
+# another, which is how 218 of 295 pattern titles ended up containing
+# restate-goal. Precision first; the measured rate is reported, not forced.
 _REASONING_MOVES: dict[str, re.Pattern[str]] = {
     "restate-goal": re.compile(
-        r"(?i)\b(the goal is|the task is|i need to|we need to|objective is)\b"
+        r"(?i)(\bthe goal (is|here is|was)\b|\bthe task (is|here is|was)\b|\bobjective is\b"
+        r"|\bthe (user|robert) (wants|asked|is asking|said)\b"
+        r"|\bwhat (he|she|they) (wants|asked|is asking)\b"
+        r"|\bwhat (i'?m|we'?re) (trying|being asked) to\b"
+        r"|\bthe (ask|request|requirement|instruction) is\b|\bmy job (is|here is)\b"
+        r"|\bso,? (the|what) (goal|task|ask|question|requirement)\b"
+        r"|\brestat\w+ the (goal|task)\b|\bthe point (is|of this is)\b"
+        r"|\bwhat needs to (happen|be done)\b|\bwhat'?s being asked\b"
+        r"|\bthe question is\b|\bboils down to\b)"
     ),
     "decompose": re.compile(
-        r"(?i)\b(break (this|it) down|decompose|sub-?problem|break into|the steps are)\b"
+        r"(?i)(\bbreak (this|it|them|that) (down|into)\b|\bbreak(ing)? down\b"
+        r"|\bdecompos(e|es|ed|ing)\b|\bsub-?problems?\b|\bthe steps are\b"
+        r"|\bsplit (this|it|them|that) into\b|\bone (piece|part|step) at a time\b"
+        r"|\bin (two|three|four|five) (steps|parts|stages|phases)\b"
+        r"|\b(two|three|four|five) (separate )?(parts|pieces|stages|phases)\b"
+        r"|\bpiece by piece\b|\bsmaller (pieces|chunks|steps)\b)"
     ),
     "hypothesize": re.compile(
         r"(?i)\b(hypothes\w*|i suspect|maybe|might be|could be|perhaps|likely because)\b"
@@ -71,15 +99,35 @@ _REASONING_MOVES: dict[str, re.Pattern[str]] = {
     "gather-evidence": re.compile(
         r"(?i)\b(let me (check|look|read|grep)|looking at|the evidence|i see that|the code shows|confirmed that)\b"
     ),
-    "verify": re.compile(r"(?i)\b(verify|confirm|double-?check|make sure|ensure that|validate)\b"),
+    # Only verbs that name the ACT of verifying. Dropped: "make sure"/"ensure
+    # that" (an imperative about care, not an act), and "confirmed"/"confirms"
+    # — those report a RESULT, and "confirmed that" already belongs to
+    # gather-evidence. Keeping them pushed this move to 43.5%, outside the band.
+    "verify": re.compile(
+        r"(?i)\b(verif(y|ying|ied)|confirm|double-?check|cross-?check"
+        r"|sanity[- ]check|validate)\b"
+    ),
     "test-first": re.compile(
-        r"(?i)\b(write a test|test first|failing test|red test|tdd|add a test)\b"
+        r"(?i)(\bwrit(e|ing|ten) an? (failing )?test\b|\btest[- ]first\b|\bfailing test\b"
+        r"|\bred test\b|\btdd\b|\badd(ing|ed)? an? test\b|\bnegative control\b"
+        r"|\breproduc\w+ (test|case)\b|\bregression test\b|\btest that (fails|would fail)\b"
+        r"|\bprove it fails\b|\bmust fail on\b|\btest (first|before)\b|\bgolden (test|set|file)\b)"
     ),
     "check-edge-cases": re.compile(
-        r"(?i)\b(edge case|corner case|what if|boundary|off by one|empty (list|input)|null case|none case)\b"
+        r"(?i)(\bedge cases?\b|\bcorner cases?\b|\bboundary (case|condition)\b"
+        r"|\boff[- ]by[- ]one\b|\bempty (list|input|string|set|dict|result|response|file|output)\b"
+        r"|\bnull case\b|\bnone case\b|\bwhat happens (if|when)\b|\bwhat if\b"
+        r"|\bdegenerate case\b|\bzero[- ]length\b|\b(fails|breaks|blows up) (when|if)\b"
+        r"|\bfirst (run|call|time)\b|\bmissing (file|key|field|value)\b|\brace condition\b)"
     ),
     "backtrack": re.compile(
-        r"(?i)\b(actually|wait|let me reconsider|scratch that|on second thought|rethink|hold on)\b"
+        r"(?i)(\bwait[,.—:-]|\bhold on\b|\blet me reconsider\b|\bscratch that\b"
+        r"|\bon second thought\b|\brethink\w*\b|\bstep(ping)? back\b|\bbut actually\b"
+        r"|\bactually,? (no|wait|that|the|it|i)\b|\bthat'?s not right\b"
+        r"|\bno[,—-] (wait|actually|that)\b"
+        r"|\blet me re-?(examine|check|look|read|visit|assess|think)\b|\bon reflection\b"
+        r"|\bhmm,? (but|wait|actually)\b|\breconsider\w*\b|\brevisit(ing)?\b"
+        r"|\bchange[d]? my mind\b|\bbacktrack\w*\b)"
     ),
     "compare-alternatives": re.compile(
         r"(?i)\b(option [a-z0-9]|alternative|versus|vs\.?|instead of|trade-?off|on the other hand|compared to)\b"
@@ -87,8 +135,14 @@ _REASONING_MOVES: dict[str, re.Pattern[str]] = {
     "plan-steps": re.compile(
         r"(?i)\b(my plan|the approach|step \d|next,? i|i'?ll (start|do|then)|let me first)\b"
     ),
+    # Bare "correction" was 456 of this move's 516 hits and is almost always a
+    # noun about someone else's fix ("Correction A:", "without the correction"),
+    # not the author admitting an error.
     "self-correct": re.compile(
-        r"(?i)\b(i was wrong|correction|that'?s incorrect|my mistake|got it wrong|oops)\b"
+        r"(?i)(\bi was wrong\b|\bthat'?s incorrect\b|\bmy (mistake|error)\b|\bgot it wrong\b"
+        r"|\boops\b|\bi mis(read|understood|counted|took|stated)\b|\bcorrecting myself\b"
+        r"|\bi'?d claimed\b|\bmy (earlier|previous) (claim|assumption|reading|statement) was wrong\b"
+        r"|\bi owe (you|him) a correction\b)"
     ),
     "summarize-decision": re.compile(
         r"(?i)\b(in summary|to summarize|conclusion|so i'?ll|decided to|the decision|therefore)\b"
@@ -326,6 +380,21 @@ def _cluster(
     return list(uf.groups().values())
 
 
+def _move_idf(moves_per_trace: list[list[str]]) -> dict[str, float]:
+    """Inverse document frequency of each move across a batch of traces.
+
+    ``log(1 + N/df)`` rather than ``log(N/df)``: a move every trace in the batch
+    makes would otherwise score exactly zero, and a small batch where all traces
+    share their moves would produce no title at all. Smoothed, ubiquity is
+    heavily discounted but still ordered.
+    """
+    n = len(moves_per_trace)
+    if not n:
+        return {}
+    df = Counter(m for moves in moves_per_trace for m in set(moves))
+    return {move: math.log(1.0 + n / count) for move, count in df.items()}
+
+
 def _build_pattern(
     cluster_traces: list[dict[str, Any]],
     cluster_vectors: list[list[float]] | None,
@@ -333,6 +402,8 @@ def _build_pattern(
     model: str,
     category: str,
     traces_in_category: int,
+    *,
+    move_idf: dict[str, float] | None = None,
 ) -> dict[str, Any]:
     size = len(cluster_traces)
     if cluster_vectors:
@@ -347,7 +418,19 @@ def _build_pattern(
     # may revisit a move, so the raw Counter would let a single verbose trace
     # decide the title.
     move_counts = Counter(m for moves in cluster_moves for m in dict.fromkeys(moves))
-    top_moves = [m for m, _ in move_counts.most_common(3)]
+    # Weight by IDF over the batch this cluster came from. Raw frequency lets
+    # the commonest move win every title, which is how "restate-goal" reached
+    # 218 of 295 titles while saying nothing about what distinguishes one
+    # strategy from another. A move that half the batch makes carries half the
+    # information of one only this cluster makes. Ties break on the move name so
+    # two runs over the same batch title a pattern the same way.
+    idf = move_idf or {}
+    top_moves = [
+        m
+        for m, _ in sorted(
+            move_counts.items(), key=lambda kv: (-(kv[1] * idf.get(kv[0], 1.0)), kv[0])
+        )[:3]
+    ]
     title = f"{category}: " + ", ".join(top_moves) if top_moves else category
 
     lcs = _lcs_all(cluster_moves)
@@ -753,6 +836,7 @@ async def _process_model_batch(
         for t in traces
     ]
     moves_list = [segment_moves(str(t.get("content", ""))) for t in traces]
+    move_idf = _move_idf(moves_list)
     vectors = await _embed_texts(embedder, clf_texts)
     categories = [
         _classify_by_vector(vectors[i], seeds)
@@ -792,7 +876,13 @@ async def _process_model_batch(
             cluster_vecs = [sub_vectors[k] for k in local_cluster] if sub_vectors else None
             cluster_moves = [sub_moves[k] for k in local_cluster]
             pattern = _build_pattern(
-                cluster_traces, cluster_vecs, cluster_moves, model, category, len(idxs)
+                cluster_traces,
+                cluster_vecs,
+                cluster_moves,
+                model,
+                category,
+                len(idxs),
+                move_idf=move_idf,
             )
             if namer is not None:
                 # Prose only: the signature is already fixed by the cluster's
