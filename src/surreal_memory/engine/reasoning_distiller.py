@@ -25,6 +25,7 @@ import math
 import os
 import re
 from collections import Counter
+from collections.abc import Sequence
 from dataclasses import dataclass, replace
 from fnmatch import fnmatch
 from typing import TYPE_CHECKING, Any
@@ -374,7 +375,88 @@ def _build_pattern(
         "confidence": round(confidence, 4),
         "frequency": size,
         "signature": signature,
+        # The measured chain, kept structured so the merge gate can key on it
+        # without re-parsing the rendered strategy line.
+        "chain": list(lcs),
     }
+
+
+def merge_key(model: str, category: str, chain: Sequence[str], title: str) -> str:
+    """Semantic identity of a pattern: model + category + the move chain.
+
+    Two clusters that reach the same conclusion by the same route ARE the same
+    strategy, however many distinct traces produced them. The old identity was
+    ``sha256(model:category:trace_hashes)`` — addressed by the cluster's exact
+    CONTENT, so every fresh batch of traces minted a "new" pattern and the bank
+    filled with duplicate titles (measured 2026-08-26: 47% of the opus-5 slots).
+
+    Falls back to the title when the cluster shares no chain: with no common
+    order, the top moves are the only stable description of what it is.
+    """
+    spine = " -> ".join(m.strip().lower() for m in chain if m.strip())
+    if not spine:
+        spine = "title:" + " ".join(title.strip().lower().split())
+    return f"{model.strip().lower()}|{category.strip().lower()}|{spine}"
+
+
+def chain_from_strategy(strategy: str) -> list[str]:
+    """Recover the move chain from a stored ``_reasoning_strategy`` line.
+
+    Needed for fibers written before the chain was stored structurally. Only a
+    "Moves: a -> b" line carries a chain; "Moves (unordered): ..." and
+    "Moves: (none detected)" mean there was none, and say so.
+    """
+    if not strategy:
+        return []
+    first = strategy.splitlines()[0]
+    prefix = "Moves: "
+    if not first.startswith(prefix):
+        return []
+    body = first[len(prefix) :].strip()
+    if not body or body == "(none detected)":
+        return []
+    return [part.strip() for part in body.split("->") if part.strip()]
+
+
+def _merge_pattern_into(fiber: Fiber, pattern: dict[str, Any], sig: str) -> Fiber | None:
+    """Fold *pattern* into an existing twin fiber. None when it is already in.
+
+    Returning None on a signature we already carry is what keeps distillation
+    idempotent: replaying a batch must change nothing.
+    """
+    md = dict(fiber.metadata)
+    sigs = [str(s) for s in (md.get("_reasoning_signatures") or [])]
+    if not sigs and md.get("_reasoning_signature"):
+        sigs = [str(md["_reasoning_signature"])]
+    if sig in sigs:
+        return None
+    sigs.append(sig)
+
+    old_freq = int(md.get("_reasoning_frequency", 0) or 0)
+    new_freq = int(pattern["frequency"])
+    old_conf = float(md.get("_reasoning_confidence", 0.0) or 0.0)
+    new_conf = float(pattern["confidence"])
+    total = old_freq + new_freq
+    # Confidence is a SHARE of a category, so the two estimates have different
+    # denominators and cannot simply be added or maxed: max() lets one small,
+    # fully-clustered batch pin the pattern at 1.0 forever, and injection ranks
+    # by confidence x frequency. Weight each estimate by the traces behind it.
+    conf = (
+        ((old_conf * old_freq) + (new_conf * new_freq)) / total
+        if total
+        else max(old_conf, new_conf)
+    )
+
+    md["_reasoning_signatures"] = sigs
+    md["_reasoning_frequency"] = total
+    md["_reasoning_confidence"] = round(min(1.0, conf), 4)
+    if new_conf > old_conf:
+        # Describe the pattern with its better-supported cluster. Title and
+        # summary stay: they are this fiber's identity and the content of its
+        # anchor CONCEPT neuron, which merging must not orphan.
+        md["_reasoning_description"] = pattern["description"]
+        md["_reasoning_strategy"] = pattern["strategy"]
+    return replace(fiber, metadata=md)
 
 
 async def _find_or_create_concept(
@@ -392,15 +474,30 @@ async def _materialize_pattern(
     storage: NeuralStorage,
     pattern: dict[str, Any],
     existing_sigs: set[str],
-) -> bool:
-    """Create a fiber + CONCEPT neuron + EFFECTIVE_FOR synapse for *pattern*.
+    existing_by_key: dict[str, Fiber],
+) -> str:
+    """Create — or MERGE INTO — the pattern fiber for *pattern*.
 
-    Idempotent by ``_reasoning_signature``: returns False (no-op) if the pattern
-    was already materialized.
+    Returns ``"created"``, ``"merged"`` or ``"noop"``. Idempotent twice over:
+    by ``_reasoning_signature`` (this exact cluster was already materialized)
+    and by ``merge_key`` (an equivalent strategy already has a fiber, so this
+    cluster is folded into it instead of minting a near-duplicate).
     """
     sig = pattern["signature"]
     if sig in existing_sigs:
-        return False
+        return "noop"
+
+    key = merge_key(
+        pattern["model"], pattern["category"], pattern.get("chain") or (), pattern["title"]
+    )
+    twin = existing_by_key.get(key)
+    if twin is not None:
+        merged = _merge_pattern_into(twin, pattern, sig)
+        if merged is None:
+            return "noop"
+        await storage.update_fiber(merged)
+        existing_by_key[key] = merged
+        return "merged"
 
     category_nid = await _find_or_create_concept(
         storage, f"reasoning_category:{pattern['category']}", {"_reasoning_category_concept": True}
@@ -442,6 +539,11 @@ async def _materialize_pattern(
             "_reasoning_frequency": pattern["frequency"],
             "_reasoning_confidence": pattern["confidence"],
             "_reasoning_signature": sig,
+            # Every cluster folded into this fiber, so a replayed batch is a
+            # no-op and the retro-merge can account for what it absorbed.
+            "_reasoning_signatures": [sig],
+            "_reasoning_chain": list(pattern.get("chain") or ()),
+            "_reasoning_merge_key": key,
         },
     )
     # Patterns are activated only by injection (which may be OFF); unpinned they
@@ -449,7 +551,8 @@ async def _materialize_pattern(
     # trained KB (doc_trainer) so lifecycle skips their neurons and fibers.
     fiber = replace(fiber, pinned=True)
     await storage.add_fiber(fiber)
-    return True
+    existing_by_key[key] = fiber
+    return "created"
 
 
 _LOCAL_SAFE_PROVIDERS: tuple[str, ...] = ("openai", "openrouter", "bge_m3")
@@ -607,6 +710,10 @@ class DistillResult:
     patterns_learned: int = 0
     traces_processed: int = 0
     models_seen: int = 0
+    # Clusters folded into an existing pattern instead of minting a duplicate.
+    # Counted separately from patterns_learned: a merge is work done, and a run
+    # that only merges must not be reportable as a run that did nothing.
+    patterns_merged: int = 0
 
 
 async def _process_model_batch(
@@ -618,10 +725,11 @@ async def _process_model_batch(
     embedder: EmbeddingProvider | None,
     seeds: dict[str, list[float]] | None,
     existing_sigs: set[str],
+    existing_by_key: dict[str, Fiber],
     budget: int,
     namer: PatternNamer | None = None,
-) -> tuple[int, list[Any]]:
-    """Distill one model's trace batch. Returns (patterns_created, consumed_ids).
+) -> tuple[int, int, list[Any]]:
+    """Distill one model's trace batch. Returns (created, merged, consumed_ids).
 
     ``consumed_ids`` are the traces safe to mark processed: ``other`` traces,
     under-support categories, and every category fully clustered before this
@@ -652,6 +760,7 @@ async def _process_model_batch(
             by_category.setdefault(cat, []).append(i)
 
     created = 0
+    merged = 0
     for category, idxs in by_category.items():
         if created >= budget:
             break  # budget reached before this category → leave its traces unprocessed
@@ -678,13 +787,20 @@ async def _process_model_batch(
                 # Prose only: the signature is already fixed by the cluster's
                 # trace hashes, so naming cannot fork a pattern into a duplicate.
                 pattern = await namer.rename(pattern, cluster_traces)
-            if await _materialize_pattern(storage, pattern, existing_sigs):
+            outcome = await _materialize_pattern(storage, pattern, existing_sigs, existing_by_key)
+            if outcome != "noop":
                 existing_sigs.add(pattern["signature"])
+            if outcome == "created":
                 created += 1
+            elif outcome == "merged":
+                # A merge fills no new slot, so it must not spend budget —
+                # that is the point: folding duplicates frees room for genuinely
+                # new strategies under an unchanged pattern_targets.
+                merged += 1
         if capped_mid_category:
             break  # do NOT consume this category's traces — revisit next run
         consumed.extend(traces[i]["id"] for i in idxs)
-    return created, consumed
+    return created, merged, consumed
 
 
 async def distill_reasoning_patterns(
@@ -728,11 +844,24 @@ async def distill_reasoning_patterns(
     existing = await storage.find_fibers(
         metadata_key="_reasoning_pattern", limit=_PATTERN_FETCH_LIMIT
     )
-    existing_sigs = {
-        str(f.metadata.get("_reasoning_signature"))
-        for f in existing
-        if f.metadata.get("_reasoning_signature")
-    }
+    existing_sigs: set[str] = set()
+    existing_by_key: dict[str, Fiber] = {}
+    for f in existing:
+        md = f.metadata
+        if md.get("_reasoning_signature"):
+            existing_sigs.add(str(md["_reasoning_signature"]))
+        existing_sigs.update(str(s) for s in (md.get("_reasoning_signatures") or ()))
+        # Fibers written before the chain was stored structurally carry it only
+        # in the rendered strategy line — recover it there rather than treating
+        # the whole legacy bank as unmergeable.
+        key = str(md.get("_reasoning_merge_key") or "") or merge_key(
+            str(md.get("_source_model") or ""),
+            str(md.get("_reasoning_category") or ""),
+            chain_from_strategy(str(md.get("_reasoning_strategy") or "")),
+            str(md.get("_reasoning_title") or ""),
+        )
+        existing_by_key.setdefault(key, f)
+
     existing_by_model: dict[str, int] = {}
     for f in existing:
         source_model = f.metadata.get("_source_model")
@@ -740,6 +869,7 @@ async def distill_reasoning_patterns(
             existing_by_model[str(source_model)] = existing_by_model.get(str(source_model), 0) + 1
 
     patterns_created = 0
+    patterns_merged = 0
     processed_ids: list[Any] = []
     models = await storage.get_reasoning_trace_models(brain_id)
     if rt.mining_models:
@@ -776,7 +906,7 @@ async def distill_reasoning_patterns(
                 traces = traces[:_BATCH_PER_MODEL]
                 if not traces:
                     break  # backlog for this model exhausted
-                created, consumed = await _process_model_batch(
+                created, merged, consumed = await _process_model_batch(
                     storage,
                     brain_id,
                     rt,
@@ -785,10 +915,12 @@ async def distill_reasoning_patterns(
                     embedder,
                     seeds,
                     existing_sigs,
+                    existing_by_key,
                     budget,
                     namer,
                 )
                 patterns_created += created
+                patterns_merged += merged
                 budget -= created
                 if consumed:
                     processed_ids.extend(consumed)
@@ -817,6 +949,7 @@ async def distill_reasoning_patterns(
         patterns_learned=patterns_created,
         traces_processed=len(processed_ids),
         models_seen=models_total,
+        patterns_merged=patterns_merged,
     )
 
 

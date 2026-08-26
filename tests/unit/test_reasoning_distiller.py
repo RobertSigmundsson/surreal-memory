@@ -397,8 +397,8 @@ async def test_drain_terminates_when_a_batch_makes_no_progress(
 ) -> None:
     # If a batch consumes nothing (pathological no-forward-progress), the drain
     # loop must break rather than re-fetch the same traces forever.
-    async def _no_progress(*_a: object, **_k: object) -> tuple[int, list[object]]:
-        return 0, []
+    async def _no_progress(*_a: object, **_k: object) -> tuple[int, int, list[object]]:
+        return 0, 0, []  # (created, merged, consumed)
 
     monkeypatch.setattr(
         "surreal_memory.engine.reasoning_distiller._process_model_batch", _no_progress
@@ -1001,3 +1001,231 @@ async def test_pattern_fiber_records_the_measured_chain(tmp_path: Path, no_embed
     fibers = await storage.find_fibers(metadata_key="_reasoning_pattern", limit=100)
     strategy = str(fibers[0].metadata["_reasoning_strategy"])
     assert strategy.startswith("Moves: backtrack -> verify")
+
+
+# ── Merge gate: one strategy, one fiber (audit defect 1) ─────────────────────
+#
+# The pattern signature was sha256(model:category:trace_hashes) — addressed by
+# the cluster's CONTENT — so every fresh batch of traces minted a "new" pattern
+# even when it described the same strategy. Measured 2026-08-26: 47% of the
+# opus-5 slots were duplicate titles, and injection served the same strategy
+# twice in one 5-slot block.
+
+
+async def _seed_batch(
+    storage: InMemoryStorage, model: str, prefix: str, contents: list[str]
+) -> None:
+    """Seed traces under a distinct hash prefix, so batches never collide."""
+    await storage.insert_reasoning_traces(
+        BRAIN,
+        [
+            {
+                "trace_hash": f"{prefix}-{i}",
+                "model": model,
+                "session_id": "s",
+                "project": "p",
+                "task_context": "",
+                "content": c,
+                "content_chars": len(c),
+                "created_at": "2026-03-01T00:00:00",
+            }
+            for i, c in enumerate(contents)
+        ],
+    )
+
+
+# Two disjoint trace sets that describe the SAME strategy: debugging, and the
+# text moves backtrack -> verify in both.
+_MERGE_BATCH_A = [
+    "Wait, let me reconsider the traceback. Now I verify the exception is gone.",
+    "Hold on, let me reconsider this traceback. I verify the exception stopped.",
+    "Actually, let me reconsider that traceback. Verify the exception is handled.",
+]
+_MERGE_BATCH_B = [
+    "Hold on, rethink this bug. Then validate the crash is gone for good.",
+    "Wait, rethink the bug here. Then validate the crash no longer happens.",
+    "Actually, rethink that bug. Then validate the crash is fixed properly.",
+]
+# Same category, same moves, OPPOSITE order — a different strategy, not a dupe.
+_MERGE_BATCH_REVERSED = [
+    "Verify the traceback first. Actually, let me reconsider the exception.",
+    "Verify this traceback now. Wait, let me reconsider that exception.",
+    "Verify that traceback again. Hold on, let me reconsider the exception.",
+]
+
+
+async def test_same_strategy_from_two_trace_sets_merges_into_one_fiber(
+    tmp_path: Path, no_embedder: None
+) -> None:
+    storage = InMemoryStorage()
+    storage.set_brain(BRAIN)
+    cfg = _ucfg(tmp_path)
+
+    await _seed_batch(storage, "claude-fable-5", "a", _MERGE_BATCH_A)
+    first = await distill_reasoning_patterns(storage, BRAIN, cfg)
+    assert first.patterns_learned == 1
+
+    await _seed_batch(storage, "claude-fable-5", "b", _MERGE_BATCH_B)
+    second = await distill_reasoning_patterns(storage, BRAIN, cfg)
+
+    # THE defect, asserted first and using no new API, so that on pre-change
+    # code this test fails for the RIGHT reason: the bank used to grow a second
+    # fiber for a strategy it already held.
+    fibers = await storage.find_fibers(metadata_key="_reasoning_pattern", limit=100)
+    assert len(fibers) == 1
+    md = fibers[0].metadata
+    assert md["_reasoning_frequency"] == 6  # 3 + 3, summed
+    # ...and it folded in rather than forking a near-duplicate.
+    assert second.patterns_learned == 0
+    assert second.patterns_merged == 1
+    assert len(md["_reasoning_signatures"]) == 2  # both clusters accounted for
+    assert md["_reasoning_chain"] == ["backtrack", "verify"]
+    # Fields injection reads must survive a merge.
+    for key in (
+        "_reasoning_title",
+        "_reasoning_description",
+        "_reasoning_strategy",
+        "_reasoning_confidence",
+        "_source_model",
+        "_reasoning_category",
+    ):
+        assert md.get(key), key
+
+
+async def test_a_different_move_order_is_a_different_pattern(
+    tmp_path: Path, no_embedder: None
+) -> None:
+    storage = InMemoryStorage()
+    storage.set_brain(BRAIN)
+    cfg = _ucfg(tmp_path)
+
+    await _seed_batch(storage, "claude-fable-5", "a", _MERGE_BATCH_A)
+    await distill_reasoning_patterns(storage, BRAIN, cfg)
+    await _seed_batch(storage, "claude-fable-5", "r", _MERGE_BATCH_REVERSED)
+    second = await distill_reasoning_patterns(storage, BRAIN, cfg)
+
+    assert second.patterns_learned == 1  # verify -> backtrack is its own strategy
+    fibers = await storage.find_fibers(metadata_key="_reasoning_pattern", limit=100)
+    assert len(fibers) == 2
+    assert {tuple(f.metadata["_reasoning_chain"]) for f in fibers} == {
+        ("backtrack", "verify"),
+        ("verify", "backtrack"),
+    }
+
+
+async def test_replaying_the_same_batch_changes_nothing(tmp_path: Path, no_embedder: None) -> None:
+    storage = InMemoryStorage()
+    storage.set_brain(BRAIN)
+    cfg = _ucfg(tmp_path)
+
+    await _seed_batch(storage, "claude-fable-5", "a", _MERGE_BATCH_A)
+    await distill_reasoning_patterns(storage, BRAIN, cfg)
+    before = (await storage.find_fibers(metadata_key="_reasoning_pattern", limit=100))[0]
+
+    # Re-open the same traces and distill again: same cluster, same signature.
+    await storage.reset_reasoning_traces_processed(BRAIN)
+    replay = await distill_reasoning_patterns(storage, BRAIN, cfg)
+
+    assert (replay.patterns_learned, replay.patterns_merged) == (0, 0)
+    after = await storage.find_fibers(metadata_key="_reasoning_pattern", limit=100)
+    assert len(after) == 1
+    assert after[0].metadata["_reasoning_frequency"] == before.metadata["_reasoning_frequency"]
+    assert after[0].metadata["_reasoning_signatures"] == before.metadata["_reasoning_signatures"]
+
+
+class TestMergeKey:
+    def test_chain_identifies_the_pattern(self) -> None:
+        from surreal_memory.engine.reasoning_distiller import merge_key
+
+        a = merge_key("claude-fable-5", "debugging", ["backtrack", "verify"], "t1")
+        b = merge_key("Claude-Fable-5", "Debugging", ["Backtrack", "Verify"], "t2")
+        assert a == b  # case and title do not fork a pattern
+
+    def test_reversed_chain_is_a_different_key(self) -> None:
+        from surreal_memory.engine.reasoning_distiller import merge_key
+
+        assert merge_key("m", "c", ["a", "b"], "t") != merge_key("m", "c", ["b", "a"], "t")
+
+    def test_without_a_chain_the_title_identifies_the_pattern(self) -> None:
+        from surreal_memory.engine.reasoning_distiller import merge_key
+
+        assert merge_key("m", "c", [], "same title") == merge_key("m", "c", [], "Same   Title")
+        assert merge_key("m", "c", [], "one") != merge_key("m", "c", [], "two")
+
+    def test_chain_is_recovered_from_a_legacy_strategy_line(self) -> None:
+        from surreal_memory.engine.reasoning_distiller import chain_from_strategy
+
+        assert chain_from_strategy("Moves: a -> b -> c\nmedoid text") == ["a", "b", "c"]
+        assert chain_from_strategy("Moves (unordered): a, b\ntext") == []
+        assert chain_from_strategy("Moves: (none detected)\ntext") == []
+        assert chain_from_strategy("Moves: \ntext") == []
+        assert chain_from_strategy("") == []
+
+
+class TestMergeArithmetic:
+    @staticmethod
+    def _fiber(freq: int, conf: float, sig: str = "s0") -> object:
+        from surreal_memory.core.fiber import Fiber
+
+        return Fiber.create(
+            neuron_ids={"n1"},
+            synapse_ids=set(),
+            anchor_neuron_id="n1",
+            summary="title",
+            metadata={
+                "_reasoning_pattern": True,
+                "_reasoning_frequency": freq,
+                "_reasoning_confidence": conf,
+                "_reasoning_signature": sig,
+                "_reasoning_signatures": [sig],
+                "_reasoning_title": "title",
+                "_reasoning_description": "old description",
+                "_reasoning_strategy": "old strategy",
+            },
+        )
+
+    @staticmethod
+    def _incoming(freq: int, conf: float, sig: str = "s1") -> dict[str, object]:
+        return {
+            "model": "m",
+            "category": "c",
+            "title": "new title",
+            "description": "new description",
+            "strategy": "new strategy",
+            "confidence": conf,
+            "frequency": freq,
+            "signature": sig,
+            "chain": ["a", "b"],
+        }
+
+    def test_confidence_is_weighted_by_the_traces_behind_it(self) -> None:
+        from surreal_memory.engine.reasoning_distiller import _merge_pattern_into
+
+        merged = _merge_pattern_into(self._fiber(9, 0.3), self._incoming(1, 1.0), "s1")
+        assert merged is not None
+        # (0.3*9 + 1.0*1) / 10 = 0.37 — one tiny fully-clustered batch must not
+        # pin the pattern at 1.0, because injection ranks by confidence x frequency.
+        assert merged.metadata["_reasoning_confidence"] == 0.37
+        assert merged.metadata["_reasoning_frequency"] == 10
+
+    def test_the_better_supported_cluster_describes_the_pattern(self) -> None:
+        from surreal_memory.engine.reasoning_distiller import _merge_pattern_into
+
+        better = _merge_pattern_into(self._fiber(2, 0.2), self._incoming(2, 0.9), "s1")
+        assert better is not None
+        assert better.metadata["_reasoning_strategy"] == "new strategy"
+        # Title/summary stay: they are the fiber's identity and its anchor neuron.
+        assert better.metadata["_reasoning_title"] == "title"
+        assert better.summary == "title"
+
+        worse = _merge_pattern_into(self._fiber(2, 0.9), self._incoming(2, 0.2), "s1")
+        assert worse is not None
+        assert worse.metadata["_reasoning_strategy"] == "old strategy"
+
+    def test_a_signature_already_carried_is_a_no_op(self) -> None:
+        from surreal_memory.engine.reasoning_distiller import _merge_pattern_into
+
+        assert (
+            _merge_pattern_into(self._fiber(3, 0.5, "s0"), self._incoming(3, 0.5, "s0"), "s0")
+            is None
+        )
