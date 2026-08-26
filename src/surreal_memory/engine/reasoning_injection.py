@@ -254,8 +254,20 @@ async def build_injection_context(
     # bank fully, not the first bank crowding out the rest. A source with no
     # patterns contributes nothing (no empty headers).
     blocks: list[str] = []
+    # Titles already delivered by an earlier block of THIS payload. Two source
+    # models converge on the same strategy often enough that a sonnet session
+    # was measurably served "debugging: restate-goal, verify, backtrack" twice
+    # in one prompt — once per block. Each source still gets its own block and
+    # its own budget (multi-source doctrine); it just does not spend a slot on
+    # a strategy the session is already holding.
+    delivered: set[str] = set()
     for source in sources:
-        candidates = [f for f in fibers if f.metadata.get("_source_model") == source]
+        candidates = [
+            f
+            for f in fibers
+            if f.metadata.get("_source_model") == source
+            and str(f.metadata.get("_reasoning_title", "")).strip() not in delivered
+        ]
         if not candidates:
             continue
         candidates.sort(key=_rank)
@@ -308,6 +320,7 @@ async def build_injection_context(
                 break
             parts.append(entry)
             total += len(entry) + 1
+            delivered.add(title)
         blocks.append("\n".join(parts))
 
     return "\n\n".join(blocks)
