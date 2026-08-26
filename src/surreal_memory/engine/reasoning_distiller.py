@@ -208,10 +208,32 @@ def _cosine(a: list[float], b: list[float]) -> float:
 
 
 def segment_moves(text: str) -> list[str]:
-    """Return the reasoning moves present in *text*, in closed-vocabulary order."""
+    """Return the reasoning moves in *text* as a TEMPORAL sequence.
+
+    Moves are ordered by where their marker actually occurs in the text, and
+    an immediately repeated move is collapsed into one step (a trace that says
+    "verify" three times in a row made one verification move, not three).
+    A move that recurs LATER, after a different move, is kept: coming back to
+    it is part of the shape of the reasoning.
+
+    This used to iterate ``_REASONING_MOVES`` and return every move whose
+    pattern matched anywhere — a SET of present moves, emitted in fixed
+    vocabulary order. Downstream rendered that as "a -> b -> c", so every
+    pattern claimed a chain while nothing in the pipeline had ever measured
+    order. Ties (two markers at the same offset) fall back to vocabulary order
+    so the sequence stays deterministic.
+    """
     if not text:
         return []
-    return [move for move, pattern in _REASONING_MOVES.items() if pattern.search(text)]
+    hits: list[tuple[int, int, str]] = []
+    for rank, (move, pattern) in enumerate(_REASONING_MOVES.items()):
+        hits.extend((match.start(), rank, move) for match in pattern.finditer(text))
+    hits.sort()
+    sequence: list[str] = []
+    for _, _, move in hits:
+        if not sequence or sequence[-1] != move:
+            sequence.append(move)
+    return sequence
 
 
 def _classify_by_vector(vec: list[float], seeds: dict[str, list[float]]) -> str:
@@ -316,13 +338,27 @@ def _build_pattern(
         mi = max(range(size), key=lambda i: len(str(cluster_traces[i].get("content", ""))))
     medoid_content = str(cluster_traces[mi].get("content", ""))
 
-    move_counts = Counter(m for moves in cluster_moves for m in moves)
+    # Count each move ONCE per trace: the title ranks "how many traces of this
+    # cluster made this move", which is the document frequency, not how often a
+    # marker fires inside one trace. segment_moves now returns a sequence that
+    # may revisit a move, so the raw Counter would let a single verbose trace
+    # decide the title.
+    move_counts = Counter(m for moves in cluster_moves for m in dict.fromkeys(moves))
     top_moves = [m for m, _ in move_counts.most_common(3)]
     title = f"{category}: " + ", ".join(top_moves) if top_moves else category
 
     lcs = _lcs_all(cluster_moves)
-    strategy_moves = " -> ".join(lcs) if lcs else " -> ".join(top_moves)
-    strategy = f"Moves: {strategy_moves}\n{medoid_content[:400]}"[:600]
+    if lcs:
+        moves_line = "Moves: " + " -> ".join(lcs)
+    elif top_moves:
+        # No move ORDER is shared across the cluster. Rendering the frequency
+        # top-3 with arrows anyway made "no common chain" byte-identical to a
+        # measured chain, so the reader could not tell them apart. Say which
+        # one this is.
+        moves_line = "Moves (unordered): " + ", ".join(top_moves)
+    else:
+        moves_line = "Moves: (none detected)"
+    strategy = f"{moves_line}\n{medoid_content[:400]}"[:600]
 
     confidence = min(1.0, size / traces_in_category) if traces_in_category else 0.0
     # Signature keys on the cluster's exact trace set (not the display title) so
