@@ -579,6 +579,47 @@ class TraceConfig:
 
 
 @dataclass(frozen=True)
+class PromptRecallConfig:
+    """Recall memories RELEVANT TO THE PROMPT, at the one moment a query exists.
+
+    SessionStart can only list the newest memories for the project — it fires
+    before the user has said anything, so it has nothing to search with. The
+    result, measured on this brain: 51% of neurons never accessed and recall
+    confidence at 20%, because nothing ever asks "what do we know about THIS".
+
+    UserPromptSubmit is the only hook that holds the question. Enabling this
+    turns each prompt into a query against memory instead of a redelivery of
+    whatever happens to be newest.
+
+    Opt-in and bounded on purpose: it runs on every turn, so it must never make
+    the user wait (``timeout_seconds``), never crowd the context
+    (``max_tokens``), and never burn a query on "ok" (``min_prompt_chars``).
+    """
+
+    enabled: bool = False  # opt-in; default keeps prompt latency untouched
+    min_prompt_chars: int = 40  # below this there is nothing worth searching for
+    max_tokens: int = 600  # hard ceiling on injected context
+    timeout_seconds: float = 5.0  # memory never blocks the prompt
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "enabled": self.enabled,
+            "min_prompt_chars": self.min_prompt_chars,
+            "max_tokens": self.max_tokens,
+            "timeout_seconds": self.timeout_seconds,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> PromptRecallConfig:
+        return cls(
+            enabled=bool(data.get("enabled", False)),
+            min_prompt_chars=int(data.get("min_prompt_chars", 40)),
+            max_tokens=int(data.get("max_tokens", 600)),
+            timeout_seconds=float(data.get("timeout_seconds", 5.0)),
+        )
+
+
+@dataclass(frozen=True)
 class MaintenanceConfig:
     """Proactive brain maintenance configuration.
 
@@ -1898,6 +1939,9 @@ class UnifiedConfig:
     # Reasoning-training (mining reasoning traces + injection; opt-in, off by default)
     reasoning_training: ReasoningTrainingConfig = field(default_factory=ReasoningTrainingConfig)
 
+    # Per-prompt memory recall in the UserPromptSubmit hook (opt-in, off by default)
+    prompt_recall: PromptRecallConfig = field(default_factory=PromptRecallConfig)
+
     # CLI preferences
     json_output: bool = False
     default_depth: int | None = None
@@ -1997,6 +2041,7 @@ class UnifiedConfig:
             budget=BudgetRetrievalConfig.from_dict(data.get("budget", {})),
             trace=TraceConfig.from_dict(data.get("trace", {})),
             reasoning_training=_load_reasoning_settings(data.get("reasoning_training", {})),
+            prompt_recall=PromptRecallConfig.from_dict(data.get("prompt_recall", {})),
             json_output=data.get("cli", {}).get("json_output", False),
             default_depth=data.get("cli", {}).get("default_depth"),
             default_max_tokens=data.get("cli", {}).get("default_max_tokens", 500),
