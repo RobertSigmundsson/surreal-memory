@@ -100,6 +100,15 @@ async def get_prompt_recall(hook_input: dict[str, Any]) -> str:
         context = (result.context or "").strip()
         if not context:
             return ""
+        # The pipeline formats its own "## Relevant Memories" heading. Keeping it
+        # under ours put two headings on every single prompt, which is noise the
+        # user pays for each turn — drop the inner one and keep the heading that
+        # says WHY this block is here.
+        first, sep, rest = context.partition("\n")
+        if first.strip().lower().startswith("## relevant memories"):
+            context = rest.strip() if sep else ""
+            if not context:
+                return ""
         # ReflexPipeline treats max_tokens as a TARGET, not a ceiling: measured on
         # this brain it overshoots by ~70% consistently (100 -> 174, 600 -> 1009,
         # 4000 -> 2433 estimated tokens). A config field named max_tokens that does
