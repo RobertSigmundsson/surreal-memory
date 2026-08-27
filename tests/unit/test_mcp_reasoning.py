@@ -263,3 +263,58 @@ async def test_reasoning_mine_without_reprocess_does_not_reset(tmp_path: Path) -
 
     reset_mock.assert_not_awaited()
     assert result["traces_reset"] == 0
+
+
+@pytest.mark.asyncio
+async def test_reasoning_mine_dry_run_measures(tmp_path: Path) -> None:
+    """The MCP route returned hardcoded zeros without scanning — the same
+    false comfort the CLI carried, on the route the swarm actually calls."""
+    server = _make_server(tmp_path, mining_enabled=True)
+    storage = _storage()
+    found = [
+        {"trace_hash": "h1", "model": "claude-fable-5"},
+        {"trace_hash": "h2", "model": "claude-opus-5"},
+    ]
+    ingest_mock = AsyncMock()
+    with (
+        patch.object(server, "get_storage", return_value=storage),
+        patch(
+            "surreal_memory.engine.reasoning_miner.scan_transcripts",
+            new=MagicMock(return_value=found),
+        ),
+        patch("surreal_memory.engine.reasoning_miner.ingest_reasoning_traces", new=ingest_mock),
+    ):
+        result = await server.call_tool("smem_reasoning", {"action": "mine", "dry_run": True})
+
+    assert result["dry_run"] is True
+    assert result["traces_found"] == 2
+    assert result["models_seen"] == ["claude-fable-5", "claude-opus-5"]
+    assert result["patterns_learned"] is None
+    assert result["patterns_note"]
+    ingest_mock.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_reasoning_mine_dry_run_does_not_move_the_scan_cursor(tmp_path: Path) -> None:
+    """A plan that consumes the scan cursor makes the next real run skip the
+    files it just planned to read."""
+    server = _make_server(tmp_path, mining_enabled=True)
+    storage = _storage()
+    seen: dict[str, object] = {}
+
+    def _scan(cfg, *, state_path=None, claude_dir=None, now=None, backfill=False):
+        seen["state_path"] = state_path
+        return []
+
+    real_state = server.config.data_dir / "reasoning_scan_state.json"
+    real_state.parent.mkdir(parents=True, exist_ok=True)
+    real_state.write_text('{"marker": "untouched"}', encoding="utf-8")
+
+    with (
+        patch.object(server, "get_storage", return_value=storage),
+        patch("surreal_memory.engine.reasoning_miner.scan_transcripts", new=_scan),
+    ):
+        await server.call_tool("smem_reasoning", {"action": "mine", "dry_run": True})
+
+    assert seen["state_path"] != real_state
+    assert real_state.read_text(encoding="utf-8") == '{"marker": "untouched"}'
