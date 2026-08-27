@@ -251,3 +251,28 @@ def test_the_gap_this_closes_prompt_never_reached_memory(
     assert pipeline.query.await_args.kwargs["query"] == prompt
     payload = json.loads(capsys.readouterr().out)
     assert "zapamiętany fakt" in payload["hookSpecificOutput"]["additionalContext"]
+
+
+@pytest.mark.asyncio
+async def test_max_tokens_is_a_ceiling_not_a_suggestion() -> None:
+    """Zmierzone: ReflexPipeline traktuje max_tokens jako CEL i przestrzeliwuje
+    o ~70% (600 -> ~1009 tokenów). Pole nazwane max_tokens musi ciąć, inaczej
+    obiecuje limit, którego nie ma — a to leci przy KAŻDEJ turze."""
+    from surreal_memory.hooks.user_prompt_submit import get_prompt_recall
+
+    pipeline = await _pipeline_returning("x" * 10_000)
+    storage = AsyncMock()
+    storage.brain_id = "b1"
+    storage.get_brain = AsyncMock(return_value=type("B", (), {"config": object()})())
+
+    with (
+        patch("surreal_memory.unified_config.get_config") as gc,
+        patch("surreal_memory.unified_config.get_shared_storage", AsyncMock(return_value=storage)),
+        patch("surreal_memory.engine.retrieval.ReflexPipeline", return_value=pipeline),
+    ):
+        gc.return_value.prompt_recall = _cfg(max_tokens=100)
+        gc.return_value.current_brain = "b1"
+        out = await get_prompt_recall({"prompt": "p" * 100})
+
+    assert len(out) < 700, "sufit nie zadziałał — wstrzyk zalałby kontekst"
+    assert "przycięte do 100 tokenów" in out
