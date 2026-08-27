@@ -108,6 +108,7 @@ def _idle_mining_state() -> dict[str, Any]:
         "models_done": 0,
         "models_total": 0,
         "dry_run": False,
+        "dry_run_note": None,
         "error": None,
     }
 
@@ -152,6 +153,9 @@ class MiningJobState(BaseModel):
     models_done: int = 0
     models_total: int = 0
     dry_run: bool = False
+    # Set only by a dry run, so a zero in patterns_learned is never read as
+    # "nothing to learn" when in fact nothing was even distilled.
+    dry_run_note: str | None = None
     error: str | None = None
 
 
@@ -524,8 +528,46 @@ async def _run_mining(
     state = _mining_states.setdefault(brain_id, _idle_mining_state())
     try:
         if dry_run:
-            # Parity with consolidation dry_run: no scanning, no writes.
-            state.update(phase=PHASE_DONE, traces_ingested=0, patterns_learned=0)
+            # MEASURE, do not assert. This reported PHASE_DONE with zeros without
+            # scanning anything, so a dashboard dry run answered "nothing to do"
+            # while the transcript backlog grew — the same hardcoded-zero comfort
+            # the CLI and MCP routes carried.
+            #
+            # scan_transcripts rewrites the incremental cursor, so scan against a
+            # throwaway copy: a plan that consumes the cursor makes the next real
+            # run skip the very files it just planned to read.
+            import shutil
+            import tempfile
+            from pathlib import Path as _Path
+
+            from surreal_memory.engine.reasoning_miner import scan_transcripts
+
+            dry_config = get_config()
+            dry_overrides: dict[str, Any] = {}
+            if backfill:
+                dry_overrides["scan_lookback_days"] = 0
+            if models:
+                dry_overrides["mining_models"] = tuple(models)
+            scan_rt = dc_replace(dry_config.reasoning_training, **dry_overrides)
+            real_state = dry_config.data_dir / "reasoning_scan_state.json"
+            with tempfile.TemporaryDirectory() as tmp:
+                shadow = _Path(tmp) / "reasoning_scan_state.json"
+                if real_state.exists():
+                    shutil.copy2(real_state, shadow)
+                found = scan_transcripts(scan_rt, state_path=shadow, backfill=backfill)
+            state.update(
+                phase=PHASE_DONE,
+                traces_found=len(found),
+                # Nothing was written, so these are honestly zero — but a bare
+                # zero for patterns reads as "nothing to learn". The note says
+                # which it is.
+                traces_ingested=0,
+                patterns_learned=0,
+                dry_run_note=(
+                    f"scan only: {len(found)} traces would be offered to staging; "
+                    "distillation not simulated"
+                ),
+            )
             return
 
         config = get_config()

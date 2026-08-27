@@ -993,3 +993,53 @@ class TestPatternReadsUseTheRequestScope:
         assert client.get("/api/dashboard/reasoning/patterns").status_code == 200
 
         assert scoped.close.await_count == (1 if closed else 0)
+
+
+async def test_run_mining_dry_run_measures_instead_of_reporting_zeros(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The HTTP job set PHASE_DONE with zeros without scanning anything, so a
+    dashboard dry run answered "nothing to do" while the backlog grew."""
+    _reset, ingest_mock, _order = _mining_mocks(monkeypatch, tmp_path)
+    found = [
+        {"trace_hash": "h1", "model": "claude-fable-5"},
+        {"trace_hash": "h2", "model": "claude-fable-5"},
+        {"trace_hash": "h3", "model": "claude-opus-5"},
+    ]
+    monkeypatch.setattr(
+        "surreal_memory.engine.reasoning_miner.scan_transcripts",
+        lambda *a, **k: found,
+    )
+
+    await rt_module._run_mining(BRAIN_ID, False, True, None)
+
+    state = rt_module._mining_states[BRAIN_ID]
+    assert state["traces_found"] == 3
+    assert state["traces_ingested"] == 0  # honestly zero: nothing was written
+    assert state["patterns_learned"] == 0
+    # ...and the note says the zero means "not simulated", not "nothing to learn".
+    assert "not simulated" in (state["dry_run_note"] or "")
+    ingest_mock.assert_not_awaited()
+
+
+async def test_run_mining_dry_run_does_not_move_the_scan_cursor(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A plan that consumes the incremental cursor makes the next real run skip
+    the files it just planned to read."""
+    _reset, _ingest, _order = _mining_mocks(monkeypatch, tmp_path)
+    seen: dict[str, Any] = {}
+
+    def _scan(cfg: Any, *, state_path: Any = None, **kw: Any) -> list[Any]:
+        seen["state_path"] = state_path
+        return []
+
+    monkeypatch.setattr("surreal_memory.engine.reasoning_miner.scan_transcripts", _scan)
+    real_state = tmp_path / ".surrealmemory" / "reasoning_scan_state.json"
+    real_state.parent.mkdir(parents=True, exist_ok=True)
+    real_state.write_text('{"marker": "untouched"}', encoding="utf-8")
+
+    await rt_module._run_mining(BRAIN_ID, False, True, None)
+
+    assert seen["state_path"] != real_state
+    assert real_state.read_text(encoding="utf-8") == '{"marker": "untouched"}'
