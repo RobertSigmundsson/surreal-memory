@@ -6,6 +6,7 @@ mine model ``thinking`` into ReasoningBank patterns and inspect/clear them.
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Annotated, Any
 
 import typer
@@ -175,11 +176,56 @@ def reasoning_mine(
                 raise typer.Exit(1)
 
             if dry_run:
-                result = {"traces_ingested": 0, "patterns_learned": 0, "dry_run": True}
+                # A dry run must MEASURE what a real run would do. This used to
+                # return hardcoded zeros without ever calling the miner, so it
+                # reported "nothing to do" while 5 181 thinking blocks waited in
+                # the transcripts — a probe that proves the absence of an error
+                # instead of the presence of work.
+                #
+                # scan_transcripts REWRITES the incremental scan cursor, and a
+                # dry run must not move it: point the scan at a throwaway copy
+                # of the real state so the plan reflects reality without
+                # consuming it.
+                import shutil
+                import tempfile
+
+                from surreal_memory.engine.reasoning_miner import scan_transcripts
+
+                dry_overrides: dict[str, Any] = {}
+                if backfill:
+                    dry_overrides["scan_lookback_days"] = 0
+                dry_models = _split_models(models)
+                if dry_models:
+                    dry_overrides["mining_models"] = tuple(dry_models)
+                scan_rt = dc_replace(ucfg.reasoning_training, **dry_overrides)
+                real_state = ucfg.data_dir / "reasoning_scan_state.json"
+                with tempfile.TemporaryDirectory() as tmp:
+                    shadow = Path(tmp) / "reasoning_scan_state.json"
+                    if real_state.exists():
+                        shutil.copy2(real_state, shadow)
+                    found = scan_transcripts(scan_rt, state_path=shadow, backfill=backfill)
+
+                models_seen = sorted({str(t.get("model", "")) for t in found if t.get("model")})
+                result: dict[str, Any] = {
+                    "dry_run": True,
+                    # Traces the scan WOULD hand to staging. Insert dedups by
+                    # trace_hash, so the number ingested can only be <= this.
+                    "traces_found": len(found),
+                    "models_seen": models_seen,
+                    # Distillation is NOT simulated: it depends on per-model
+                    # budgets and clustering over the whole staging table. Say so
+                    # rather than print a zero that reads like "nothing to learn".
+                    "patterns_learned": None,
+                    "patterns_note": "not simulated by --dry-run; run without it to distill",
+                }
                 if json_output:
                     output_result(result, True)
                 else:
-                    typer.echo("Dry run: no changes.")
+                    typer.echo(
+                        f"Dry run: scan found {len(found)} traces "
+                        f"from {len(models_seen)} model(s); nothing written. "
+                        "Pattern learning is not simulated."
+                    )
                 return
 
             rt = ucfg.reasoning_training
