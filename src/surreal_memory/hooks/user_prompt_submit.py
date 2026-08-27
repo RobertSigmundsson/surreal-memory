@@ -43,6 +43,11 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
+# Rough chars-per-token used to turn the configured token ceiling into a hard
+# character cut. Deliberately crude: it only has to bound the injection, and a
+# cheap over-estimate is better than a tokenizer import on every prompt.
+_CHARS_PER_TOKEN = 4
+
 
 def read_hook_input() -> dict[str, Any]:
     """Read Claude Code hook JSON from stdin (empty/malformed -> {})."""
@@ -95,6 +100,14 @@ async def get_prompt_recall(hook_input: dict[str, Any]) -> str:
         context = (result.context or "").strip()
         if not context:
             return ""
+        # ReflexPipeline treats max_tokens as a TARGET, not a ceiling: measured on
+        # this brain it overshoots by ~70% consistently (100 -> 174, 600 -> 1009,
+        # 4000 -> 2433 estimated tokens). A config field named max_tokens that does
+        # not cap is a promise the code does not keep, and this runs every turn —
+        # so enforce the ceiling here and say when it bit.
+        limit = max(1, cfg.max_tokens) * _CHARS_PER_TOKEN
+        if len(context) > limit:
+            context = context[:limit].rstrip() + f"\n\n[…przycięte do {cfg.max_tokens} tokenów]"
         return f"## Relevant memory (recalled for this prompt)\n\n{context}"
     finally:
         try:
