@@ -170,8 +170,19 @@ def test_mine_runs_when_enabled(tmp_path: Path) -> None:
     assert ingest_mock.await_args.kwargs["backfill"] is False
 
 
-def test_mine_dry_run(tmp_path: Path) -> None:
+def test_mine_dry_run_reports_what_the_scan_actually_found(tmp_path: Path) -> None:
+    # --dry-run used to return {"traces_ingested": 0, "patterns_learned": 0}
+    # without ever calling the miner, so it reported "nothing to do" while
+    # thousands of thinking blocks waited in the transcripts. It must MEASURE.
     storage = _storage()
+    found = [
+        {"trace_hash": "h1", "model": "claude-fable-5"},
+        {"trace_hash": "h2", "model": "claude-fable-5"},
+        {"trace_hash": "h3", "model": "claude-opus-5"},
+    ]
+    scan = MagicMock(return_value=found)
+    ingest_mock = AsyncMock()
+    distill_mock = AsyncMock()
     with (
         patch(f"{CLI}.get_config", MagicMock()),
         patch(f"{CLI}.get_storage", new=AsyncMock(return_value=storage)),
@@ -179,13 +190,56 @@ def test_mine_dry_run(tmp_path: Path) -> None:
             "surreal_memory.unified_config.get_config",
             return_value=_ucfg(tmp_path, mining_enabled=True),
         ),
+        patch("surreal_memory.engine.reasoning_miner.scan_transcripts", new=scan),
+        patch("surreal_memory.engine.reasoning_miner.ingest_reasoning_traces", new=ingest_mock),
+        patch(
+            "surreal_memory.engine.reasoning_distiller.distill_reasoning_patterns",
+            new=distill_mock,
+        ),
     ):
         result = runner.invoke(app, ["reasoning", "mine", "--dry-run", "--json"])
 
     assert result.exit_code == 0, result.output
     data = json.loads(result.output)
     assert data["dry_run"] is True
-    assert data["traces_ingested"] == 0
+    assert data["traces_found"] == 3
+    assert data["models_seen"] == ["claude-fable-5", "claude-opus-5"]
+    # Distillation is not simulated — say so instead of printing a zero that
+    # reads like "nothing to learn".
+    assert data["patterns_learned"] is None
+    assert data["patterns_note"]
+    # Nothing was written.
+    ingest_mock.assert_not_awaited()
+    distill_mock.assert_not_awaited()
+
+
+def test_mine_dry_run_does_not_move_the_scan_cursor(tmp_path: Path) -> None:
+    # scan_transcripts REWRITES the incremental scan state. A dry run that
+    # consumed it would make the next real run skip those files — the plan would
+    # destroy the thing it was planning.
+    storage = _storage()
+    seen: dict[str, object] = {}
+
+    def _scan(cfg, *, state_path=None, claude_dir=None, now=None, backfill=False):
+        seen["state_path"] = state_path
+        return []
+
+    cfg = _ucfg(tmp_path, mining_enabled=True)
+    real_state = cfg.data_dir / "reasoning_scan_state.json"
+    real_state.parent.mkdir(parents=True, exist_ok=True)
+    real_state.write_text('{"marker": "untouched"}', encoding="utf-8")
+
+    with (
+        patch(f"{CLI}.get_config", MagicMock()),
+        patch(f"{CLI}.get_storage", new=AsyncMock(return_value=storage)),
+        patch("surreal_memory.unified_config.get_config", return_value=cfg),
+        patch("surreal_memory.engine.reasoning_miner.scan_transcripts", new=_scan),
+    ):
+        result = runner.invoke(app, ["reasoning", "mine", "--dry-run", "--json"])
+
+    assert result.exit_code == 0, result.output
+    assert seen["state_path"] != real_state  # scanned against a throwaway copy
+    assert real_state.read_text(encoding="utf-8") == '{"marker": "untouched"}'
 
 
 def test_mine_force_bypasses_disabled(tmp_path: Path) -> None:
