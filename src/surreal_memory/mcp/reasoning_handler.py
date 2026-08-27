@@ -138,7 +138,47 @@ class ReasoningHandler:
             # Privacy: don't scan ~/.claude transcripts unless mining is enabled.
             return {"error": "Mining is disabled; enable reasoning_training.mining_enabled first"}
         if args.get("dry_run"):
-            return {"traces_ingested": 0, "patterns_learned": 0, "dry_run": True}
+            # MEASURE, do not assert. This route returned hardcoded zeros without
+            # ever scanning — the same false-comfort the CLI path carried, and
+            # this is the route the swarm actually calls. scan_transcripts
+            # rewrites the incremental cursor, so scan against a throwaway copy:
+            # a plan that consumes the cursor makes the next real run skip the
+            # very files it just planned to read.
+            import shutil
+            import tempfile
+            from pathlib import Path
+
+            from surreal_memory.engine.reasoning_miner import scan_transcripts
+
+            dry_overrides: dict[str, Any] = {}
+            if args.get("backfill"):
+                dry_overrides["scan_lookback_days"] = 0
+            dry_models = args.get("models")
+            if isinstance(dry_models, list) and dry_models:
+                dry_overrides["mining_models"] = tuple(str(m) for m in dry_models)
+            elif isinstance(dry_models, str) and dry_models.strip():
+                dry_overrides["mining_models"] = tuple(
+                    m.strip() for m in dry_models.split(",") if m.strip()
+                )
+            scan_rt = dc_replace(rt, **dry_overrides)
+            real_state = self.config.data_dir / "reasoning_scan_state.json"
+            with tempfile.TemporaryDirectory() as tmp:
+                shadow = Path(tmp) / "reasoning_scan_state.json"
+                if real_state.exists():
+                    shutil.copy2(real_state, shadow)
+                found = scan_transcripts(
+                    scan_rt, state_path=shadow, backfill=bool(args.get("backfill"))
+                )
+            return {
+                "dry_run": True,
+                "traces_found": len(found),
+                "models_seen": sorted({str(t.get("model", "")) for t in found if t.get("model")}),
+                # Distillation depends on per-model budgets and clustering over the
+                # whole staging table; it is not simulated. Say that instead of a
+                # zero that reads like "nothing to learn".
+                "patterns_learned": None,
+                "patterns_note": "not simulated by dry_run; run without it to distill",
+            }
 
         backfill = bool(args.get("backfill"))
         overrides: dict[str, Any] = {}
