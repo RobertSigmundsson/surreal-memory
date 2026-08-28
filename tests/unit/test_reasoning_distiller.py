@@ -902,3 +902,62 @@ class TestValidatedEndpointIsTheUsedEndpoint:
 
         assert embedder is not None
         assert "127.0.0.1" in (getattr(embedder, "_base_url", "") or "")
+
+
+async def test_distill_reports_how_many_traces_retention_deleted(
+    tmp_path: Path,
+    no_embedder: None,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Retention counts reach the caller instead of being dropped on the floor.
+
+    Both prune and cap DELETE rows. Their return values used to be discarded, so
+    a pass that removed thousands of traces was byte-identical, in logs and in
+    its result object, to a pass that removed none. That is the failure mode
+    this test pins: absence of a message must not be the only evidence of loss.
+    """
+    storage = InMemoryStorage()
+    storage.set_brain(BRAIN)
+    await _seed(storage, "claude-fable-5", _DEBUG_TRACES)
+
+    async def _fake_prune(brain_id: str, keep_days: int = 90) -> int:
+        return 7
+
+    async def _fake_cap(brain_id: str, max_total: int = 20_000) -> int:
+        return 5733
+
+    monkeypatch.setattr(storage, "prune_reasoning_traces", _fake_prune)
+    monkeypatch.setattr(storage, "cap_reasoning_traces", _fake_cap)
+
+    with caplog.at_level("INFO", logger="surreal_memory.engine.reasoning_distiller"):
+        result = await distill_reasoning_patterns(storage, BRAIN, _ucfg(tmp_path))
+
+    assert result.traces_pruned == 7
+    assert result.traces_capped == 5733
+    assert "5733" in caplog.text
+
+
+async def test_distill_stays_quiet_when_retention_removed_nothing(
+    tmp_path: Path,
+    no_embedder: None,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Zero deletions must not emit a retention line — the log stays a signal."""
+    storage = InMemoryStorage()
+    storage.set_brain(BRAIN)
+    await _seed(storage, "claude-fable-5", _DEBUG_TRACES)
+
+    async def _zero(*_a: object, **_k: object) -> int:
+        return 0
+
+    monkeypatch.setattr(storage, "prune_reasoning_traces", _zero)
+    monkeypatch.setattr(storage, "cap_reasoning_traces", _zero)
+
+    with caplog.at_level("INFO", logger="surreal_memory.engine.reasoning_distiller"):
+        result = await distill_reasoning_patterns(storage, BRAIN, _ucfg(tmp_path))
+
+    assert result.traces_pruned == 0
+    assert result.traces_capped == 0
+    assert "reasoning retention" not in caplog.text

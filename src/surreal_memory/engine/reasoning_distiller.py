@@ -567,6 +567,12 @@ class DistillResult:
     patterns_learned: int = 0
     traces_processed: int = 0
     models_seen: int = 0
+    # Retention deletes raw material. A pass that drops thousands of traces was
+    # indistinguishable from one that dropped none, because both returned the
+    # same result object -- so the counts belong here, beside what the pass
+    # created. Callers that persist a run record can now record the loss too.
+    traces_pruned: int = 0
+    traces_capped: int = 0
 
 
 async def _process_model_batch(
@@ -769,14 +775,31 @@ async def distill_reasoning_patterns(
         if namer is not None:
             await namer.release()
 
+    pruned = 0
+    capped = 0
     if processed_ids:
-        await storage.prune_reasoning_traces(brain_id, rt.retention_days)
-        await storage.cap_reasoning_traces(brain_id, rt.max_traces_total)
+        # Both calls DELETE rows. Discarding their return values made retention
+        # silent: a pass that removed thousands of traces logged exactly what a
+        # pass that removed none logged -- nothing. Keep the counts and say so,
+        # because "no message" must not be the only evidence of a large loss.
+        pruned = await storage.prune_reasoning_traces(brain_id, rt.retention_days)
+        capped = await storage.cap_reasoning_traces(brain_id, rt.max_traces_total)
+        if pruned or capped:
+            logger.info(
+                "reasoning retention: pruned %d trace(s) older than %d days, "
+                "capped %d trace(s) to stay within max_traces_total=%d",
+                pruned,
+                rt.retention_days,
+                capped,
+                rt.max_traces_total,
+            )
 
     return DistillResult(
         patterns_learned=patterns_created,
         traces_processed=len(processed_ids),
         models_seen=models_total,
+        traces_pruned=pruned,
+        traces_capped=capped,
     )
 
 
