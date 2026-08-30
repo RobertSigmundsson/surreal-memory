@@ -16,14 +16,17 @@ Covers:
 
 from __future__ import annotations
 
+from dataclasses import replace as dc_replace
 from datetime import timedelta
 from pathlib import Path
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 import pytest_asyncio
 
 from surreal_memory.core.brain import Brain
 from surreal_memory.core.fiber import Fiber
+from surreal_memory.core.neuron import Neuron, NeuronType
 from surreal_memory.engine.compression import (
     CompressionConfig,
     CompressionEngine,
@@ -36,6 +39,7 @@ from surreal_memory.engine.compression import (
 )
 from surreal_memory.engine.consolidation import ConsolidationReport, ConsolidationStrategy
 from surreal_memory.storage.memory_store import InMemoryStorage
+from surreal_memory.utils.simhash import simhash
 from surreal_memory.utils.timeutils import utcnow
 
 # ---------------------------------------------------------------------------
@@ -718,3 +722,677 @@ class TestConsolidationIntegration:
         report.tokens_saved = 200
         assert report.fibers_compressed == 5
         assert report.tokens_saved == 200
+
+
+# ---------------------------------------------------------------------------
+# Content-derived field refresh on compress / decompress / recover
+# ---------------------------------------------------------------------------
+
+
+async def _refresh_test_store() -> InMemoryStorage:
+    """Real (non-mock) InMemoryStorage with a brain activated."""
+    store = InMemoryStorage()
+    brain = Brain.create(name="test-refresh-brain")
+    await store.save_brain(brain)
+    store.set_brain(brain.id)
+    return store
+
+
+def _seeded_neuron(content: str, vector: list[float]) -> Neuron:
+    neuron = Neuron.create(
+        type=NeuronType.CONCEPT, content=content, metadata={"_embedding": list(vector)}
+    )
+    return dc_replace(neuron, content_hash=simhash(content))
+
+
+class TestCompressionRefreshesDerivedFields:
+    """Compress, decompress, and recover must not leave derived fields stale.
+
+    Each path did ``dc_replace(neuron, content=new)`` and handed the result
+    straight to ``update_neuron`` - re-saving the OLD ``content_hash`` and the
+    OLD embedding vector next to the NEW content, the pattern #166 fixed for
+    ``smem_edit`` but left standing here.
+
+    The vector cannot simply be cleared: ``embedding_vec`` carries an HNSW index
+    with a fixed dimension, so writing an empty array is rejected outright
+    ("Incorrect vector dimension (0)") and takes the whole update with it. So
+    these paths re-embed, like the edit tool - but batched, one provider call per
+    compression step rather than one per neuron.
+    """
+
+    @staticmethod
+    def _assert_refreshed(saved: Neuron, expected_content: str, expected_vec: list[float]) -> None:
+        """The saved neuron must carry the new content's hash and its new vector."""
+        assert saved.content == expected_content
+        assert saved.content_hash == simhash(expected_content), (
+            "content_hash must describe the content actually stored - keeping the old "
+            "fingerprint feeds near-duplicate detection the SimHash of text that is gone"
+        )
+        assert saved.metadata["_embedding"] == expected_vec, (
+            "the vector stored with the new content must describe the new content - "
+            "re-saving the old one keeps the memory retrievable by what it used to say"
+        )
+
+    @pytest.mark.asyncio
+    async def test_compress_graph_only_refreshes_hash_and_vector(self) -> None:
+        store = await _refresh_test_store()
+        orig = "the office is closed on fridays for maintenance this quarter"
+        neuron = _seeded_neuron(orig, [0.1, 0.2, 0.3])
+        await store.add_neuron(neuron)
+        fiber = Fiber(
+            id="f-graph",
+            neuron_ids={neuron.id},
+            synapse_ids=set(),
+            anchor_neuron_id=neuron.id,
+            compression_tier=0,
+            created_at=utcnow() - timedelta(days=200.0),
+        )
+        await store.add_fiber(fiber)
+
+        fresh_vec = [9.0, 8.0, 7.0]
+        provider = MagicMock()
+        provider.embed_batch = AsyncMock(return_value=[list(fresh_vec)])
+        with patch(
+            "surreal_memory.engine.semantic_discovery._create_provider", return_value=provider
+        ):
+            engine = CompressionEngine(store)
+            await engine.compress_fiber(fiber, CompressionTier.GRAPH_ONLY)
+
+        saved = await store.get_neuron(neuron.id)
+        assert saved.content == "[graph-only]"
+        assert saved.content_hash == 0, (
+            "the placeholder is a tombstone, not content - it must carry the "
+            "no-fingerprint sentinel, not one constant SimHash shared by every "
+            "graph-only anchor"
+        )
+        assert saved.metadata["_embedding"] == fresh_vec
+
+    @pytest.mark.asyncio
+    async def test_compress_extractive_refreshes_hash_and_vector(self) -> None:
+        store = await _refresh_test_store()
+        orig = (
+            "Widget shipments doubled in March. The warehouse team hired five new staff. "
+            "Revenue from the north region grew by twelve percent this quarter."
+        )
+        neuron = _seeded_neuron(orig, [0.1, 0.2, 0.3])
+        await store.add_neuron(neuron)
+        fiber = Fiber(
+            id="f-extractive",
+            neuron_ids={neuron.id},
+            synapse_ids=set(),
+            anchor_neuron_id=neuron.id,
+            compression_tier=0,
+            created_at=utcnow() - timedelta(days=15.0),
+        )
+        await store.add_fiber(fiber)
+
+        fresh_vec = [1.0, 1.0, 1.0]
+        provider = MagicMock()
+        provider.embed_batch = AsyncMock(return_value=[list(fresh_vec)])
+        with patch(
+            "surreal_memory.engine.semantic_discovery._create_provider", return_value=provider
+        ):
+            engine = CompressionEngine(store)
+            result = await engine.compress_fiber(fiber, CompressionTier.EXTRACTIVE)
+
+        saved = await store.get_neuron(neuron.id)
+        assert saved.content != orig, "the tier must actually have compressed the content"
+        assert result.compressed_token_count < result.original_token_count
+        self._assert_refreshed(saved, saved.content, fresh_vec)
+
+    @pytest.mark.asyncio
+    async def test_decompress_refreshes_hash_and_vector(self) -> None:
+        store = await _refresh_test_store()
+        orig = "the meeting moved to thursday at ten"
+        neuron = _seeded_neuron(orig, [0.1, 0.2, 0.3])
+        await store.add_neuron(neuron)
+        fiber = Fiber(
+            id="f-decompress",
+            neuron_ids={neuron.id},
+            synapse_ids=set(),
+            anchor_neuron_id=neuron.id,
+            compression_tier=1,
+            created_at=utcnow(),
+        )
+        await store.add_fiber(fiber)
+        await store.save_compression_backup(
+            fiber_id=fiber.id,
+            original_content=orig,
+            compression_tier=1,
+            original_token_count=10,
+            compressed_token_count=5,
+        )
+        # Seed realistic drift: the neuron currently sits compressed, and its
+        # derived fields were refreshed AGAINST THE COMPRESSED TEXT in the interim
+        # (a reindex ran while the fiber was compressed). Without this the hash
+        # would already equal simhash(orig) by coincidence - the field was never
+        # touched since creation - and the assertion would pass on unfixed code.
+        compressed = dc_replace(
+            neuron,
+            content="the meeting moved",
+            content_hash=simhash("the meeting moved"),
+            metadata={"_embedding": [4.0, 5.0, 6.0]},
+        )
+        await store.update_neuron(compressed)
+
+        fresh_vec = [2.0, 2.0, 2.0]
+        provider = MagicMock()
+        provider.embed_batch = AsyncMock(return_value=[list(fresh_vec)])
+        with patch(
+            "surreal_memory.engine.semantic_discovery._create_provider", return_value=provider
+        ):
+            engine = CompressionEngine(store)
+            ok = await engine.decompress_fiber(fiber.id)
+
+        assert ok is True
+        saved = await store.get_neuron(neuron.id)
+        self._assert_refreshed(saved, orig, fresh_vec)
+
+    @pytest.mark.asyncio
+    async def test_recover_refreshes_hash_and_vector(self) -> None:
+        store = await _refresh_test_store()
+        orig = "quarterly numbers are final and archived"
+        neuron = _seeded_neuron(orig, [0.1, 0.2, 0.3])
+        await store.add_neuron(neuron)
+        fiber = Fiber(
+            id="f-recover",
+            neuron_ids={neuron.id},
+            synapse_ids=set(),
+            anchor_neuron_id=neuron.id,
+            compression_tier=int(CompressionTier.GRAPH_ONLY),
+            created_at=utcnow(),
+        )
+        await store.add_fiber(fiber)
+        await store.save_neuron_snapshot(
+            neuron_id=neuron.id,
+            brain_id=store.current_brain_id or "",
+            original_content=orig,
+            compressed_at=utcnow().isoformat(),
+            tier=int(CompressionTier.GRAPH_ONLY),
+        )
+        # Same seeding rationale as the decompress test: the neuron is mid
+        # GRAPH_ONLY, carrying the placeholder's hash and a vector from that phase.
+        graph_only = dc_replace(
+            neuron,
+            content="[graph-only]",
+            content_hash=simhash("[graph-only]"),
+            metadata={"_embedding": [7.0, 8.0, 9.0]},
+        )
+        await store.update_neuron(graph_only)
+
+        fresh_vec = [3.0, 3.0, 3.0]
+        provider = MagicMock()
+        provider.embed_batch = AsyncMock(return_value=[list(fresh_vec)])
+        with patch(
+            "surreal_memory.engine.semantic_discovery._create_provider", return_value=provider
+        ):
+            engine = CompressionEngine(store)
+            ok = await engine.recover_fiber(fiber.id)
+
+        assert ok is True
+        saved = await store.get_neuron(neuron.id)
+        self._assert_refreshed(saved, orig, fresh_vec)
+
+    @pytest.mark.asyncio
+    async def test_multi_neuron_compression_embeds_once_per_distinct_text(self) -> None:
+        """A fiber's neurons must cost ONE provider round-trip - and a GRAPH_ONLY
+        fiber only ONE embedding, since every neuron ends up with the same text.
+
+        Compression runs unattended over every neuron of a fiber, under a time
+        budget, in a path that already counts database round-trips as its
+        dominant cost - so embedding per neuron is the thing to prevent, and
+        sending N copies of the identical placeholder in the one batch is the
+        residual waste after that. Identical text must map to the identical
+        vector anyway, so each distinct text is embedded once and fanned out.
+        (Text-to-neuron pairing for DISTINCT texts is pinned by the echo-provider
+        recovery test.)
+        """
+        store = await _refresh_test_store()
+        neurons = [
+            _seeded_neuron(f"sentence number {i} about widgets", [0.1, 0.2]) for i in range(3)
+        ]
+        for n in neurons:
+            await store.add_neuron(n)
+        fiber = Fiber(
+            id="f-batched",
+            neuron_ids={n.id for n in neurons},
+            synapse_ids=set(),
+            anchor_neuron_id=neurons[0].id,
+            compression_tier=0,
+            created_at=utcnow() - timedelta(days=200.0),
+        )
+        await store.add_fiber(fiber)
+
+        fresh_vec = [5.0, 5.0]
+        provider = MagicMock()
+        provider.embed_batch = AsyncMock(return_value=[list(fresh_vec)])
+        create_provider = MagicMock(return_value=provider)
+        with patch("surreal_memory.engine.semantic_discovery._create_provider", create_provider):
+            engine = CompressionEngine(store)
+            await engine.compress_fiber(fiber, CompressionTier.GRAPH_ONLY)
+
+        assert create_provider.call_count == 1, (
+            f"the provider must be resolved once per compression step, not per neuron "
+            f"(got {create_provider.call_count} for {len(neurons)} neurons)"
+        )
+        provider.embed_batch.assert_awaited_once()
+        assert provider.embed_batch.await_args.args[0] == ["[graph-only]"], (
+            "three tombstoned neurons share one text - the batch must carry it once"
+        )
+        for n in neurons:
+            saved = await store.get_neuron(n.id)
+            assert saved.metadata["_embedding"] == fresh_vec, (
+                "every neuron sharing the text must receive the vector embedded for it"
+            )
+
+    @pytest.mark.asyncio
+    async def test_compress_leaves_a_vectorless_neuron_alone(self) -> None:
+        """No vector means nothing to go stale - and no reason to reach a provider."""
+        store = await _refresh_test_store()
+        orig = "a plain note with no embedding at all"
+        neuron = Neuron.create(type=NeuronType.CONCEPT, content=orig)
+        neuron = dc_replace(neuron, content_hash=simhash(orig))
+        await store.add_neuron(neuron)
+        fiber = Fiber(
+            id="f-no-vector",
+            neuron_ids={neuron.id},
+            synapse_ids=set(),
+            anchor_neuron_id=neuron.id,
+            compression_tier=0,
+            created_at=utcnow() - timedelta(days=200.0),
+        )
+        await store.add_fiber(fiber)
+
+        create_provider = MagicMock()
+        with patch("surreal_memory.engine.semantic_discovery._create_provider", create_provider):
+            engine = CompressionEngine(store)
+            await engine.compress_fiber(fiber, CompressionTier.GRAPH_ONLY)
+
+        saved = await store.get_neuron(neuron.id)
+        assert saved.content == "[graph-only]"
+        assert saved.content_hash == 0
+        assert "_embedding" not in saved.metadata
+        # An install with no vectors to refresh must not reach for an embedder.
+        create_provider.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_batched_recover_pairs_each_neuron_with_its_own_text_vector(self) -> None:
+        """Every neuron must receive the vector of ITS OWN restored text.
+
+        The batch helper embeds a list and assigns positionally, so the failure
+        to guard against is a swapped assignment - distinct vectors alone would
+        not catch it. The provider here derives each vector from the text it was
+        given, making any misalignment visible as the wrong vector on a neuron.
+        """
+        store = await _refresh_test_store()
+        texts = {
+            "n-alpha": "alpha original text",
+            "n-beta": "beta original text is deliberately longer",
+            "n-gamma": "gamma",
+        }
+        neurons = []
+        for nid in texts:
+            neuron = Neuron.create(
+                type=NeuronType.CONCEPT,
+                content="[graph-only]",
+                neuron_id=nid,
+                metadata={"_embedding": [0.1, 0.1]},
+            )
+            neuron = dc_replace(neuron, content_hash=0)
+            await store.add_neuron(neuron)
+            neurons.append(neuron)
+        fiber = Fiber(
+            id="f-pairing",
+            neuron_ids=set(texts),
+            synapse_ids=set(),
+            anchor_neuron_id="n-alpha",
+            compression_tier=int(CompressionTier.GRAPH_ONLY),
+            created_at=utcnow(),
+        )
+        await store.add_fiber(fiber)
+        for nid, orig in texts.items():
+            await store.save_neuron_snapshot(
+                neuron_id=nid,
+                brain_id=store.current_brain_id or "",
+                original_content=orig,
+                compressed_at=utcnow().isoformat(),
+                tier=int(CompressionTier.GRAPH_ONLY),
+            )
+
+        provider = MagicMock()
+        # Echo provider: the vector encodes the text it was derived from.
+        provider.embed_batch = AsyncMock(
+            side_effect=lambda batch: [[float(len(t)), 1.0] for t in batch]
+        )
+        with patch(
+            "surreal_memory.engine.semantic_discovery._create_provider", return_value=provider
+        ):
+            ok = await CompressionEngine(store).recover_fiber(fiber.id)
+
+        assert ok is True
+        for nid, orig in texts.items():
+            saved = await store.get_neuron(nid)
+            assert saved.content == orig
+            assert saved.metadata["_embedding"] == [float(len(orig)), 1.0], (
+                f"neuron {nid} must carry the vector derived from its own text - "
+                "anything else means the batch assignment is misaligned"
+            )
+
+    @pytest.mark.asyncio
+    async def test_recompression_stamps_the_sentinel_on_legacy_tombstones(self) -> None:
+        """When a legacy tombstone DOES meet the compression path, it gets the sentinel.
+
+        Tombstones written by older versions carry the SimHash of their deleted
+        original text. A fiber parked at GRAPH_ONLY never re-enters compression
+        (their protection is the census's content guard, not this path), but a
+        PARTIALLY recovered fiber does: ``recover_fiber`` resets it to FULL while
+        neurons without a snapshot keep the placeholder - the tier-0 fiber here
+        models exactly that shape. Re-compression must normalise the stale hash
+        to the sentinel, and must not spend a provider call doing it.
+        """
+        store = await _refresh_test_store()
+        legacy = Neuron.create(
+            type=NeuronType.CONCEPT,
+            content="[graph-only]",
+            metadata={"_embedding": [0.3, 0.4]},
+        )
+        legacy = dc_replace(legacy, content_hash=simhash("the deleted original text"))
+        await store.add_neuron(legacy)
+        fiber = Fiber(
+            id="f-legacy",
+            neuron_ids={legacy.id},
+            synapse_ids=set(),
+            anchor_neuron_id=legacy.id,
+            compression_tier=0,
+            created_at=utcnow() - timedelta(days=200.0),
+        )
+        await store.add_fiber(fiber)
+
+        create_provider = MagicMock()
+        with patch("surreal_memory.engine.semantic_discovery._create_provider", create_provider):
+            await CompressionEngine(store).compress_fiber(fiber, CompressionTier.GRAPH_ONLY)
+
+        create_provider.assert_not_called()
+        saved = await store.get_neuron(legacy.id)
+        assert saved.content == "[graph-only]"
+        assert saved.content_hash == 0, (
+            "a legacy tombstone must not keep the fingerprint of its deleted text"
+        )
+        assert saved.metadata["_embedding"] == [0.3, 0.4], (
+            "stamping the sentinel must not touch the vector - no re-embed on a repeat pass"
+        )
+
+    @pytest.mark.asyncio
+    async def test_graph_only_anchors_are_not_paired_as_near_duplicates(self) -> None:
+        """Two unrelated fibers compressed to GRAPH_ONLY must not look like duplicates.
+
+        Every graph-only neuron ends up with the same placeholder text, so a
+        SimHash of it would be one constant shared brain-wide. The consolidation
+        census compares anchors by Hamming distance, so identical fingerprints
+        would read as distance 0 and persist a false "duplicate of" edge between
+        memories that have nothing to do with each other.
+        """
+        from surreal_memory.utils.simhash import is_near_duplicate
+
+        store = await _refresh_test_store()
+        saved = []
+        for idx, text in enumerate(
+            ["the north warehouse lease renewal terms", "a totally unrelated travel itinerary"]
+        ):
+            neuron = _seeded_neuron(text, [0.1, 0.2])
+            await store.add_neuron(neuron)
+            fiber = Fiber(
+                id=f"f-dup-{idx}",
+                neuron_ids={neuron.id},
+                synapse_ids=set(),
+                anchor_neuron_id=neuron.id,
+                compression_tier=0,
+                created_at=utcnow() - timedelta(days=200.0),
+            )
+            await store.add_fiber(fiber)
+            provider = MagicMock()
+            provider.embed_batch = AsyncMock(return_value=[[1.0, 1.0]])
+            with patch(
+                "surreal_memory.engine.semantic_discovery._create_provider", return_value=provider
+            ):
+                await CompressionEngine(store).compress_fiber(fiber, CompressionTier.GRAPH_ONLY)
+            saved.append(await store.get_neuron(neuron.id))
+
+        a, b = saved
+        assert a.content_hash == 0 and b.content_hash == 0, (
+            "placeholder content must carry the no-fingerprint sentinel that the "
+            "census and the dedup pipeline both skip"
+        )
+        assert not is_near_duplicate(simhash("unrelated one"), 0), (
+            "sanity: the sentinel must not be treated as a comparable fingerprint"
+        )
+
+    @pytest.mark.asyncio
+    async def test_recompression_after_partial_recovery_does_not_re_embed_the_placeholder(
+        self,
+    ) -> None:
+        """A re-entered GRAPH_ONLY pass must not pay for neurons already cleared.
+
+        A fiber sitting at GRAPH_ONLY never re-enters compression (the tier
+        early-return), so the realistic way already-tombstoned neurons meet
+        this branch again is a PARTIAL recovery: ``recover_fiber`` resets the
+        fiber to FULL when it restores at least one neuron, while neurons that
+        had no snapshot keep the placeholder. When the fiber later ages back
+        into GRAPH_ONLY, those neurons are already correct - re-deriving their
+        fields would spend a provider call on a known result.
+        """
+        store = await _refresh_test_store()
+        neuron = _seeded_neuron("something that will be compressed away", [0.1, 0.2])
+        await store.add_neuron(neuron)
+        fiber = Fiber(
+            id="f-repeat",
+            neuron_ids={neuron.id},
+            synapse_ids=set(),
+            anchor_neuron_id=neuron.id,
+            compression_tier=0,
+            created_at=utcnow() - timedelta(days=200.0),
+        )
+        await store.add_fiber(fiber)
+
+        provider = MagicMock()
+        provider.embed_batch = AsyncMock(return_value=[[2.0, 2.0]])
+        with patch(
+            "surreal_memory.engine.semantic_discovery._create_provider", return_value=provider
+        ):
+            await CompressionEngine(store).compress_fiber(fiber, CompressionTier.GRAPH_ONLY)
+
+        # The partial-recovery shape: fiber back at FULL, neuron still a
+        # tombstone. (recover_fiber resets the tier whenever it restores any
+        # neuron; this one had no snapshot, so its placeholder survived.)
+        recovered_fiber = dc_replace(fiber, compression_tier=int(CompressionTier.FULL))
+        await store.update_fiber(recovered_fiber)
+
+        second = MagicMock()
+        with patch("surreal_memory.engine.semantic_discovery._create_provider", second):
+            result = await CompressionEngine(store).compress_fiber(
+                recovered_fiber, CompressionTier.GRAPH_ONLY
+            )
+
+        assert result.skipped is False, (
+            "the pass must actually run - an early-returned pass proves nothing "
+            "about what a re-entered one would cost"
+        )
+        second.assert_not_called()
+        saved = await store.get_neuron(neuron.id)
+        assert saved.content == "[graph-only]"
+        assert saved.content_hash == 0
+
+    @pytest.mark.asyncio
+    async def test_only_the_vectored_neuron_is_embedded_and_gets_its_own_vector(self) -> None:
+        """A fiber may mix neurons with and without vectors - each must be handled."""
+        store = await _refresh_test_store()
+        plain_a = Neuron.create(type=NeuronType.CONCEPT, content="first plain note")
+        vectored = _seeded_neuron("the middle note that carries a vector", [0.1, 0.2])
+        plain_b = Neuron.create(type=NeuronType.CONCEPT, content="third plain note")
+        for n in (plain_a, vectored, plain_b):
+            await store.add_neuron(n)
+        fiber = Fiber(
+            id="f-mixed",
+            neuron_ids={plain_a.id, vectored.id, plain_b.id},
+            synapse_ids=set(),
+            anchor_neuron_id=vectored.id,
+            compression_tier=0,
+            created_at=utcnow() - timedelta(days=200.0),
+        )
+        await store.add_fiber(fiber)
+
+        fresh_vec = [4.0, 4.0]
+        provider = MagicMock()
+        provider.embed_batch = AsyncMock(return_value=[list(fresh_vec)])
+        with patch(
+            "surreal_memory.engine.semantic_discovery._create_provider", return_value=provider
+        ):
+            engine = CompressionEngine(store)
+            await engine.compress_fiber(fiber, CompressionTier.GRAPH_ONLY)
+
+        assert len(provider.embed_batch.await_args.args[0]) == 1, (
+            "only the neuron that actually carries a vector belongs in the batch"
+        )
+        assert (await store.get_neuron(vectored.id)).metadata["_embedding"] == fresh_vec
+        for plain in (plain_a, plain_b):
+            saved = await store.get_neuron(plain.id)
+            assert saved.content == "[graph-only]"
+            assert saved.content_hash == 0
+            assert "_embedding" not in saved.metadata
+
+    @pytest.mark.asyncio
+    async def test_short_provider_output_warns_instead_of_silently_keeping_old_vectors(
+        self, caplog
+    ) -> None:
+        """A provider returning fewer vectors than texts must not pass silently.
+
+        Assigning positionally over a short list would leave the tail neurons
+        holding their OLD vectors with no error and no warning - a silent stale
+        write, which is the failure this whole change exists to remove.
+        """
+        import logging
+
+        store = await _refresh_test_store()
+        old_vec = [0.1, 0.2]
+        neurons = [_seeded_neuron(f"note number {i} with content", old_vec) for i in range(3)]
+        for n in neurons:
+            await store.add_neuron(n)
+        fiber = Fiber(
+            id="f-short-output",
+            neuron_ids={n.id for n in neurons},
+            synapse_ids=set(),
+            anchor_neuron_id=neurons[0].id,
+            compression_tier=0,
+            created_at=utcnow() - timedelta(days=200.0),
+        )
+        await store.add_fiber(fiber)
+
+        provider = MagicMock()
+        provider.embed_batch = AsyncMock(return_value=[[9.0, 9.0], [8.0, 8.0]])  # 2 for 3 texts
+        with (
+            patch(
+                "surreal_memory.engine.semantic_discovery._create_provider", return_value=provider
+            ),
+            caplog.at_level(logging.WARNING, logger="surreal_memory.utils.content_refresh"),
+        ):
+            engine = CompressionEngine(store)
+            await engine.compress_fiber(fiber, CompressionTier.GRAPH_ONLY)
+
+        assert any("reindex" in r.message for r in caplog.records), (
+            "a truncated provider response must be reported, not absorbed"
+        )
+        for n in neurons:
+            assert (await store.get_neuron(n.id)).metadata["_embedding"] == old_vec, (
+                "on a count mismatch no vector may be assigned - a partial write would "
+                "leave some neurons silently stale and indistinguishable from success"
+            )
+
+    @pytest.mark.asyncio
+    async def test_compress_warns_when_re_embedding_exceeds_its_time_budget(self, caplog) -> None:
+        """The bounded-wait branch must report, not swallow."""
+        import asyncio
+        import logging
+
+        store = await _refresh_test_store()
+        old_vec = [0.1, 0.2]
+        neuron = _seeded_neuron("a note whose re-embed will outlast the budget", old_vec)
+        await store.add_neuron(neuron)
+        fiber = Fiber(
+            id="f-timeout",
+            neuron_ids={neuron.id},
+            synapse_ids=set(),
+            anchor_neuron_id=neuron.id,
+            compression_tier=0,
+            created_at=utcnow() - timedelta(days=200.0),
+        )
+        await store.add_fiber(fiber)
+
+        async def _too_slow(_texts: list[str]) -> list[list[float]]:
+            await asyncio.sleep(5)
+            return [[1.0, 1.0]]
+
+        provider = MagicMock()
+        provider.embed_batch = _too_slow
+        with (
+            patch(
+                "surreal_memory.engine.semantic_discovery._create_provider", return_value=provider
+            ),
+            patch("surreal_memory.engine.encoder._inline_embed_timeout", return_value=0.01),
+            caplog.at_level(logging.WARNING, logger="surreal_memory.utils.content_refresh"),
+        ):
+            engine = CompressionEngine(store)
+            await engine.compress_fiber(fiber, CompressionTier.GRAPH_ONLY)
+
+        saved = await store.get_neuron(neuron.id)
+        assert saved.content == "[graph-only]", "a slow embedder must not block the compression"
+        assert saved.content_hash == 0
+        assert saved.metadata["_embedding"] == old_vec
+        assert any("time budget" in r.message for r in caplog.records), (
+            "exceeding the embed budget must be named as such, not folded into a generic failure"
+        )
+
+    @pytest.mark.asyncio
+    async def test_compress_survives_provider_unavailable_but_warns(self, caplog) -> None:
+        import logging
+
+        store = await _refresh_test_store()
+        old_vec = [0.1, 0.2, 0.3]
+        orig = (
+            "Widget shipments doubled in March. The warehouse team hired five new staff. "
+            "Revenue from the north region grew by twelve percent this quarter."
+        )
+        neuron = _seeded_neuron(orig, old_vec)
+        await store.add_neuron(neuron)
+        fiber = Fiber(
+            id="f-provider-down",
+            neuron_ids={neuron.id},
+            synapse_ids=set(),
+            anchor_neuron_id=neuron.id,
+            compression_tier=0,
+            created_at=utcnow() - timedelta(days=15.0),
+        )
+        await store.add_fiber(fiber)
+
+        with (
+            patch(
+                "surreal_memory.engine.semantic_discovery._create_provider",
+                side_effect=RuntimeError("no provider"),
+            ),
+            caplog.at_level(logging.WARNING, logger="surreal_memory.utils.content_refresh"),
+        ):
+            engine = CompressionEngine(store)
+            await engine.compress_fiber(fiber, CompressionTier.EXTRACTIVE)
+
+        saved = await store.get_neuron(neuron.id)
+        assert saved.content != orig, "compression must not depend on embedder availability"
+        assert saved.content_hash == simhash(saved.content), (
+            "content_hash has no provider dependency and must still be refreshed"
+        )
+        assert saved.metadata["_embedding"] == old_vec, (
+            "with no provider available the old vector must be kept, not dropped or guessed - "
+            "an empty vector is rejected outright by the HNSW index on embedding_vec"
+        )
+        assert any("reindex" in r.message for r in caplog.records), (
+            "a stale vector left behind must be reported loudly, with the remediation "
+            "command - silence here is indistinguishable from a successful refresh"
+        )

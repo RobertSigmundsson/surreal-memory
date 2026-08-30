@@ -1468,6 +1468,12 @@ class ReflexPipeline:
         # Collect candidates with embeddings, compute similarity in parallel
         embed_pairs: list[tuple[str, list[float]]] = []
         for neuron in candidates:
+            # GRAPH_ONLY tombstones share one placeholder text, so their
+            # vectors are identical brain-wide - for a query anywhere near that
+            # region they would tie with each other and crowd genuine memories
+            # out of the top-k anchor slots. Same skip as semantic discovery.
+            if neuron.content == "[graph-only]":
+                continue
             stored_embedding = neuron.metadata.get("_embedding")
             if stored_embedding and isinstance(stored_embedding, list):
                 embed_pairs.append((neuron.id, stored_embedding))

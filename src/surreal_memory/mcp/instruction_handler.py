@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, Any
 
 from surreal_memory.mcp.constants import MAX_CONTENT_LENGTH
 from surreal_memory.mcp.tool_handler_utils import _require_brain_id
+from surreal_memory.utils.content_refresh import content_refreshed
 from surreal_memory.utils.timeutils import utcnow
 
 if TYPE_CHECKING:
@@ -121,9 +122,7 @@ class InstructionHandler:
 
             # Update anchor neuron content
             if anchor:
-                from dataclasses import replace as dc_replace
-
-                updated_neuron = dc_replace(anchor, content=new_content)
+                updated_neuron = await content_refreshed(storage, anchor, new_content)
                 await storage.update_neuron(updated_neuron)
                 changes.append(f"content updated (v{old_version}→v{new_version})")
 

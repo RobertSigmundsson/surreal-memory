@@ -273,3 +273,35 @@ def test_brain_config_lazy_entity_defaults():
     assert config.lazy_entity_enabled is True
     assert config.lazy_entity_promotion_threshold == 2
     assert config.lazy_entity_prune_days == 90
+
+
+# ── Entity reuse must never bind to a GRAPH_ONLY tombstone ──
+
+
+async def test_similar_entity_lookup_skips_legacy_tombstones():
+    """A tombstone with a stale hash must not become an entity's neuron.
+
+    Tombstones written before the hash sentinel carry the SimHash of their
+    DELETED text. The near-duplicate fallback in entity reuse would match a
+    new entity against that fingerprint and bind the entity reference to a
+    "[graph-only]" placeholder - a persisted wrong link. Same guard as the
+    census and the dedup pipeline.
+    """
+    from surreal_memory.engine.pipeline_steps import _find_similar_entity
+    from surreal_memory.utils.simhash import simhash
+
+    entity_text = "Staging Cluster"
+    tombstone = Neuron.create(type=NeuronType.CONCEPT, content="[graph-only]")
+    from dataclasses import replace as dc_replace
+
+    tombstone = dc_replace(tombstone, content_hash=simhash(entity_text))
+
+    storage = AsyncMock()
+    # Exact and normalised lookups miss; the hash fallback sees the tombstone.
+    storage.find_neurons = AsyncMock(side_effect=[[], [], [tombstone]])
+
+    result = await _find_similar_entity(storage, entity_text)
+    assert result is None, (
+        "the tombstone's fingerprint describes deleted text - binding a live "
+        "entity reference to a placeholder neuron is a persisted wrong link"
+    )
