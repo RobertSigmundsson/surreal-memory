@@ -174,7 +174,11 @@ class SurrealDBCompressionMixin:
             "neuron_id": neuron_id,
             "brain_id": brain_id,
             "original_content": original_content,
-            "compressed_at": _parse_datetime(compressed_at) or utcnow(),
+            # neuron_snapshots.compressed_at is declared TYPE string, so send a
+            # string: a datetime fails coercion on a SCHEMAFULL table and the
+            # caller's fail-soft except swallows it, leaving no snapshot to
+            # recover from. get_neuron_snapshot parses it back on read.
+            "compressed_at": (_parse_datetime(compressed_at) or utcnow()).isoformat(),
             "tier": int(tier),
         }
 
