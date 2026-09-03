@@ -411,12 +411,18 @@ class SurrealDBCognitiveMixin:
         sid = _to_surreal_id(gap_id)
 
         rows = await self._query(
+            # Rebuild the record id in SurrealQL rather than comparing `id`
+            # with a "knowledge_gaps:<sid>" *string*: `id` holds a record id,
+            # so the string form is unconditionally false and this lookup
+            # returned None for every gap that existed. Same trap as the
+            # typed_memory / fiber / alerts lookups in this package.
             "SELECT id, topic, detected_at, detection_source,"
             " related_neuron_ids, resolved_at, resolved_by_neuron_id, priority"
             " FROM knowledge_gaps"
-            " WHERE brain_id = $brain_id AND id = $rid LIMIT 1",
+            " WHERE brain_id = $brain_id AND id = type::record('knowledge_gaps', $sid)"
+            " LIMIT 1",
             brain_id=brain_id,
-            rid=f"knowledge_gaps:{sid}",
+            sid=sid,
         )
         if not rows:
             return None
@@ -445,16 +451,17 @@ class SurrealDBCognitiveMixin:
 
         existing = await self._query(
             "SELECT id FROM knowledge_gaps"
-            " WHERE brain_id = $brain_id AND id = $rid AND resolved_at IS NONE LIMIT 1",
+            " WHERE brain_id = $brain_id AND id = type::record('knowledge_gaps', $sid)"
+            " AND resolved_at IS NONE LIMIT 1",
             brain_id=brain_id,
-            rid=f"knowledge_gaps:{sid}",
+            sid=sid,
         )
         if not existing:
             return False
 
         conn = self._ensure_conn()
         await conn.merge(
-            f"knowledge_gaps:{sid}",
+            existing[0]["id"],
             {
                 "resolved_at": utcnow(),
                 "resolved_by_neuron_id": resolved_by_neuron_id,

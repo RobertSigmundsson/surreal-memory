@@ -1,4 +1,12 @@
-"""SurrealDB versions storage mixin (compressed brain snapshots)."""
+"""SurrealDB versions storage mixin (compressed brain snapshots).
+
+Single-version lookups rebuild the record id in SurrealQL with
+``type::record('brain_versions', $sid)``. Comparing ``id`` with a
+``"brain_versions:<sid>"`` *string* is unconditionally false — ``id`` holds a
+record id — so ``get_version`` and ``delete_version`` could never find a row,
+and every restore/diff path in ``engine/brain_versioning.py`` saw an empty
+result. Same trap as the ``typed_memory`` / ``alerts`` lookups in this package.
+"""
 
 from __future__ import annotations
 
@@ -134,9 +142,10 @@ class SurrealDBVersionsMixin:
         """Get a version and its decompressed snapshot JSON by ID."""
         sid = _to_surreal_id(version_id)
         rows = await self._query(
-            "SELECT * FROM brain_versions WHERE brain_id = $brain_id AND id = $rid LIMIT 1",
+            "SELECT * FROM brain_versions WHERE brain_id = $brain_id"
+            " AND id = type::record('brain_versions', $sid) LIMIT 1",
             brain_id=brain_id,
-            rid=f"brain_versions:{sid}",
+            sid=sid,
         )
         if not rows:
             return None
@@ -181,9 +190,10 @@ class SurrealDBVersionsMixin:
         """Delete a specific version. Returns True if a row was deleted."""
         sid = _to_surreal_id(version_id)
         existing = await self._query(
-            "SELECT id FROM brain_versions WHERE brain_id = $brain_id AND id = $rid LIMIT 1",
+            "SELECT id FROM brain_versions WHERE brain_id = $brain_id"
+            " AND id = type::record('brain_versions', $sid) LIMIT 1",
             brain_id=brain_id,
-            rid=f"brain_versions:{sid}",
+            sid=sid,
         )
         if not existing:
             return False
