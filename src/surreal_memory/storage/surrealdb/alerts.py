@@ -1,4 +1,23 @@
-"""SurrealDB alerts storage mixin."""
+"""SurrealDB alerts storage mixin.
+
+Single-alert lookups bind the *sanitised* id and rebuild the record id inside
+SurrealQL with ``type::record('alerts', $sid)``. Comparing ``id`` against a
+plain ``"alerts:<sid>"`` string is not a slower spelling of the same thing —
+``id`` holds a record id, so the predicate is unconditionally false and the row
+can never match. That silently disabled ``mark_alerts_seen``,
+``mark_alert_acknowledged`` and ``get_alert``. ``resolve_alerts_by_type`` was
+unaffected because it reuses the ``id`` value its own SELECT returned. Same
+lesson, same shape as the ``typed_memory`` / ``fiber`` lookups in this package.
+
+The writes then reuse that same ``id`` object rather than rebuilding
+``f"alerts:{sid}"``. Rebuilding it looks equivalent and is not: an all-digit
+sid (``uuid4().hex[:16]`` is all digits about once in two thousand) round-trips
+through the SDK as a *numeric* record id, while ``record_alert`` stored a
+*string* one — so the SELECT would find the row and the merge would write to a
+different, empty record, and the call would report success having changed
+nothing. Reading the id back from the query is the only spelling that cannot
+drift from the row that was actually matched.
+"""
 
 from __future__ import annotations
 
@@ -107,9 +126,15 @@ class SurrealDBAlertsMixin:
             await conn.insert("alerts", record_data)
         except Exception:
             try:
-                await conn.delete(f"alerts:{sid}")
+                # Not conn.delete(f"alerts:{sid}"): an all-digit sid goes back
+                # through the SDK as a numeric record id, so that call deletes a
+                # different (absent) record, raises nothing, and leaves the
+                # clashing row in place — the retry below then fails the same
+                # way. Rebuilding the id in SurrealQL keeps it a string, which
+                # is what the insert above stored.
+                await self._query("DELETE type::record('alerts', $sid)", sid=sid)
             except Exception:
-                pass
+                logger.debug("alert insert retry: delete of the clashing row failed")
             await conn.insert("alerts", record_data)
 
         return alert.id
@@ -160,17 +185,17 @@ class SurrealDBAlertsMixin:
         updated = 0
 
         for aid in alert_ids:
-            sid = _to_surreal_id(aid)
             existing = await self._query(
                 "SELECT id FROM alerts"
-                " WHERE brain_id = $brain_id AND id = $rid AND status = 'active' LIMIT 1",
+                " WHERE brain_id = $brain_id AND id = type::record('alerts', $sid)"
+                " AND status = 'active' LIMIT 1",
                 brain_id=brain_id,
-                rid=f"alerts:{sid}",
+                sid=_to_surreal_id(aid),
             )
             if not existing:
                 continue
             await conn.merge(
-                f"alerts:{sid}",
+                existing[0]["id"],
                 {"status": AlertStatus.SEEN.value, "seen_at": now},
             )
             updated += 1
@@ -179,21 +204,20 @@ class SurrealDBAlertsMixin:
     async def mark_alert_acknowledged(self, alert_id: str) -> bool:
         """Mark a single alert as acknowledged. Returns True if updated."""
         brain_id = self._get_brain_id()
-        sid = _to_surreal_id(alert_id)
 
         existing = await self._query(
             "SELECT id FROM alerts"
-            " WHERE brain_id = $brain_id AND id = $rid"
+            " WHERE brain_id = $brain_id AND id = type::record('alerts', $sid)"
             " AND status IN ['active', 'seen'] LIMIT 1",
             brain_id=brain_id,
-            rid=f"alerts:{sid}",
+            sid=_to_surreal_id(alert_id),
         )
         if not existing:
             return False
 
         conn = self._ensure_conn()
         await conn.merge(
-            f"alerts:{sid}",
+            existing[0]["id"],
             {"status": AlertStatus.ACKNOWLEDGED.value, "acknowledged_at": utcnow()},
         )
         return True
@@ -236,9 +260,10 @@ class SurrealDBAlertsMixin:
         sid = _to_surreal_id(alert_id)
 
         rows = await self._query(
-            "SELECT * FROM alerts WHERE brain_id = $brain_id AND id = $rid LIMIT 1",
+            "SELECT * FROM alerts WHERE brain_id = $brain_id"
+            " AND id = type::record('alerts', $sid) LIMIT 1",
             brain_id=brain_id,
-            rid=f"alerts:{sid}",
+            sid=sid,
         )
         if not rows:
             return None

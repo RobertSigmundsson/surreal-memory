@@ -51,6 +51,7 @@ LIVE_TEST_BRAIN_NAMES = frozenset(
         "zz-dashboard-brains-scope-live",  # test_dashboard_brains_scope.py (list_brains_api)
         "zz-dashboard-stats-scope-live",  # test_dashboard_brains_scope.py (get_stats)
         "today-fibers-binding-live",  # test_surrealdb_today_fibers_live.py
+        "alerts-recordid-live",  # test_surrealdb_alerts_recordid_live.py
     }
 )
 
