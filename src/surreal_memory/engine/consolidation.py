@@ -2840,18 +2840,44 @@ class ConsolidationEngine:
         config = CompressionConfig()
         states_updated = 0
 
-        for neuron in neurons:
-            # Retrieve last_accessed_at and access_frequency from neuron metadata
-            # (access_frequency is stored in neuron_states, not neurons directly)
-            last_accessed_raw: str | None = neuron.metadata.get("last_accessed_at")
-            last_accessed_at: datetime | None = None
-            if last_accessed_raw:
-                try:
-                    last_accessed_at = datetime.fromisoformat(last_accessed_raw)
-                except ValueError:
-                    pass
+        # access_frequency and last_activated live on NeuronState (schema.py neuron_state
+        # table), not on neuron.metadata — the dead-neuron / orphan pass in this same
+        # class already knows this (_prune, ~L1000) and prefetches with the exact
+        # pattern below. Without this, access_score and recency_score (0.8 of the heat
+        # weight) were pinned to zero and heat reduced to priority * 0.2.
+        try:
+            states_by_id: dict[str, Any] = {
+                s.neuron_id: s for s in await self._storage.get_all_neuron_states()
+            }
+            use_prefetched_states = True
+        except Exception:
+            _logger.debug(
+                "LIFECYCLE: get_all_neuron_states failed; per-page fallback",
+                exc_info=True,
+            )
+            states_by_id = {}
+            use_prefetched_states = False
 
-            access_count: int = int(neuron.metadata.get("access_frequency", 0))
+        # Per-page batch cache for the fallback path — no repeat queries per neuron.
+        page_states: dict[str, Any] = {}
+        page_neuron_ids: set[str] = set()
+
+        async def _state_for(nid: str) -> Any:
+            nonlocal page_states, page_neuron_ids
+            if use_prefetched_states:
+                return states_by_id.get(nid)
+            if nid not in page_neuron_ids:
+                # Rebuild the page cache from the current batch of neurons.
+                page_neuron_ids = {n.id for n in neurons}
+                page_states = await self._storage.get_neuron_states_batch(list(page_neuron_ids))
+            return page_states.get(nid)
+
+        for neuron in neurons:
+            # Real access_frequency / last_activated come from NeuronState; priority
+            # stays on neuron.metadata (that is where the writer puts it).
+            state = await _state_for(neuron.id)
+            last_accessed_at: datetime | None = state.last_activated if state is not None else None
+            access_count: int = state.access_frequency if state is not None else 0
             priority: int = int(neuron.metadata.get("priority", 5))
 
             heat = calculate_heat_score(
