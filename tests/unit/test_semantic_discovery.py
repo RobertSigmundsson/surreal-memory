@@ -190,6 +190,60 @@ class TestDiscoverSemanticSynapses:
                 assert syn.weight <= 0.6
         assert found_similar
 
+    async def test_graph_only_tombstones_are_never_linked(
+        self, storage: InMemoryStorage, brain_config: BrainConfig
+    ) -> None:
+        """Tombstones share one placeholder text, so their stored vectors are
+        identical brain-wide - cosine 1.0 between memories with nothing in
+        common. Discovery must skip them, or every consolidation pass persists
+        false SIMILAR_TO edges between unrelated memories; genuine neurons in
+        the same brain must still link so the skip cannot over-filter.
+        """
+        t1 = Neuron.create(
+            type=NeuronType.CONCEPT,
+            content="[graph-only]",
+            neuron_id="t1",
+            metadata={"_embedding": [0.7, 0.7, 0.0]},
+        )
+        t2 = Neuron.create(
+            type=NeuronType.CONCEPT,
+            content="[graph-only]",
+            neuron_id="t2",
+            metadata={"_embedding": [0.7, 0.7, 0.0]},  # identical - placeholder embed
+        )
+        real1 = Neuron.create(
+            type=NeuronType.CONCEPT,
+            content="machine learning",
+            neuron_id="real1",
+            metadata={"_embedding": [0.9, 0.1, 0.0]},
+        )
+        real2 = Neuron.create(
+            type=NeuronType.CONCEPT,
+            content="deep learning",
+            neuron_id="real2",
+            metadata={"_embedding": [0.85, 0.15, 0.0]},
+        )
+        for n in (t1, t2, real1, real2):
+            await storage.add_neuron(n)
+
+        result = await discover_semantic_synapses(storage, brain_config)
+
+        tombstone_ids = {"t1", "t2"}
+        tombstone_edges = [
+            s
+            for s in result.synapses
+            if s.source_id in tombstone_ids or s.target_id in tombstone_ids
+        ]
+        assert tombstone_edges == [], (
+            "identical placeholder vectors must not become SIMILAR_TO edges - "
+            "a tombstone pair at cosine 1.0 is an artefact of compression, not "
+            "a semantic relationship"
+        )
+        assert result.neurons_embedded == 2, "only the two genuine neurons are eligible"
+        assert any({s.source_id, s.target_id} == {"real1", "real2"} for s in result.synapses), (
+            "the skip must not stop genuine neurons from linking"
+        )
+
     async def test_skips_existing_synapse_pairs(
         self, storage: InMemoryStorage, brain_config: BrainConfig
     ) -> None:

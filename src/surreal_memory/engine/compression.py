@@ -26,10 +26,13 @@ from datetime import datetime
 from enum import IntEnum, StrEnum
 from typing import TYPE_CHECKING, Any
 
+from surreal_memory.utils.content_refresh import content_refreshed, contents_refreshed
 from surreal_memory.utils.timeutils import ensure_naive_utc, utcnow
 
 if TYPE_CHECKING:
+    from surreal_memory.core.brain import Brain
     from surreal_memory.core.fiber import Fiber
+    from surreal_memory.core.neuron import Neuron
     from surreal_memory.storage.base import NeuralStorage
 
 logger = logging.getLogger(__name__)
@@ -552,6 +555,7 @@ class CompressionEngine:
         target_tier: CompressionTier,
         *,
         dry_run: bool = False,
+        brain: Brain | None = None,
     ) -> CompressionResult:
         """Compress a single fiber to *target_tier*.
 
@@ -741,16 +745,41 @@ class CompressionEngine:
         # Apply compression: update each neuron's content if tier < GRAPH_ONLY,
         # or clear all content for GRAPH_ONLY.
         if target_tier == CompressionTier.GRAPH_ONLY:
-            for neuron in neurons.values():
-                from dataclasses import replace as dc_replace
+            from dataclasses import replace as dc_replace
 
-                cleared = dc_replace(neuron, content="[graph-only]")
+            # Neurons already carrying the placeholder with the sentinel hash
+            # are done - re-deriving their fields would only spend a provider
+            # call on a known result.
+            pending_clear = [n for n in neurons.values() if n.content != "[graph-only]"]
+            # The placeholder is a tombstone, not content, so it gets the
+            # codebase's "no meaningful fingerprint" sentinel rather than
+            # simhash("[graph-only]"). That SimHash is one constant for every
+            # graph-only anchor, and the consolidation census compares anchors
+            # by Hamming distance - identical fingerprints would read as a
+            # near-duplicate pair and persist a false "duplicate of" edge
+            # between unrelated memories. Both census and dedup skip 0.
+            refreshed = [
+                dc_replace(n, content_hash=0)
+                for n in await contents_refreshed(
+                    self._storage, [(n, "[graph-only]") for n in pending_clear], brain=brain
+                )
+            ]
+            # Tombstones written before this change carry the SimHash of their
+            # deleted original text, which keeps feeding the census fingerprints
+            # of content that no longer exists. Stamp the sentinel on those too;
+            # no re-embed - a repeat pass stays provider-free.
+            refreshed.extend(
+                dc_replace(n, content_hash=0)
+                for n in neurons.values()
+                if n.content == "[graph-only]" and n.content_hash != 0
+            )
+            for cleared in refreshed:
                 try:
                     await self._storage.update_neuron(cleared)
                 except Exception:
                     logger.error(
                         "Failed to clear neuron %s content for fiber %s",
-                        neuron.id,
+                        cleared.id,
                         fiber.id,
                         exc_info=True,
                     )
@@ -764,9 +793,9 @@ class CompressionEngine:
             anchor_id = fiber.anchor_neuron_id
             anchor_neuron = neurons.get(anchor_id)
             if anchor_neuron is not None:
-                from dataclasses import replace as dc_replace
-
-                updated_anchor = dc_replace(anchor_neuron, content=compressed_content)
+                updated_anchor = await content_refreshed(
+                    self._storage, anchor_neuron, compressed_content, brain=brain
+                )
                 try:
                     await self._storage.update_neuron(updated_anchor)
                 except Exception:
@@ -830,9 +859,7 @@ class CompressionEngine:
             logger.error("Anchor neuron %s missing for fiber %s", anchor_id, fiber_id)
             return False
 
-        from dataclasses import replace as dc_replace
-
-        restored_neuron = dc_replace(anchor_neuron, content=original_content)
+        restored_neuron = await content_refreshed(self._storage, anchor_neuron, original_content)
         try:
             await self._storage.update_neuron(restored_neuron)
         except Exception:
@@ -840,6 +867,8 @@ class CompressionEngine:
             return False
 
         # Reset fiber compression tier to 0 (FULL).
+        from dataclasses import replace as dc_replace
+
         updated_fiber = dc_replace(fiber, compression_tier=int(CompressionTier.FULL))
         try:
             await self._storage.update_fiber(updated_fiber)
@@ -881,6 +910,9 @@ class CompressionEngine:
         if current_tier in (CompressionTier.TEMPLATE, CompressionTier.GRAPH_ONLY):
             neurons = await self._storage.get_neurons_batch(list(fiber.neuron_ids))
             restored_count = 0
+            # Collect first, then refresh as one batch: re-deriving each neuron's
+            # embedding separately would cost a provider round-trip per neuron.
+            pending: list[tuple[Neuron, str]] = []
             for neuron in neurons.values():
                 snapshot: dict[str, Any] | None = await self._storage.get_neuron_snapshot(neuron.id)
                 if snapshot is None:
@@ -888,16 +920,18 @@ class CompressionEngine:
                 original_content: str = snapshot.get("original_content", "")
                 if not original_content:
                     continue
-                from dataclasses import replace as dc_replace
+                pending.append((neuron, original_content))
 
-                restored_neuron = dc_replace(neuron, content=original_content)
+            for restored_neuron in await contents_refreshed(self._storage, pending):
                 try:
                     await self._storage.update_neuron(restored_neuron)
-                    await self._storage.delete_neuron_snapshot(neuron.id)
+                    await self._storage.delete_neuron_snapshot(restored_neuron.id)
                     restored_count += 1
                 except Exception:
                     logger.error(
-                        "Failed to restore neuron %s from snapshot", neuron.id, exc_info=True
+                        "Failed to restore neuron %s from snapshot",
+                        restored_neuron.id,
+                        exc_info=True,
                     )
 
             if restored_count > 0:
@@ -966,6 +1000,14 @@ class CompressionEngine:
 
         fibers = await self._storage.get_fibers(limit=10000)
 
+        # One brain lookup for the whole pass: the derived-field refresh needs
+        # the brain's embedding config, which cannot change mid-run, and paying
+        # a per-fiber lookup would contradict this path's own round-trip budget.
+        try:
+            brain = await self._storage.get_brain(self._storage.current_brain_id or "")
+        except Exception:
+            brain = None
+
         for idx, fiber in enumerate(fibers):
             # Pinned (KB) fibers stay at tier 0 forever
             if fiber.pinned:
@@ -1004,7 +1046,7 @@ class CompressionEngine:
                 break
 
             try:
-                result = await self.compress_fiber(fiber, target_tier, dry_run=dry_run)
+                result = await self.compress_fiber(fiber, target_tier, dry_run=dry_run, brain=brain)
             except Exception:
                 logger.error("Compression failed for fiber %s", fiber.id, exc_info=True)
                 report.fibers_skipped += 1

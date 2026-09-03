@@ -39,11 +39,11 @@ class TestEditRefreshesStructure:
     def test_content_refresh_recomputes_structure(self) -> None:
         source = inspect.getsource(
             __import__(
-                "surreal_memory.mcp.lifecycle_handler", fromlist=["_content_refreshed"]
-            )._content_refreshed
+                "surreal_memory.utils.content_refresh", fromlist=["contents_refreshed"]
+            ).contents_refreshed
         )
         assert "detect_structure" in source, (
-            "_content_refreshed updates content_hash and the embedding but not "
+            "contents_refreshed updates content_hash and the embedding but not "
             "metadata['_structure'], which recall reads back — an edited memory "
             "keeps answering with fields the new text no longer has"
         )
@@ -55,8 +55,8 @@ class TestEditRefreshesStructure:
         when the new content has none — the worst case, because recall would
         surface fields that no longer exist anywhere.
         """
-        source = (SRC_ROOT / "mcp" / "lifecycle_handler.py").read_text(encoding="utf-8")
-        func = _function(source, "_content_refreshed")
+        source = (SRC_ROOT / "utils" / "content_refresh.py").read_text(encoding="utf-8")
+        func = _function(source, "contents_refreshed")
         pops = [
             n
             for n in ast.walk(func)
@@ -104,8 +104,8 @@ class TestEditStructureBehaviour:
 
     async def test_editing_into_new_structure_replaces_the_old_fields(self) -> None:
         from surreal_memory.core.neuron import Neuron, NeuronType
-        from surreal_memory.mcp.lifecycle_handler import _content_refreshed
         from surreal_memory.storage.memory_store import InMemoryStorage
+        from surreal_memory.utils.content_refresh import content_refreshed
 
         neuron = Neuron.create(
             type=NeuronType.CONCEPT,
@@ -113,7 +113,7 @@ class TestEditStructureBehaviour:
             metadata={"_structure": {"format": "yaml", "fields": [{"name": "name"}]}},
         )
 
-        updated = await _content_refreshed(
+        updated = await content_refreshed(
             InMemoryStorage(), neuron, "name: new\nrole: reviewer\nteam: platform"
         )
 
@@ -123,8 +123,8 @@ class TestEditStructureBehaviour:
     async def test_editing_structure_away_drops_it_entirely(self) -> None:
         """Recall reads _structure back; a leftover would surface dead fields."""
         from surreal_memory.core.neuron import Neuron, NeuronType
-        from surreal_memory.mcp.lifecycle_handler import _content_refreshed
         from surreal_memory.storage.memory_store import InMemoryStorage
+        from surreal_memory.utils.content_refresh import content_refreshed
 
         neuron = Neuron.create(
             type=NeuronType.CONCEPT,
@@ -132,7 +132,7 @@ class TestEditStructureBehaviour:
             metadata={"_structure": {"format": "yaml", "fields": [{"name": "name"}]}},
         )
 
-        updated = await _content_refreshed(
+        updated = await content_refreshed(
             InMemoryStorage(), neuron, "just some prose with no fields at all"
         )
 
