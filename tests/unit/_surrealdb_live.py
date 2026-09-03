@@ -44,7 +44,7 @@ LIVE_TEST_BRAIN_NAMES = frozenset(
         "parity-test-surreal",  # test_get_project_memories.py
         "snapshot-roundtrip-live",  # test_surrealdb_export_import_live.py
         "snapshot-roundtrip-live-target",  # test_surrealdb_export_import_live.py
-        "neuron-snapshot-live",  # test_surrealdb_neuron_snapshot_live.py
+        "time-range-filter-live",  # test_surrealdb_time_range_filter_live.py
         "pinned-expiry-test-9f3a1c",  # test_surrealdb_expiry_respects_pinned_live.py
         "bug006-tm-delete-id-live",  # test_surrealdb_typed_memory_delete_id_live.py
         "kw-df-batch-live-4b8d2e",  # test_surrealdb_keyword_df_live.py
