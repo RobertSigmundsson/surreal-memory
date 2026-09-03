@@ -26,7 +26,7 @@ from datetime import datetime, timedelta
 from typing import Any
 
 from surreal_memory.core.alert import Alert, AlertStatus, AlertType
-from surreal_memory.storage.surrealdb._ids import _to_surreal_id
+from surreal_memory.storage.surrealdb._ids import _record_id_part, _to_surreal_id
 from surreal_memory.utils.timeutils import utcnow
 
 logger = logging.getLogger(__name__)
@@ -53,8 +53,7 @@ def _parse_datetime(val: Any) -> datetime | None:
 def _row_to_alert(row: dict[str, Any]) -> Alert:
     """Convert a SurrealDB record to an Alert dataclass."""
     metadata = dict(row.get("metadata") or {})
-    raw_id = str(row.get("id", ""))
-    alert_id = raw_id.split(":")[-1] if ":" in raw_id else raw_id
+    alert_id = _record_id_part(str(row.get("id", "")))
 
     return Alert(
         id=alert_id,

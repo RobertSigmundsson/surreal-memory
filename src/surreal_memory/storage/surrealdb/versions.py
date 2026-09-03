@@ -19,7 +19,7 @@ from datetime import datetime
 from typing import Any
 
 from surreal_memory.engine.brain_versioning import BrainVersion
-from surreal_memory.storage.surrealdb._ids import _to_surreal_id
+from surreal_memory.storage.surrealdb._ids import _record_id_part, _to_surreal_id
 from surreal_memory.utils.timeutils import utcnow
 
 logger = logging.getLogger(__name__)
@@ -70,7 +70,7 @@ def _row_to_version(row: dict[str, Any]) -> BrainVersion:
         metadata = dict(metadata_raw or {})
 
     raw_id = str(row.get("id", ""))
-    vid = raw_id.split(":")[-1] if ":" in raw_id else raw_id
+    vid = _record_id_part(raw_id)
 
     return BrainVersion(
         id=vid,
@@ -129,9 +129,14 @@ class SurrealDBVersionsMixin:
             await conn.insert("brain_versions", record_data)
         except Exception:
             try:
-                await conn.delete(f"brain_versions:{sid}")
+                # Rebuild the id in SurrealQL rather than handing the SDK a
+                # "brain_versions:<sid>" string: a letter-free sid comes back
+                # as a *numeric* record id there, so the delete would clear a
+                # different, absent record without raising, and the retry below
+                # would hit the same collision. See _ids._record_id_part.
+                await self._query("DELETE type::record('brain_versions', $sid)", sid=sid)
             except Exception:
-                pass
+                logger.debug("version insert retry: delete of the clashing row failed")
             await conn.insert("brain_versions", record_data)
 
     async def get_version(
@@ -199,8 +204,11 @@ class SurrealDBVersionsMixin:
             return False
 
         conn = self._ensure_conn()
-        rid = str(existing[0].get("id", ""))
+        rid = existing[0].get("id")
         if not rid:
             return False
+        # The id object the query returned, not str(it): stringifying a
+        # letter-free record id yields the quoted form, which does not round
+        # trip back through the SDK as the same record.
         await conn.delete(rid)
         return True

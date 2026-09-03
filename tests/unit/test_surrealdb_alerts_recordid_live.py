@@ -245,6 +245,29 @@ async def test_record_alert_can_replace_a_clashing_all_digit_row(storage) -> Non
     assert await _status_of(storage, all_digits) == "active"
 
 
+async def test_the_id_get_active_alerts_hands_back_can_be_acknowledged(storage) -> None:  # type: ignore[no-untyped-def]
+    """The caller's actual route, end to end, for a letter-free id.
+
+    ``AlertHandler`` never types an id: it lists alerts and acknowledges what
+    the listing gave it. SurrealDB renders a record id carrying no letter in
+    its quoted form (``alerts:⟨1122334455667788⟩``), so a row mapper that only
+    strips the table prefix hands the guillemets back to the caller — and
+    feeding those into ``_to_surreal_id`` maps them to underscores, producing
+    an id that no longer addresses its own row. Fixing the SELECT is not enough
+    if the id the caller receives cannot be passed back in.
+    """
+    all_digits = "1" + "".join(str(int(c, 16) % 10) for c in uuid4().hex[:15])
+    assert all_digits.isdigit()
+    await _seed(storage, all_digits, AlertType.LOW_CONNECTIVITY)
+
+    listed = await storage.get_active_alerts()
+    ids = [a.id for a in listed]
+    assert all_digits in ids, f"get_active_alerts returned a mangled id: {ids!r}"
+
+    assert await storage.mark_alert_acknowledged(ids[ids.index(all_digits)]) is True
+    assert await _status_of(storage, all_digits) == "acknowledged"
+
+
 async def test_resolve_alerts_by_type_still_works(storage) -> None:  # type: ignore[no-untyped-def]
     """Positive control on the sibling that was never broken.
 

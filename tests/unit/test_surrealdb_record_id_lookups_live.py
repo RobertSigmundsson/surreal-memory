@@ -142,6 +142,101 @@ async def test_delete_version_removes_only_the_named_one(storage) -> None:  # ty
     assert await storage.delete_version(brain_id, target.id) is False
 
 
+async def test_a_letter_free_version_id_round_trips(storage) -> None:  # type: ignore[no-untyped-def]
+    """An id carrying no letter must survive the row -> model -> lookup round trip.
+
+    SurrealDB renders such an id in its quoted form, so a mapper that only
+    strips the table prefix returns ``⟨1234…⟩`` — and that spelling cannot be
+    fed back into a lookup. ``str(uuid4())`` almost always carries a letter, so
+    this is rare in practice for versions; it is pinned here because the mapper
+    is shared with the reads above and the failure mode is a silent "not found".
+    """
+    brain_id = storage._get_brain_id()
+    numeric = "11112222_3333_4444_5555_666677778888"
+    await storage.save_version(
+        brain_id, _make_version(numeric, 7), json.dumps({"which": "numeric"})
+    )
+
+    listed = await storage.list_versions(brain_id)
+    ids = [v.id for v in listed]
+    assert numeric in ids, f"list_versions returned a mangled id: {ids!r}"
+
+    result = await storage.get_version(brain_id, ids[ids.index(numeric)])
+    assert result is not None, "the id list_versions handed back does not resolve"
+    assert await storage.delete_version(brain_id, numeric) is True
+
+
+async def test_a_letter_free_gap_id_round_trips(storage) -> None:  # type: ignore[no-untyped-def]
+    """Same round trip for knowledge gaps, through list_knowledge_gaps."""
+    conn = storage._ensure_conn()
+    numeric = "1234123412341234"
+    await conn.insert(
+        "knowledge_gaps",
+        {
+            "id": numeric,
+            "brain_id": storage._get_brain_id(),
+            "topic": "letter-free",
+            "detected_at": utcnow(),
+            "detection_source": "test",
+            "related_neuron_ids": [],
+            "priority": 0.5,
+        },
+    )
+
+    listed = await storage.list_knowledge_gaps()
+    ids = [g["id"] for g in listed]
+    assert numeric in ids, f"list_knowledge_gaps returned a mangled id: {ids!r}"
+
+    assert await storage.get_knowledge_gap(ids[ids.index(numeric)]) is not None
+    assert await storage.resolve_knowledge_gap(numeric) is True
+
+
+async def test_update_cognitive_evidence_writes_to_the_row_it_found(storage) -> None:  # type: ignore[no-untyped-def]
+    """The evidence update must target the row its own SELECT matched.
+
+    ``cognitive_state`` record ids are built as ``<brain>_<neuron>``, but the
+    lookup is by the ``brain_id`` *field*. After a brain rename the two diverge:
+    the row is still found, while an id recomputed from the current brain name
+    points at a record that does not exist — so the merge writes nothing and the
+    caller is told nothing. ``upsert_cognitive_state`` already carries that
+    lesson in a comment; this pins it for the evidence path too.
+
+    The divergence is staged directly, which is what a rename leaves behind:
+    a row whose id carries an older brain prefix but whose ``brain_id`` field
+    is current.
+    """
+    conn = storage._ensure_conn()
+    neuron_id = "aaaabbbb-cccc-4ddd-8eee-ffff00001111"
+    await conn.insert(
+        "cognitive_state",
+        {
+            "id": f"an_older_brain_name_{neuron_id.replace('-', '_')}",
+            "brain_id": storage._get_brain_id(),
+            "neuron_id": neuron_id,
+            "confidence": 0.5,
+            "evidence_for_count": 0,
+            "evidence_against_count": 0,
+            "status": "active",
+            "created_at": utcnow(),
+        },
+    )
+
+    await storage.update_cognitive_evidence(
+        neuron_id,
+        confidence=0.9,
+        evidence_for_count=7,
+        evidence_against_count=1,
+        status="resolved",
+    )
+
+    state = await storage.get_cognitive_state(neuron_id)
+    assert state is not None
+    assert state["evidence_for_count"] == 7, (
+        "update_cognitive_evidence reported nothing and wrote nothing"
+    )
+    assert state["status"] == "resolved"
+
+
 async def test_unknown_version_id_is_reported_as_missing(storage) -> None:  # type: ignore[no-untyped-def]
     brain_id = storage._get_brain_id()
     await storage.save_version(
