@@ -6,6 +6,7 @@ import logging
 from typing import TYPE_CHECKING, Any
 
 from surreal_memory.core.memory_types import (
+    DEFAULT_EXPIRY_DAYS,
     MemoryTier,
     MemoryType,
     Priority,
@@ -87,6 +88,17 @@ class LifecycleHandler:
                 if new_type is not None:
                     updated_tm = dc_replace(updated_tm, memory_type=MemoryType(new_type))
                     changes.append(f"type: {typed_mem.memory_type.value} → {new_type}")
+                    # Recompute expires_at from DEFAULT_EXPIRY_DAYS[new_type] relative to
+                    # now (None = clear); the old type's TTL was left in place before,
+                    # so a DECISION (90d) edited to FACT (None) still expired ~90d out,
+                    # and a FACT edited to TODO/ERROR (30d) never picked up its finite
+                    # expiry at all. `_forget` (below) is the only other writer of
+                    # expires_at and it stays unchanged.
+                    new_default_days = DEFAULT_EXPIRY_DAYS[MemoryType(new_type)]
+                    if new_default_days is None:
+                        updated_tm = dc_replace(updated_tm, expires_at=None)
+                    else:
+                        updated_tm = updated_tm.extend_expiry(new_default_days)
                     # Sync type into fiber.metadata to keep both stores consistent
                     updated_meta = {**fiber.metadata, "type": new_type}
                     fiber = dc_replace(fiber, metadata=updated_meta)
