@@ -5,6 +5,21 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+
+- `MaintenanceConfig.scheduled_consolidation_strategies` now defaults to
+  `("prune", "merge", "mature", "enrich")` — the previous default omitted
+  `mature`, the only strategy that promotes `EPISODIC → SEMANTIC`, so a
+  scheduled consolidation run on the default configuration never promoted
+  a single memory. This is a behavioural change delivered through a
+  default: after upgrading, the scheduled loop (24h cycle in `smem serve`
+  and the MCP maintenance handler) begins promoting qualifying episodic
+  memories. Installations with a saved `config.toml` keep their persisted
+  value — add `"mature"` to `scheduled_consolidation_strategies` there to
+  pick up the new default.
+
 ## [3.9.1] — 2026-09-03 — the dashboard answers before the diagnostics do
 
 ### Fixed
