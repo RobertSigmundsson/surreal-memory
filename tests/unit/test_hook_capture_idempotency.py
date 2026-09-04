@@ -1,9 +1,9 @@
 """Behavioral regression tests for auto-capture hook idempotency (upstream #80).
 
-Reproduces the defect confirmed manually in ~/expertP/smem-idempotency-80/
-CHECKPOINTS/F1: the Stop and PreCompact hooks re-encode a session summary
-(or fragment) every time they are invoked for the same session, even when
-the effectively-captured text has not changed since the previous call.
+The defect, confirmed manually during development: the Stop and PreCompact
+hooks re-encode a session summary (or fragment) every time they are invoked
+for the same session, even when the effectively-captured text has not
+changed since the previous call.
 
 Every test here runs against a real, isolated in-memory brain (a fresh tmp_path
 HOME) -- never the shared prod brain. Each test uses a unique brain name and
