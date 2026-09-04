@@ -549,7 +549,17 @@ class MemoryEncoder:
             )
             return
         except Exception:
-            logger.debug("Inline embedding skipped (provider unavailable)", exc_info=True)
+            # Sibling to the TimeoutError branch above. Both leave the neuron
+            # keyword-only with `smem reindex` as the fix, so both should log
+            # the same way — provider-down is more common than timeout, so
+            # burying it at DEBUG (invisible under any default config) meant
+            # the more likely failure gave the operator nothing to act on.
+            logger.warning(
+                "Inline embedding skipped for %d neuron(s) (provider unavailable) — "
+                "memory saved keyword-only; run `smem reindex` to back-fill the vectors.",
+                len(candidates),
+                exc_info=True,
+            )
             return
 
         # Prefer a single batched write (SurrealDB collapses this into one
