@@ -13,6 +13,43 @@ from surreal_memory.safety.freshness import evaluate_freshness, format_age
 
 logger = logging.getLogger(__name__)
 
+# `engine/compression.py:764` writes this literal into a GRAPH_ONLY-compressed
+# anchor neuron's content — it's a tombstone, not text a user should ever see
+# rendered as a memory preview. The four call sites below skip it so the
+# helper can fall through to `fiber.essence` instead.
+_GRAPH_ONLY_SENTINEL = "[graph-only]"
+
+
+async def _fiber_preview_content(fiber: Any, storage: Any) -> str:
+    """Preview text for a fiber: ``summary → anchor.content → essence``.
+
+    Behaviour-preserving over the previous two-step chain
+    (``summary → anchor.content``) for every case except one: when the anchor
+    has been reduced to the ``GRAPH_ONLY`` compression sentinel
+    (``"[graph-only]"``) the helper falls through to ``fiber.essence``.
+    ``_essence_backfill`` in ``engine/consolidation.py`` may have generated a
+    real essence from the anchor's original content before compression ran,
+    so the tombstone is precisely the case where essence is the correct thing
+    to render.
+
+    Kept in this module (rather than folded into ``adapters/langchain.py``'s
+    ``_page_content``) because langchain's helper uses a different order
+    (``anchor → summary → essence``) tuned for retrieval, and unifying the
+    two would change ``smem list``'s user-visible behaviour beyond the
+    scope of this fix.
+    """
+    if fiber.summary:
+        return str(fiber.summary)
+    if fiber.anchor_neuron_id:
+        anchor = await storage.get_neuron(fiber.anchor_neuron_id)
+        if anchor is not None:
+            content = getattr(anchor, "content", None)
+            if content and content != _GRAPH_ONLY_SENTINEL:
+                return str(content)
+    if fiber.essence:
+        return str(fiber.essence)
+    return ""
+
 
 def list_memories(
     memory_type: Annotated[
@@ -87,14 +124,7 @@ def list_memories(
             memories_data = []
             for tm in expired_memories[:limit]:
                 fiber = await storage.get_fiber(tm.fiber_id)
-                content = ""
-                if fiber:
-                    if fiber.summary:
-                        content = fiber.summary
-                    elif fiber.anchor_neuron_id:
-                        anchor = await storage.get_neuron(fiber.anchor_neuron_id)
-                        if anchor:
-                            content = anchor.content
+                content = await _fiber_preview_content(fiber, storage) if fiber else ""
 
                 memories_data.append(
                     {
@@ -130,11 +160,7 @@ def list_memories(
             fibers = await storage.get_fibers(limit=limit)
             memories_data = []
             for fiber in fibers:
-                content = fiber.summary or ""
-                if not content and fiber.anchor_neuron_id:
-                    anchor = await storage.get_neuron(fiber.anchor_neuron_id)
-                    if anchor:
-                        content = anchor.content
+                content = await _fiber_preview_content(fiber, storage)
 
                 freshness = evaluate_freshness(fiber.created_at)
                 memories_data.append(
@@ -160,14 +186,7 @@ def list_memories(
         memories_data = []
         for tm in typed_memories:
             fiber = await storage.get_fiber(tm.fiber_id)
-            content = ""
-            if fiber:
-                if fiber.summary:
-                    content = fiber.summary
-                elif fiber.anchor_neuron_id:
-                    anchor = await storage.get_neuron(fiber.anchor_neuron_id)
-                    if anchor:
-                        content = anchor.content
+            content = await _fiber_preview_content(fiber, storage) if fiber else ""
 
             freshness = evaluate_freshness(tm.created_at)
             expiry_info = None
@@ -336,14 +355,8 @@ def cleanup(
         to_delete = []
         for tm in expired_memories:
             fiber = await storage.get_fiber(tm.fiber_id)
-            content = ""
-            if fiber:
-                if fiber.summary:
-                    content = fiber.summary[:50]
-                elif fiber.anchor_neuron_id:
-                    anchor = await storage.get_neuron(fiber.anchor_neuron_id)
-                    if anchor:
-                        content = anchor.content[:50]
+            full_content = await _fiber_preview_content(fiber, storage) if fiber else ""
+            content = full_content[:50]
 
             to_delete.append(
                 {
