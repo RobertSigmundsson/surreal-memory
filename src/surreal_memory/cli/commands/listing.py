@@ -8,16 +8,11 @@ from typing import Annotated, Any
 import typer
 
 from surreal_memory.cli._helpers import get_config, get_storage, output_result, run_async
+from surreal_memory.core.constants import GRAPH_ONLY_PLACEHOLDER
 from surreal_memory.core.memory_types import MemoryType, Priority
 from surreal_memory.safety.freshness import evaluate_freshness, format_age
 
 logger = logging.getLogger(__name__)
-
-# `engine/compression.py:764` writes this literal into a GRAPH_ONLY-compressed
-# anchor neuron's content — it's a tombstone, not text a user should ever see
-# rendered as a memory preview. The four call sites below skip it so the
-# helper can fall through to `fiber.essence` instead.
-_GRAPH_ONLY_SENTINEL = "[graph-only]"
 
 
 async def _fiber_preview_content(fiber: Any, storage: Any) -> str:
@@ -44,7 +39,7 @@ async def _fiber_preview_content(fiber: Any, storage: Any) -> str:
         anchor = await storage.get_neuron(fiber.anchor_neuron_id)
         if anchor is not None:
             content = getattr(anchor, "content", None)
-            if content and content != _GRAPH_ONLY_SENTINEL:
+            if content and content != GRAPH_ONLY_PLACEHOLDER:
                 return str(content)
     if fiber.essence:
         return str(fiber.essence)

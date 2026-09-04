@@ -20,13 +20,14 @@ instead of the tombstone.
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock
 
 import pytest
 
-from surreal_memory.cli.commands.listing import _fiber_preview_content
+from surreal_memory.cli.commands.listing import _fiber_preview_content, list_memories
 
 
 def _fiber(
@@ -105,3 +106,72 @@ class TestFiberPreviewContent:
         result = await _fiber_preview_content(fiber, storage)
         assert result == "a summary"
         storage.get_neuron.assert_not_called()
+
+
+class TestListMemoriesCallSites:
+    """The helper is only half the fix — these tests go through the actual
+    `list_memories` call sites. With the call sites reverted to the old
+    two-step chain, both fail (the preview renders the literal tombstone);
+    they exist because an earlier version of this PR's tests measured only
+    the helper in isolation and passed with all four call sites unwired."""
+
+    @staticmethod
+    def _patched_storage(
+        monkeypatch: pytest.MonkeyPatch, *, typed: Any | None, expired: Any | None
+    ) -> Any:
+        import surreal_memory.cli.commands.listing as listing_mod
+
+        storage = SimpleNamespace()
+        if typed is not None:
+            storage.find_typed_memories = AsyncMock(return_value=typed)
+        if expired is not None:
+            storage.get_expired_memories = AsyncMock(return_value=expired)
+        storage.get_fiber = AsyncMock(
+            return_value=SimpleNamespace(
+                summary=None,
+                essence="real human essence",
+                anchor_neuron_id="n1",
+                created_at=datetime(2026, 9, 4, tzinfo=UTC),
+                id="f1",
+            )
+        )
+        storage.get_neuron = AsyncMock(return_value=SimpleNamespace(content="[graph-only]"))
+        monkeypatch.setattr(listing_mod, "get_storage", AsyncMock(return_value=storage))
+        monkeypatch.setattr(listing_mod, "get_config", lambda: SimpleNamespace())
+        return storage
+
+    def test_expired_branch_renders_essence_not_tombstone(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from surreal_memory.core.memory_types import MemoryType, Priority, TypedMemory
+
+        tm = TypedMemory.create(
+            fiber_id="f1", memory_type=MemoryType.DECISION, priority=Priority.NORMAL, source="t"
+        )
+        self._patched_storage(monkeypatch, typed=None, expired=[tm])
+        import surreal_memory.cli.commands.listing as listing_mod
+
+        echoed: list[str] = []
+        monkeypatch.setattr(listing_mod.typer, "echo", lambda s, **kw: echoed.append(str(s)))
+        list_memories(show_expired=True, json_output=False)
+        assert any("real human essence" in line for line in echoed), (
+            f"expired listing must show the essence, not the tombstone; got {echoed}"
+        )
+
+    def test_typed_branch_renders_essence_not_tombstone(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from surreal_memory.core.memory_types import MemoryType, Priority, TypedMemory
+
+        tm = TypedMemory.create(
+            fiber_id="f1", memory_type=MemoryType.DECISION, priority=Priority.NORMAL, source="t"
+        )
+        self._patched_storage(monkeypatch, typed=[tm], expired=None)
+        import surreal_memory.cli.commands.listing as listing_mod
+
+        echoed: list[str] = []
+        monkeypatch.setattr(listing_mod.typer, "echo", lambda s, **kw: echoed.append(str(s)))
+        list_memories(json_output=False)
+        assert any("real human essence" in line for line in echoed), (
+            f"typed-memory listing must show the essence, not the tombstone; got {echoed}"
+        )
