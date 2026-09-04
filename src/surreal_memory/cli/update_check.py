@@ -176,6 +176,21 @@ def _print_update_notice(current: str, latest: str) -> None:
 
 
 def run_update_check_background() -> None:
-    """Launch update check in a daemon thread. Non-blocking, fire-and-forget."""
+    """Launch update check in a daemon thread. Non-blocking, fire-and-forget.
+
+    Short-circuits when ``SURREAL_MEMORY_NO_UPDATE_CHECK`` is set to a truthy
+    value (anything except empty / ``0`` / ``false`` / ``no``, case-insensitive).
+    The pytest session sets it in ``tests/conftest.py::_isolated_home_dir``
+    alongside the ``$HOME`` redirect, so the suite makes no PyPI calls even on
+    a runner with egress. Same shape as ``#121`` — a fixture-set env var plus
+    an in-code opt-out check that other callers can also use.
+    """
+    if os.environ.get("SURREAL_MEMORY_NO_UPDATE_CHECK", "").strip().lower() not in (
+        "",
+        "0",
+        "false",
+        "no",
+    ):
+        return
     thread = threading.Thread(target=_check_and_notify, daemon=True)
     thread.start()
