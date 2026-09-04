@@ -7,9 +7,12 @@ redirects `$HOME` for the whole session); this closes the network side, so a
 pytest run inside a sandboxed or offline environment doesn't sit through per-test
 3-second `OSError` swallows or make silent live PyPI requests.
 
-Contract: any truthy value of `SURREAL_MEMORY_NO_UPDATE_CHECK` (i.e. not empty,
-not "0"/"false"/"no", case-insensitive) makes `run_update_check_background()` a
-no-op *before* it starts the thread. The env var is set session-wide in
+Contract: `SURREAL_MEMORY_NO_UPDATE_CHECK` follows the repo's canonical
+env-var truthiness (`_env_truthy` in `unified_config.py`: `1/true/yes/on`,
+case-insensitive, everything else false). A truthy value makes
+`run_update_check_background()` a no-op *before* it starts the thread; any
+other value — including `off`, `no`, `0`, `false`, arbitrary strings —
+lets the check run. The env var is set to `"1"` session-wide in
 `tests/conftest.py::_isolated_home_dir`, alongside the `$HOME` redirect —
 same fixture, same rationale.
 """
@@ -49,22 +52,27 @@ class TestUpdateCheckEnvGate:
         _args, kwargs = thread_ctor.call_args
         assert kwargs.get("daemon") is True
 
-    @pytest.mark.parametrize("falsy", ["", "0", "false", "no", "FALSE", "No"])
+    @pytest.mark.parametrize(
+        "falsy", ["", "0", "false", "no", "FALSE", "No", "off", "OFF", "disabled", "anything"]
+    )
     def test_falsy_values_do_not_short_circuit(
         self, monkeypatch: pytest.MonkeyPatch, falsy: str
     ) -> None:
-        """Empty, '0', 'false', 'no' (any case) count as "not set"."""
+        """Everything except `1/true/yes/on` counts as "not set" — including
+        `off`/`disabled`, which under an inverted convention would have
+        silently disabled the update check."""
         monkeypatch.setenv("SURREAL_MEMORY_NO_UPDATE_CHECK", falsy)
         with patch("surreal_memory.cli.update_check.threading.Thread") as thread_ctor:
             update_check.run_update_check_background()
         thread_ctor.assert_called_once()
 
-    @pytest.mark.parametrize("truthy", ["1", "yes", "true", "TRUE", "on", "anything"])
+    @pytest.mark.parametrize("truthy", ["1", "yes", "true", "TRUE", "on", "YES", "On"])
     def test_truthy_values_short_circuit(
         self, monkeypatch: pytest.MonkeyPatch, truthy: str
     ) -> None:
-        """Anything else — including case variants of yes/true/on and arbitrary
-        strings — counts as truthy. Matches how `#121`'s fixture reads env vars."""
+        """Exactly the repo's canonical truthy set, case-insensitive — the
+        same `_env_truthy` convention as `SURREAL_MEMORY_EMBEDDING_ENABLED`
+        and friends."""
         monkeypatch.setenv("SURREAL_MEMORY_NO_UPDATE_CHECK", truthy)
         with patch("surreal_memory.cli.update_check.threading.Thread") as thread_ctor:
             update_check.run_update_check_background()
