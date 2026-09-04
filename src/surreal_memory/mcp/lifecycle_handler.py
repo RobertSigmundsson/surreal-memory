@@ -92,13 +92,23 @@ class LifecycleHandler:
                     # now (None = clear); the old type's TTL was left in place before,
                     # so a DECISION (90d) edited to FACT (None) still expired ~90d out,
                     # and a FACT edited to TODO/ERROR (30d) never picked up its finite
-                    # expiry at all. `_forget` (below) is the only other writer of
-                    # expires_at and it stays unchanged.
-                    new_default_days = DEFAULT_EXPIRY_DAYS[MemoryType(new_type)]
-                    if new_default_days is None:
-                        updated_tm = dc_replace(updated_tm, expires_at=None)
-                    else:
-                        updated_tm = updated_tm.extend_expiry(new_default_days)
+                    # expiry at all. Two cases must NOT be touched: a soft-deleted
+                    # memory (`_forget` sets expires_at=utcnow() — recomputing would
+                    # resurrect it) and an ephemeral memory (remember_handler flags its
+                    # anchor neuron ephemeral=True with a 1d default TTL — clearing
+                    # that TTL would make it immortal). Both keep their expiry.
+                    now = utcnow()
+                    tombstoned = updated_tm.expires_at is not None and updated_tm.expires_at <= now
+                    anchor_neuron = None
+                    if fiber.anchor_neuron_id:
+                        anchor_neuron = await storage.get_neuron(fiber.anchor_neuron_id)
+                    ephemeral = bool(anchor_neuron and getattr(anchor_neuron, "ephemeral", False))
+                    if not tombstoned and not ephemeral:
+                        new_default_days = DEFAULT_EXPIRY_DAYS[MemoryType(new_type)]
+                        if new_default_days is None:
+                            updated_tm = dc_replace(updated_tm, expires_at=None)
+                        else:
+                            updated_tm = updated_tm.extend_expiry(new_default_days)
                     # Sync type into fiber.metadata to keep both stores consistent
                     updated_meta = {**fiber.metadata, "type": new_type}
                     fiber = dc_replace(fiber, metadata=updated_meta)
