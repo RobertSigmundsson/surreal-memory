@@ -161,6 +161,53 @@ class TestNmemEdit:
         )
 
     @pytest.mark.asyncio
+    async def test_edit_type_change_picks_up_finite_expiry(self) -> None:
+        """The extend_expiry direction: FACT (no default TTL) edited to TODO
+        (default 30d) must gain a finite, future expiry — the half of the
+        original bug the PR itself called the worse one, previously untested."""
+        from surreal_memory.core.fiber import Fiber
+        from surreal_memory.core.memory_types import MemoryType, Priority, TypedMemory
+        from surreal_memory.utils.timeutils import utcnow
+
+        server = _make_server()
+        storage = AsyncMock()
+        storage.current_brain_id = "brain-1"
+
+        typed_mem = TypedMemory.create(
+            fiber_id="fiber-1",
+            memory_type=MemoryType.FACT,
+            priority=Priority.NORMAL,
+            source="test",
+        )
+        assert typed_mem.expires_at is None, "sanity: FACT starts without an expiry"
+
+        fiber = Fiber.create(
+            neuron_ids={"neuron-1"},
+            synapse_ids=set(),
+            anchor_neuron_id="neuron-1",
+            fiber_id="fiber-1",
+        )
+
+        storage.get_typed_memory = AsyncMock(return_value=typed_mem)
+        storage.get_fiber = AsyncMock(return_value=fiber)
+        storage.get_neuron = AsyncMock(return_value=None)
+        storage.update_typed_memory = AsyncMock()
+        server.get_storage = AsyncMock(return_value=storage)
+
+        result = await server.call_tool("smem_edit", {"memory_id": "fiber-1", "type": "todo"})
+        assert result["status"] == "edited"
+
+        storage.update_typed_memory.assert_awaited_once()
+        (updated_tm,) = storage.update_typed_memory.call_args.args
+        assert updated_tm.memory_type == MemoryType.TODO
+        assert updated_tm.expires_at is not None, (
+            "FACT -> TODO must pick up TODO's finite default expiry"
+        )
+        assert updated_tm.expires_at > utcnow(), (
+            f"the new expiry must be in the future, got {updated_tm.expires_at!r}"
+        )
+
+    @pytest.mark.asyncio
     async def test_edit_type_change_does_not_resurrect_soft_deleted(self) -> None:
         """Regression: `_forget` soft-deletes by setting `expires_at=utcnow()`;
         a subsequent type change must NOT recompute the TTL — that would turn
