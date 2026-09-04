@@ -451,16 +451,110 @@ class TestRejectedContentNotResubmitted:
     async def test_pre_compact_honours_refusal_recorded_by_stop(
         self, isolated_brain_gate_enforce: str, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """The seen-set is shared, so PreCompact must not re-judge Stop's refusal."""
-        calls = await self._count_gate_calls(monkeypatch)
+        """PreCompact must not re-judge a fragment Stop already refused.
 
-        await stop_hook.capture_text(_TEXT_A, project_name=None)
-        after_stop = len(calls)
-        assert after_stop >= 1
+        The earlier version of this test fed ``_TEXT_A`` straight to
+        ``flush_text()``, which never reaches the gate at all for that input —
+        the detector finds nothing above the emergency threshold, so the test
+        passed even with the fix entirely removed (``gate_calls=0`` on both
+        sides). This version forces the path: both hooks' detector is patched
+        to return one controlled fragment, the gate is patched to reject it,
+        and the test counts actual gate invocations — Stop must reach it
+        exactly once, PreCompact not at all.
+        """
+        from surreal_memory.engine.quality_scorer import QualityResult
 
-        await pre_compact_hook.flush_text(_TEXT_A, project_name=None)
-        assert len(calls) == after_stop, (
-            "PreCompact re-judged content the Stop hook had already refused"
+        gate_calls: list[str] = []
+
+        def _rejecting_gate(content: str, **kwargs: object) -> QualityResult:
+            gate_calls.append(content)
+            return QualityResult(
+                score=1, quality="low", rejected=True, rejection_reason="test refusal"
+            )
+
+        # Both hooks resolve check_write_gate via a function-local import, so
+        # patching the source module covers both paths.
+        monkeypatch.setattr(
+            "surreal_memory.engine.quality_scorer.check_write_gate", _rejecting_gate
+        )
+
+        fragment = {
+            "content": "The release manager approved the rollback plan after the incident review.",
+            "confidence": 0.95,
+            "priority": 5,
+            "type": "decision",
+        }
+
+        def _one_fragment(*args: object, **kwargs: object) -> list[dict[str, object]]:
+            return [dict(fragment)]
+
+        monkeypatch.setattr(
+            "surreal_memory.mcp.auto_capture.analyze_text_for_memories", _one_fragment
+        )
+
+        first = await stop_hook.capture_text(fragment["content"], project_name=None)
+        assert first["saved"] == 0
+        after_stop = len(gate_calls)
+        # The stop hook gates the fragment and (after the refusal) its session
+        # summary fallback, so >= 2 gate calls are expected there; what
+        # matters is that the fragment itself reached the gate and was refused.
+        assert after_stop >= 2, (
+            f"the stop hook must reach the gate at least twice (fragment + summary), "
+            f"got {after_stop}: {gate_calls}"
+        )
+
+        second = await pre_compact_hook.flush_text(fragment["content"], project_name=None)
+        assert second["saved"] == 0
+        assert len(gate_calls) == after_stop, (
+            "PreCompact re-judged content the Stop hook had already refused: "
+            f"gate was invoked {len(gate_calls) - after_stop} extra time(s)"
+        )
+
+    async def test_pre_compact_records_its_own_refusal(
+        self, isolated_brain_gate_enforce: str, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The refusal recording must also live in PreCompact's own reject
+        branch — a fragment PreCompact refuses (Stop never saw it) must not
+        be re-judged on the next PreCompact. Covers the `captured_keys.append`
+        hunk in `pre_compact.py` that the Stop-side test cannot reach."""
+        from surreal_memory.engine.quality_scorer import QualityResult
+
+        gate_calls: list[str] = []
+
+        def _rejecting_gate(content: str, **kwargs: object) -> QualityResult:
+            gate_calls.append(content)
+            return QualityResult(
+                score=1, quality="low", rejected=True, rejection_reason="test refusal"
+            )
+
+        monkeypatch.setattr(
+            "surreal_memory.engine.quality_scorer.check_write_gate", _rejecting_gate
+        )
+
+        fragment = {
+            "content": "The on-call engineer drained the failed node before the midnight rollout.",
+            "confidence": 0.95,
+            "priority": 5,
+            "type": "fact",
+        }
+
+        def _one_fragment(*args: object, **kwargs: object) -> list[dict[str, object]]:
+            return [dict(fragment)]
+
+        monkeypatch.setattr(
+            "surreal_memory.mcp.auto_capture.analyze_text_for_memories", _one_fragment
+        )
+
+        first = await pre_compact_hook.flush_text(fragment["content"], project_name=None)
+        assert first["saved"] == 0
+        after_first = len(gate_calls)
+        assert after_first >= 1, "the first PreCompact must actually reach the gate"
+
+        second = await pre_compact_hook.flush_text(fragment["content"], project_name=None)
+        assert second["saved"] == 0
+        assert len(gate_calls) == after_first, (
+            "PreCompact re-judged content it had already refused itself: "
+            f"gate was invoked {len(gate_calls) - after_first} extra time(s)"
         )
 
     async def test_new_content_still_reaches_the_gate(
