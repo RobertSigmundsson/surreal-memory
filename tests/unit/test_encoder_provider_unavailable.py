@@ -93,3 +93,67 @@ async def test_provider_unavailable_logs_warning_with_reindex_hint(
     assert warnings[0].exc_info is not None, (
         "warning must carry the exception chain via exc_info=True"
     )
+
+
+class TestProviderUnavailableThrottling:
+    """The write path calls the encoder in a loop (train, train-db,
+    remember_batch), so an unthrottled WARNING+exc_info per neuron turns a
+    down provider into a ~1 KiB-per-record log flood. Policy: first
+    occurrence and every 100th warn in full; the rest log at DEBUG with the
+    running count."""
+
+    @staticmethod
+    def _make_encoder(monkeypatch: pytest.MonkeyPatch) -> MemoryEncoder:
+        import surreal_memory.engine.encoder as encoder_mod
+
+        monkeypatch.setattr(encoder_mod, "_EMBED_UNAVAILABLE_COUNT", 0)
+        monkeypatch.setattr(
+            "surreal_memory.engine.semantic_discovery._effective_embedding",
+            lambda _cfg: (True, None, None),
+            raising=True,
+        )
+        monkeypatch.setattr(
+            "surreal_memory.engine.semantic_discovery._create_provider",
+            lambda _cfg, task_type=None: _FailingProvider(),
+            raising=True,
+        )
+
+        class _Storage:
+            async def update_neuron(self, neuron: Any) -> None:
+                raise AssertionError("update_neuron must not be called when embed failed")
+
+        encoder = MemoryEncoder.__new__(MemoryEncoder)
+        encoder._storage = _Storage()  # type: ignore[attr-defined]
+        encoder._config = object()  # type: ignore[attr-defined]
+        return encoder
+
+    @pytest.mark.asyncio
+    async def test_three_failures_produce_one_warning(
+        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        encoder = self._make_encoder(monkeypatch)
+        with caplog.at_level(logging.DEBUG, logger="surreal_memory.engine.encoder"):
+            for _ in range(3):
+                await encoder._embed_created_neurons(_Ctx([_Neuron("n1"), _Neuron("n2")]))
+        warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+        assert len(warnings) == 1, (
+            f"expected exactly 1 WARNING for 3 failures; got "
+            f"{[(r.levelname, r.getMessage()) for r in caplog.records]}"
+        )
+        assert "smem reindex" in warnings[0].getMessage()
+        assert warnings[0].exc_info is not None
+        debugs = [r for r in caplog.records if r.levelno == logging.DEBUG]
+        assert len(debugs) == 2, "the other two failures must remain visible at DEBUG"
+
+    @pytest.mark.asyncio
+    async def test_warning_recurs_every_hundredth_occurrence(
+        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        encoder = self._make_encoder(monkeypatch)
+        with caplog.at_level(logging.WARNING, logger="surreal_memory.engine.encoder"):
+            for _ in range(101):
+                await encoder._embed_created_neurons(_Ctx([_Neuron("n1")]))
+        warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+        assert len(warnings) == 2, f"expected warnings at occurrence 1 and 100; got {len(warnings)}"
+        assert "occurrence 1" in warnings[0].getMessage()
+        assert "occurrence 100" in warnings[1].getMessage()
