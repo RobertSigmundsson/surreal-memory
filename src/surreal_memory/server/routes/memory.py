@@ -534,6 +534,21 @@ async def update_neuron(
     new_content = updates.pop("content", None)
     updated = replace(neuron, **updates) if updates else neuron
     if new_content is not None and new_content != updated.content:
+        # `_embedding` is an internal key (`utils/content_refresh.py` reads it
+        # to decide whether to re-embed). A PUT that ships `metadata` alongside
+        # a content change replaces the whole dict, so the pre-edit `_embedding`
+        # would be gone before the helper ever saw it — and the old vector
+        # would stay in the row, describing text that no longer exists. Carry
+        # the internal key forward (unless the caller explicitly provided
+        # one) so content_refreshed can refresh it.
+        if (
+            neuron.metadata.get("_embedding") is not None
+            and updated.metadata.get("_embedding") is None
+        ):
+            updated = replace(
+                updated,
+                metadata={**updated.metadata, "_embedding": neuron.metadata["_embedding"]},
+            )
         updated = await content_refreshed(storage, updated, new_content)
     await storage.update_neuron(updated)
 

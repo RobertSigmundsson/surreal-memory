@@ -171,6 +171,66 @@ async def test_metadata_only_put_does_not_call_content_refresh() -> None:
 
 
 @pytest.mark.asyncio
+async def test_content_and_metadata_put_preserves_embedding_for_refresh() -> None:
+    """Regression: a PUT that changes `content` AND ships `metadata` replaces
+    the whole metadata dict, so the pre-edit `_embedding` would be gone before
+    `content_refreshed` ever saw it — and the old vector would stay in the
+    row, describing text that no longer exists. The route must carry the
+    internal key forward so the helper re-embeds."""
+    from unittest.mock import patch
+
+    old = _neuron(content="old content", metadata={"_embedding": [0.1, 0.2, 0.3]})
+    old_vector = old.metadata["_embedding"]
+
+    captured: dict[str, Neuron] = {}
+
+    async def _update(neuron: Neuron) -> None:
+        captured["written"] = neuron
+
+    storage = SimpleNamespace(
+        get_neuron=AsyncMock(return_value=old),
+        update_neuron=_update,
+        get_brain=AsyncMock(return_value=None),
+    )
+    brain = type("B", (), {"id": "brain-0"})()
+
+    seen_by_helper: dict[str, Neuron] = {}
+
+    async def _fake_content_refreshed(storage_: Any, neuron: Neuron, new: str) -> Neuron:
+        seen_by_helper["neuron"] = neuron
+        refreshed = _neuron(
+            content=new, metadata={**neuron.metadata, "_embedding": [0.9, 0.8, 0.7]}
+        )
+        return refreshed
+
+    with patch(
+        "surreal_memory.server.routes.memory.content_refreshed",
+        side_effect=_fake_content_refreshed,
+    ) as spy:
+        await update_neuron(
+            neuron_id="n0",
+            request=_Request(content="new content", metadata={"tag": "shipped-with-content"}),
+            brain=brain,
+            storage=storage,
+        )
+
+    spy.assert_called_once()
+    handed = seen_by_helper["neuron"]
+    # The helper receives the pre-content neuron plus the new content string —
+    # content_refreshed itself performs the content swap. What the route must
+    # guarantee is that the metadata it hands over still carries the vector.
+    assert handed.content == "old content"
+    assert handed.metadata["tag"] == "shipped-with-content", "caller metadata must survive"
+    assert handed.metadata.get("_embedding") == old_vector, (
+        "the pre-edit vector must be carried into content_refreshed so it can "
+        f"be re-embedded; got {handed.metadata.get('_embedding')!r} (was {old_vector!r})"
+    )
+    assert captured["written"].metadata["_embedding"] == [0.9, 0.8, 0.7], (
+        "the refreshed vector must be what the storage write sees"
+    )
+
+
+@pytest.mark.asyncio
 async def test_same_content_put_skips_content_refresh() -> None:
     """Sending the same content in a PUT is a no-op on the derived fields —
     guard prevents an unnecessary embed round-trip."""
