@@ -51,6 +51,7 @@ LIVE_TEST_BRAIN_NAMES = frozenset(
         "zz-dashboard-brains-scope-live",  # test_dashboard_brains_scope.py (list_brains_api)
         "zz-dashboard-stats-scope-live",  # test_dashboard_brains_scope.py (get_stats)
         "change-log-payload-live",  # test_surrealdb_change_log_payload_live.py
+        "sync-change-entry-live",  # test_surrealdb_sync_change_entry_live.py
     }
 )
 
