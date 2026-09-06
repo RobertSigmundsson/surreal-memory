@@ -185,6 +185,14 @@ class BrainConfig:
     # importance, so it gets its own weight and stays inert unless asked for.
     priority_weight: float = 0.2
     auto_priority_weight: float = 0.0
+    # How the semantic retriever picks anchor neurons.
+    # "scan" is the historical path: read the first `find_neurons` page and
+    # score it in Python. That page is ordered by id and capped, so on a brain
+    # larger than the cap the semantic retriever only ever sees its oldest
+    # slice. "knn" asks the backend's vector index for the actual nearest
+    # neighbours. "auto" uses the index when the backend has one and falls
+    # back to the scan otherwise, saying so in the retrieval metadata.
+    embedding_anchor_mode: str = "auto"
 
     def with_updates(self, **kwargs: Any) -> BrainConfig:
         """Create a new config with updated values."""
