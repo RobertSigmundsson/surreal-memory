@@ -108,6 +108,35 @@ def _fiber_near(fiber: Fiber, geo_filter: GeoFilter) -> bool:
     return fiber_within(fiber, geo_filter)
 
 
+def _priority_multiplier(metadata: dict[str, Any], weight: float, auto_weight: float) -> float:
+    """Scale a fiber by the importance it was stored with.
+
+    ``1 + weight * (p - 5) / 5`` with ``p`` clamped to [0, 10], so the default
+    ``priority`` of ``smem remember`` (5) is exactly neutral and the multiplier stays
+    within ``[1 - weight, 1 + weight]`` no matter what a caller wrote into metadata.
+
+    An explicit ``priority`` (a human's mark) is used at ``weight``; only when it is
+    absent does the machine-derived ``auto_priority`` apply, at its own ``auto_weight``
+    — it measures novelty at encode time, not importance, and it sits on almost every
+    fiber, so treating it as a stand-in would silently re-rank the whole brain.
+    A fiber with neither key, or a weight of 0.0, scores exactly as before.
+    """
+    raw = metadata.get("priority")
+    effective_weight = weight
+    if raw is None:
+        raw = metadata.get("auto_priority")
+        effective_weight = auto_weight
+    if raw is None or effective_weight == 0.0:
+        return 1.0
+    try:
+        priority = float(raw)
+    except (TypeError, ValueError):
+        return 1.0
+    priority = max(0.0, min(10.0, priority))
+    effective_weight = max(0.0, min(1.0, effective_weight))
+    return 1.0 + effective_weight * (priority - 5.0) / 5.0
+
+
 class ReflexPipeline:
     """
     Main retrieval engine - the "consciousness" of the memory system.
@@ -1786,6 +1815,9 @@ class ReflexPipeline:
         # can never invert/corrupt the score (the blend formulas assume [0,1]).
         rw = max(0.0, min(1.0, self._config.recency_weight))
         tw = max(0.0, min(1.0, self._config.trust_weight))
+        recency_from_created = self._config.recency_from_created
+        priority_weight = self._config.priority_weight
+        auto_priority_weight = self._config.auto_priority_weight
         trust_default = self._config.trust_default
 
         # Trust map (fiber_id -> effective trust) is built ONLY when trust weighting is
@@ -1798,10 +1830,20 @@ class ReflexPipeline:
         self._last_trust_map = trust_map
 
         def _fiber_score(fiber: Fiber) -> float:
+            fiber_meta = fiber.metadata or {}
+
             # --- Base quality: salience * recency * conductivity ---
+            # Anchor the decay at the last recall, falling back to creation time for a
+            # fiber that was never recalled (opt-out: recency_from_created=False). The
+            # old flat 0.5 for `last_conducted is None` meant a memory written minutes
+            # ago started below one recalled a day earlier, so fresh knowledge lost to
+            # whatever happened to be popular. A fiber with neither timestamp keeps 0.5.
+            anchor = fiber.last_conducted
+            if anchor is None and recency_from_created:
+                anchor = fiber.created_at
             recency = 0.5
-            if fiber.last_conducted:
-                hours_ago = (utcnow() - fiber.last_conducted).total_seconds() / 3600
+            if anchor:
+                hours_ago = (utcnow() - anchor).total_seconds() / 3600
                 recency = max(0.1, 1.0 / (1.0 + math.exp((hours_ago - halflife) / (halflife / 2))))
 
             # U2 recency calibration (branch-guarded no-op at recency_weight=1.0):
@@ -1817,6 +1859,11 @@ class ReflexPipeline:
 
                 age_result = evaluate_freshness(fiber.created_at)
                 base_score *= (1.0 - fw) + fw * age_result.score
+
+            # Declared importance (neutral at priority 5, no-op at weight 0.0). Applied
+            # to the base quality, not to the final score, so the additive bonuses below
+            # (tag, instruction, trigger) keep the absolute units they were tuned in.
+            base_score *= _priority_multiplier(fiber_meta, priority_weight, auto_priority_weight)
 
             # --- Activation relevance: how well does this fiber match the query? ---
             activated = [nid for nid in fiber.neuron_ids if nid in activations]
@@ -1848,7 +1895,6 @@ class ReflexPipeline:
                         score -= tag_boost * 0.5  # mild penalty for zero overlap
 
             # --- Arousal boost: emotionally charged memories are more memorable ---
-            fiber_meta = fiber.metadata or {}
             arousal = fiber_meta.get("_arousal", 0.0)
             if isinstance(arousal, (int, float)) and arousal > 0.0:
                 score *= 1.0 + float(arousal) * 0.2  # up to 20% boost at max arousal
