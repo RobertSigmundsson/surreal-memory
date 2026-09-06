@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 import logging
+import math
 import random
 import re
 from collections.abc import Iterator
@@ -56,6 +57,11 @@ from surreal_memory.utils.geo import GeoFilter, fiber_within
 from surreal_memory.utils.timeutils import utcnow
 
 logger = logging.getLogger(__name__)
+
+# HNSW search width. The index is built with EFC 150; 100 is the value this
+# backend has always searched with, kept as the floor so behaviour for small
+# k is unchanged, while larger k raises it (ef < k silently degrades recall).
+_KNN_EF_MIN = 100
 
 #: Every table carrying a ``brain_id``. ``clear()`` walks this list, so a brain
 #: wipe leaves nothing behind. It used to name nine tables by hand and drift as
@@ -3044,35 +3050,65 @@ class SurrealDBStorage(
         limit: int = 10,
         type_filter: NeuronType | None = None,
     ) -> list[tuple[Neuron, float]]:
-        """Find neurons by vector similarity using SurrealDB KNN operator."""
+        """Find neurons by vector similarity using the SurrealDB KNN operator.
+
+        Returns ``(neuron, cosine_similarity)`` pairs, best first. The index is
+        ``DIST COSINE``, so the distance it reports is ``1 - cos`` and the
+        similarity below is that identity inverted — the same scale as
+        ``EmbeddingProvider.similarity``, which is what
+        ``embedding_similarity_threshold`` is expressed in.
+        """
         brain_id = self._get_brain_id()
-        conditions = [
-            "brain_id = $brain_id",
-        ]
-        params: dict[str, Any] = {
-            "brain_id": brain_id,
-            "vec": query_embedding,
-        }
+        # brain_id inline as a literal — same planner gotcha as find_neurons: a
+        # parameterized $brain_id makes 3.2.0 filter the whole table instead of
+        # using the index. brain_id is charset-validated, so this is injection-safe.
+        conditions = [f"brain_id = {_brain_literal(brain_id)}"]
+        params: dict[str, Any] = {"vec": query_embedding}
 
         if type_filter is not None:
             conditions.append("type = $ntype")
             params["ntype"] = type_filter.value
 
         where = " AND ".join(conditions)
-        # SurrealDB KNN syntax: WHERE embedding_vec <|k, ef|> $vec
+        # ef must stay >= k, otherwise HNSW searches a candidate list smaller than
+        # the number of neighbours asked for and quietly returns a worse set.
+        ef = max(_KNN_EF_MIN, 2 * int(limit))
         rows = await self._query(
             f"SELECT *, vector::distance::knn() AS score "
-            f"FROM neuron WHERE {where} AND embedding_vec <|{int(limit)},100|> $vec",
+            f"FROM neuron WHERE {where} AND embedding_vec <|{int(limit)},{ef}|> $vec",
             **params,
         )
 
         results: list[tuple[Neuron, float]] = []
+        unusable = 0
         for r in rows:
             raw_score = r.pop("score", None)
-            score = float(raw_score) if raw_score is not None else 0.0
-            # SurrealDB returns distance (lower = more similar), convert to similarity
-            similarity = 1.0 / (1.0 + score) if score >= 0 else 0.0
-            results.append((_row_to_neuron(r), similarity))
+            # NULL (no distance reported at all) and NaN (a zero-magnitude vector
+            # on either side) both arrive here. Neither may be read as a distance:
+            # 1 - NULL treated as 0 and 1 - NaN through a clamp would BOTH come out
+            # as similarity 1.0 — a perfect match for a row that is in fact
+            # unrankable, which then outranks every genuine neighbour.
+            distance = float(raw_score) if raw_score is not None else float("nan")
+            if math.isnan(distance):
+                unusable += 1
+                continue
+            results.append((_row_to_neuron(r), max(-1.0, min(1.0, 1.0 - distance))))
+
+        if unusable and not results:
+            # Nothing usable came back: the whole query is degenerate, not one bad
+            # row. Fail loudly so the caller can fall back visibly instead of
+            # ranking on fabricated similarities.
+            raise ValueError(
+                f"vector::distance::knn() gave no usable distance for any of {unusable} "
+                "rows — the query vector may have zero magnitude, or the HNSW index "
+                "may be missing or not yet built on this table"
+            )
+        if unusable:
+            logger.warning(
+                "Dropped %d neuron(s) with an unusable KNN distance (zero-magnitude "
+                "embedding_vec); they cannot be ranked and must not become anchors",
+                unusable,
+            )
         return results
 
     # ================================================================
