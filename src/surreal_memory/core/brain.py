@@ -189,6 +189,21 @@ class BrainConfig:
     trust_weight: float = 0.0  # 0.0 = trust ignored in final scoring (default no-op)
     recency_weight: float = 1.0  # 1.0 = existing recency decay unchanged (default no-op)
     trust_default: float = 0.7  # fallback trust when no per-memory/source signal resolves
+    # Retrieval recency anchor: fall back to `created_at` when a fiber was never
+    # recalled. Without it `last_conducted is None` scores a flat 0.5, so a memory
+    # written minutes ago starts *below* one recalled yesterday (≈0.85 at the 168 h
+    # half-life) — the ranking rewards rehearsal and is blind to age. Fibers with
+    # neither timestamp keep the historical 0.5.
+    recency_from_created: bool = True
+    # Retrieval priority weighting. `priority` was stored (typed_memory, and as
+    # `auto_priority` in fiber metadata) but read by nothing in scoring, so marking a
+    # memory as critical had no effect on recall. Multiplier is
+    # `1 + weight * (p - 5) / 5` with p clamped to [0, 10]: neutral at the default
+    # priority 5, ±weight at the extremes — a tie-breaker among near-equals, smaller
+    # than the recency swing. `auto_priority` is machine-derived novelty, not human
+    # importance, so it gets its own weight and stays inert unless asked for.
+    priority_weight: float = 0.2
+    auto_priority_weight: float = 0.0
 
     def with_updates(self, **kwargs: Any) -> BrainConfig:
         """Create a new config with updated values."""
