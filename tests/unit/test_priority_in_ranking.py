@@ -41,6 +41,14 @@ from surreal_memory.utils.timeutils import utcnow
 _QUERY = "widget beta protocol handshake"
 
 
+class _StopEncodeError(Exception):
+    """Zatrzymuje `_remember`/`_encode_and_store` zaraz po wywołaniu enkodera.
+
+    Interesuje nas WYŁĄCZNIE to, co handler przekazał do `encode()`; reszta ścieżki
+    zapisu (typed_memory, hooki, projekty) jest poza zakresem tego pliku.
+    """
+
+
 @pytest.fixture
 async def storage() -> AsyncIterator[InMemoryStorage]:
     s = InMemoryStorage()
@@ -243,9 +251,6 @@ class TestRememberStoresExplicitPriorityOnTheFiber:
             WriteGateConfig,
         )
 
-        class _StopEncodeError(Exception):
-            pass
-
         with patch("surreal_memory.mcp.server.get_config") as mock_get_config:
             cfg = MagicMock(
                 current_brain="test-brain",
@@ -298,3 +303,58 @@ class TestRememberStoresExplicitPriorityOnTheFiber:
         """
         metadata = await self._captured_encode_metadata({"content": "a routine note"})
         assert "priority" not in metadata
+
+
+class TestCliRememberStoresExplicitPriorityOnTheFiber:
+    """The CLI write path, which is the main one in this fleet.
+
+    `smem remember --priority` persisted the value on `typed_memory` and called the
+    encoder without metadata, so the fiber — the thing scoring reads — never carried
+    it. Fixing only the MCP handler would have left the everyday path unfixed.
+    """
+
+    async def _encode_via_cli_path(self, priority: int | None):
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        from surreal_memory.cli.commands.memory import _encode_and_store
+        from surreal_memory.core.memory_types import MemoryType, Priority
+
+        captured: dict = {}
+
+        class _Encoder:
+            def __init__(self, *a, **kw):
+                pass
+
+            async def encode(self, **kwargs):
+                captured.update(kwargs)
+                raise _StopEncodeError
+
+        storage = AsyncMock()
+        storage.disable_auto_save = MagicMock()
+        with (
+            patch("surreal_memory.cli.commands.memory.MemoryEncoder", _Encoder),
+            patch("surreal_memory.cli.commands.memory.build_dedup_pipeline", return_value=None),
+            pytest.raises(_StopEncodeError),
+        ):
+            await _encode_and_store(
+                storage,
+                MagicMock(),
+                "a rule worth remembering",
+                tags=None,
+                mem_type=MemoryType.FACT,
+                mem_priority=Priority.from_int(priority)
+                if priority is not None
+                else Priority.NORMAL,
+                expiry_days=None,
+                project_id=None,
+                priority_was_explicit=priority is not None,
+            )
+        return captured.get("metadata")
+
+    async def test_explicit_priority_reaches_the_fiber_metadata(self) -> None:
+        metadata = await self._encode_via_cli_path(10)
+        assert metadata is not None and metadata["priority"] == 10
+
+    async def test_no_priority_argument_writes_no_priority_key(self) -> None:
+        metadata = await self._encode_via_cli_path(None)
+        assert metadata is None or "priority" not in metadata
