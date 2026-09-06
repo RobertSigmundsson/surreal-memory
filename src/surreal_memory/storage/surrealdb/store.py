@@ -56,10 +56,17 @@ from surreal_memory.utils.timeutils import utcnow
 
 logger = logging.getLogger(__name__)
 
-# HNSW search width. The index is built with EFC 150; 100 is the value this
-# backend has always searched with, kept as the floor so behaviour for small
-# k is unchanged, while larger k raises it (ef < k silently degrades recall).
-_KNN_EF_MIN = 100
+# HNSW search width floor. The index is built with EFC 150. This backend used
+# to search with 100, and at that width the index quietly drops neighbours:
+# measured on a copy of the production brain (18 712 neurons, 49 golden
+# queries, k = 30, ef the only variable), recall@30 against a brute-force scan
+# was 0.944 mean / 0.800 min at ef=100, 0.983 / 0.933 at 200, 0.999 / 0.967 at
+# 400 and 1.000 at 800 — two of the 49 queries lost the very neuron they were
+# looking for at 100, including one that recall otherwise ranked first. 400 is
+# the smallest width at which no query lost a true top-30 neighbour; it costs
+# ~2.4x the query time (40 -> 96 ms median on that copy). Larger k still
+# raises ef above the floor (ef < k silently degrades recall).
+_KNN_EF_MIN = 400
 
 #: Every table carrying a ``brain_id``. ``clear()`` walks this list, so a brain
 #: wipe leaves nothing behind. It used to name nine tables by hand and drift as
