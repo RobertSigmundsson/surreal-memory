@@ -1606,11 +1606,18 @@ class ReflexPipeline:
             except Exception:
                 logger.debug("IDF anchor limit computation failed (non-critical)", exc_info=True)
 
+        # `find_neurons` orders by
+        # `ORDER BY id`, ignoring the BM25 score its own full-text index already computes, so
+        # keyword anchors were arbitrary-but-stable rather than relevant. `find_neurons_ranked`
+        # orders by that score instead (measured +2/49 golden hits, zero regressions) and gates
+        # out anchors shorter than 25 chars (ties with the un-gated variant on the same golden,
+        # cheap insurance against BM25's length bias).
         keyword_tasks = [
-            self._storage.find_neurons(
+            self._storage.find_neurons_ranked(
                 content_contains=keyword,
                 limit=kw_limits.get(keyword, _default_kw_limit),
                 ephemeral=ephemeral_filter,
+                min_content_len=25,
             )
             for keyword in normalized[:15]  # cap at 15 (expanded with token variants)
         ]
