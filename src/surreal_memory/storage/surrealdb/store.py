@@ -1386,6 +1386,35 @@ class SurrealDBStorage(
         )
         return [_row_to_neuron(r) for r in rows]
 
+    async def find_neurons_ranked(
+        self,
+        content_contains: str,
+        limit: int = 100,
+        ephemeral: bool | None = None,
+        min_content_len: int | None = None,
+    ) -> list[Neuron]:
+        """Full-text search ordered by the BM25 score `idx_neuron_content_fts` already computes
+        (numbered match operator ``@1@`` + ``search::score(1)`` in the projection — SurrealQL
+        requires both), instead of the arbitrary-but-stable ``ORDER BY id`` `find_neurons` uses.
+        See `storage/base.py::find_neurons_ranked` for the measurement this fixes.
+        """
+        brain_id = self._get_brain_id()
+        conditions = [f"brain_id = {_brain_literal(brain_id)}", "content @1@ $content_contains"]
+        params: dict[str, Any] = {"content_contains": content_contains}
+        if ephemeral is not None:
+            conditions.append("ephemeral = $ephemeral")
+            params["ephemeral"] = ephemeral
+        if min_content_len is not None:
+            # Length is a schema property, not user input — safe to inline as an int literal.
+            conditions.append(f"string::len(content) >= {int(min_content_len)}")
+        where = " AND ".join(conditions)
+        rows = await self._query(
+            f"SELECT *, search::score(1) AS _rank_score FROM neuron WHERE {where} "
+            f"ORDER BY _rank_score DESC LIMIT {int(limit)}",
+            **params,
+        )
+        return [_row_to_neuron(r) for r in rows]
+
     async def find_neurons_exact_batch(
         self,
         contents: list[str],
