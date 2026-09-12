@@ -68,6 +68,12 @@ class EmbeddingAnchorOutcome:
     id-ordered page), ``scan-fallback:<reason>``, ``none:<reason>`` or
     ``disabled``. It reaches ``RetrievalResult.metadata`` so a degraded run is
     visible in the answer, not only in the log.
+
+    ``query_vec`` carries the embedded query itself so that a second consumer in
+    the same ``query()`` — the fiber-vector retriever — reuses it instead of
+    paying for an identical round-trip to the embedder. It is kept out of
+    ``repr`` (a thousand-odd floats) and is never copied into
+    ``RetrievalResult.metadata``, which selects its fields one by one.
     """
 
     anchor_ids: list[str]
@@ -76,6 +82,7 @@ class EmbeddingAnchorOutcome:
     tombstones: int = 0
     above_threshold: int = 0
     elapsed_ms: float = 0.0
+    query_vec: list[float] | None = dataclasses.field(default=None, repr=False)
 
 
 def _is_knn_result(rows: object) -> bool:
@@ -1587,6 +1594,10 @@ class ReflexPipeline:
         brain with nothing to say.
         """
         started = time.perf_counter()
+        # Read from the closure by ``_finish`` below, so every outcome built after
+        # the embed call carries the vector — and the two built before it (no
+        # provider, embed failed) correctly carry ``None``.
+        query_vec: list[float] | None = None
 
         def _finish(
             anchor_ids: list[str],
@@ -1603,6 +1614,7 @@ class ReflexPipeline:
                 tombstones=tombstones,
                 above_threshold=above_threshold,
                 elapsed_ms=(time.perf_counter() - started) * 1000,
+                query_vec=query_vec,
             )
 
         if self._embedding_provider is None:
@@ -2016,11 +2028,17 @@ class ReflexPipeline:
         # on a copy of the production brain: +5/49 golden hits, zero regressions. Off by default
         # (`fiber_vector_enabled`) — see `core/brain.py` for why enabling it is safe on a brain
         # without a backfilled `fiber_vec`.
-        if self._config.fiber_vector_enabled and self._embedding_provider is not None:
+        #
+        # The query vector comes from step 4, which embedded this very query a few lines above
+        # under the same guard (`self._embedding_provider is not None`) — so reusing it costs no
+        # coverage and saves the dominant expense of this step, a second round-trip to the
+        # embedder for a vector we already hold. `query_vec is None` means step 4 found no
+        # provider or its embed call failed; either way it already logged, and a fresh attempt
+        # here would only fail again.
+        if self._config.fiber_vector_enabled and embedding_outcome.query_vec is not None:
             try:
-                query_vec = await self._embedding_provider.embed(stimulus.raw_query)
                 fiber_hits = await self._storage.find_fibers_by_embedding(
-                    query_vec, limit=self._config.fiber_vector_top_n
+                    embedding_outcome.query_vec, limit=self._config.fiber_vector_top_n
                 )
                 fiber_anchor_ids = [
                     f.anchor_neuron_id for f, _sim in fiber_hits if f.anchor_neuron_id
