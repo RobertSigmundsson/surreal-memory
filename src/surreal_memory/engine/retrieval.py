@@ -1991,6 +1991,36 @@ class ReflexPipeline:
             except Exception:
                 logger.debug("Graph expansion failed (non-critical)", exc_info=True)
 
+        # 6. FIBER VECTOR ANCHORS: the
+        # only retriever that reaches a fiber WITHOUT going through one of its neurons as an
+        # anchor first. Every other retriever above finds neurons, then fibers are found by
+        # `neuron_ids` membership (`_find_matching_fibers`) — a fiber whose every neuron misses
+        # every anchor is invisible no matter how well its `summary` matches the query. Measured
+        # on a copy of the production brain: +5/49 golden hits, zero regressions. Off by default
+        # (`fiber_vector_enabled`) — see `core/brain.py` for why enabling it is safe on a brain
+        # without a backfilled `fiber_vec`.
+        if self._config.fiber_vector_enabled and self._embedding_provider is not None:
+            try:
+                query_vec = await self._embedding_provider.embed(stimulus.raw_query)
+                fiber_hits = await self._storage.find_fibers_by_embedding(
+                    query_vec, limit=self._config.fiber_vector_top_n
+                )
+                fiber_anchor_ids = [
+                    f.anchor_neuron_id for f, _sim in fiber_hits if f.anchor_neuron_id
+                ]
+                if fiber_anchor_ids:
+                    anchor_sets.append(fiber_anchor_ids)
+                    ranked_lists.append(
+                        [
+                            RankedAnchor(neuron_id=nid, rank=i + 1, retriever="fiber_vector")
+                            for i, nid in enumerate(fiber_anchor_ids)
+                        ]
+                    )
+            except NotImplementedError:
+                logger.debug("Fiber vector search not supported by this backend (non-critical)")
+            except Exception:
+                logger.debug("Fiber vector anchor lookup failed (non-critical)", exc_info=True)
+
         return anchor_sets, ranked_lists, embedding_outcome
 
     async def _find_matching_fibers(

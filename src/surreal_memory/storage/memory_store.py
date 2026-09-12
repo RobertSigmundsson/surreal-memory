@@ -73,6 +73,7 @@ class InMemoryStorage(
         self._neurons: dict[str, dict[str, Neuron]] = defaultdict(dict)
         self._synapses: dict[str, dict[str, Synapse]] = defaultdict(dict)
         self._fibers: dict[str, dict[str, Fiber]] = defaultdict(dict)
+        self._fiber_vecs: dict[str, dict[str, list[float]]] = defaultdict(dict)
         self._states: dict[str, dict[str, NeuronState]] = defaultdict(dict)
         self._decay_passes: dict[str, list[dict[str, Any]]] = defaultdict(list)
         self._typed_memories: dict[str, dict[str, TypedMemory]] = defaultdict(dict)
