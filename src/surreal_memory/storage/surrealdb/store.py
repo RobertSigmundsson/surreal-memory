@@ -562,7 +562,22 @@ def _change_payload(entity: Any | None) -> dict[str, Any] | None:
 
 
 def _row_to_fiber(row: dict[str, Any]) -> Fiber:
-    """Convert a SurrealDB fiber record to Fiber."""
+    """Convert a SurrealDB fiber record to Fiber.
+
+    NOTE (found while adding `find_fibers_by_embedding` for the N2 fix,
+    smem-recall-leksyka-fibry-reranker, 2026-09-12, NOT fixed here — see that program's
+    REKOMENDACJE.md/DECISIONS.md for the full writeup): unlike `_row_to_neuron`, this never folds
+    the raw record id's underscores back to the dashes `Fiber.create()`'s `uuid4()` produces, so
+    `Fiber.id` does not round-trip through `get_fiber`/`find_fibers`/`find_fibers_batch`
+    (confirmed live: a fresh fiber, saved then re-fetched, comes back with every `-` turned into
+    `_`). This is DOCUMENTED, COMPENSATED-FOR behavior, not an oversight —
+    `test_surrealdb_typed_memory_delete_id_live.py` (BUG-006) exists specifically because
+    `delete_typed_memory` had to be widened to accept BOTH id forms after this exact symptom, and
+    at least 17 files across the tree carry similar dual-form handling. Fixing the root cause here
+    is out of scope for the N2 fix (which only reads `fiber.anchor_neuron_id`, never `fiber.id`,
+    from the vector retriever's results) and risks silently changing behavior everywhere else that
+    has grown to expect the folded form — left as a follow-up for its own dedicated review.
+    """
     rid = row["id"]
     fiber_id = f"{rid.table_name}:{rid.id}" if hasattr(rid, "table_name") else str(rid)
     if ":" in fiber_id:
@@ -3146,6 +3161,56 @@ class SurrealDBStorage(
                 unusable,
             )
         return results
+
+    async def find_fibers_by_embedding(
+        self,
+        query_embedding: list[float],
+        limit: int = 10,
+    ) -> list[tuple[Fiber, float]]:
+        """Fiber-level counterpart of `find_neurons_by_embedding` — same KNN operator, same
+        NaN/zero-magnitude handling, over `fiber.fiber_vec` instead of `neuron.embedding_vec`.
+        See `storage/base.py::find_fibers_by_embedding` for what this fixes.
+        """
+        brain_id = self._get_brain_id()
+        rows = await self._query(
+            f"SELECT *, vector::distance::knn() AS score FROM fiber "
+            f"WHERE brain_id = {_brain_literal(brain_id)} "
+            f"AND fiber_vec <|{int(limit)},{max(_KNN_EF_MIN, 2 * int(limit))}|> $vec",
+            vec=query_embedding,
+        )
+        results: list[tuple[Fiber, float]] = []
+        unusable = 0
+        for r in rows:
+            raw_score = r.pop("score", None)
+            distance = float(raw_score) if raw_score is not None else float("nan")
+            if math.isnan(distance):
+                unusable += 1
+                continue
+            results.append((_row_to_fiber(r), max(-1.0, min(1.0, 1.0 - distance))))
+        if unusable and not results:
+            raise ValueError(
+                f"vector::distance::knn() gave no usable distance for any of {unusable} "
+                "fiber rows — the query vector may have zero magnitude, or the HNSW index "
+                "may be missing or not yet built on the fiber table"
+            )
+        if unusable:
+            logger.warning(
+                "Dropped %d fiber(s) with an unusable KNN distance (zero-magnitude fiber_vec)",
+                unusable,
+            )
+        return results
+
+    async def update_fiber_embeddings(self, pairs: list[tuple[str, list[float]]]) -> None:
+        """Batch write of `fiber.fiber_vec` — same shape as `update_neuron_embeddings`."""
+        if not pairs:
+            return
+        stmts: list[str] = []
+        params: dict[str, Any] = {}
+        for i, (fid, vec) in enumerate(pairs):
+            params[f"id{i}"] = _to_surreal_id(fid)
+            params[f"v{i}"] = list(vec)
+            stmts.append(f"UPDATE type::record('fiber', $id{i}) SET fiber_vec = $v{i}")
+        await self._query(";\n".join(stmts) + ";", **params)
 
     # ================================================================
     # Change Log (for sync)
