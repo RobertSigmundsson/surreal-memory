@@ -2503,6 +2503,14 @@ class SurrealDBStorage(
             }
             for s in raw_synapses
         ]
+        # Every persisted Fiber field, not the seven the snapshot used to carry. A fiber
+        # exported with only id/neuron_ids/synapse_ids/anchor_neuron_id/pathway/
+        # conductivity/salience came back from import_brain with its summary, tags,
+        # time span, frequency and metadata silently reset to defaults — measured on the
+        # live brain: 788 summaries, 2174 auto_tags, 1777 agent_tags, 2010 time_starts,
+        # 1910 frequencies and 2299 metadata dicts dropped in a single round trip.
+        # `_pathway_index` is deliberately absent: it is a derived lookup cache that
+        # `Fiber` rebuilds from `pathway`, not state.
         fibers: list[dict[str, Any]] = [
             {
                 "id": f.id,
@@ -2512,6 +2520,22 @@ class SurrealDBStorage(
                 "pathway": f.pathway,
                 "conductivity": f.conductivity,
                 "salience": f.salience,
+                "coherence": f.coherence,
+                "frequency": f.frequency,
+                "summary": f.summary,
+                "essence": f.essence,
+                "auto_tags": sorted(f.auto_tags),
+                "agent_tags": sorted(f.agent_tags),
+                "metadata": dict(f.metadata),
+                "compression_tier": f.compression_tier,
+                "pinned": f.pinned,
+                "last_conducted": f.last_conducted.isoformat() if f.last_conducted else None,
+                "time_start": f.time_start.isoformat() if f.time_start else None,
+                "time_end": f.time_end.isoformat() if f.time_end else None,
+                "last_ghost_shown_at": (
+                    f.last_ghost_shown_at.isoformat() if f.last_ghost_shown_at else None
+                ),
+                "created_at": f.created_at.isoformat(),
             }
             for f in raw_fibers
         ]
@@ -2636,6 +2660,9 @@ class SurrealDBStorage(
         fiber_ok = 0
         for fd in snapshot.fibers:
             try:
+                # Mirror of the export above, field for field. Every `.get` keeps the
+                # dataclass default, so a snapshot written before these fields were
+                # exported imports exactly as it did before instead of failing.
                 fiber = Fiber(
                     id=str(fd.get("id", "")),
                     neuron_ids=set(fd.get("neuron_ids") or []),
@@ -2644,6 +2671,20 @@ class SurrealDBStorage(
                     pathway=list(fd.get("pathway") or []),
                     conductivity=float(fd.get("conductivity", 1.0)),
                     salience=float(fd.get("salience", 0.0)),
+                    coherence=float(fd.get("coherence", 0.0)),
+                    frequency=int(fd.get("frequency", 0)),
+                    summary=fd.get("summary"),
+                    essence=fd.get("essence"),
+                    auto_tags=set(fd.get("auto_tags") or []),
+                    agent_tags=set(fd.get("agent_tags") or []),
+                    metadata=dict(fd.get("metadata") or {}),
+                    compression_tier=int(fd.get("compression_tier", 0)),
+                    pinned=bool(fd.get("pinned", False)),
+                    last_conducted=_parse_datetime(fd.get("last_conducted")),
+                    time_start=_parse_datetime(fd.get("time_start")),
+                    time_end=_parse_datetime(fd.get("time_end")),
+                    last_ghost_shown_at=_parse_datetime(fd.get("last_ghost_shown_at")),
+                    created_at=_parse_datetime(fd.get("created_at")) or utcnow(),
                 )
                 await self.add_fiber(fiber)
                 fiber_ok += 1
