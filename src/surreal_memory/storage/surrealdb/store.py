@@ -1696,8 +1696,17 @@ class SurrealDBStorage(
         chunk = 5000
         for start in range(0, len(neuron_ids), chunk):
             ids = list(neuron_ids[start : start + chunk])
+            # `idx_state_neuron` is the composite UNIQUE index (brain_id, neuron_id). For
+            # `neuron_id IN $ids` the planner can only use its brain_id prefix, which on a
+            # single-brain database selects every row of the table and then evaluates the IN
+            # list after decoding each one. Measured on a copy of the production brain (18 657
+            # rows, 5 ids): 85 ms with the index, 9.7 ms without — the same disease as
+            # `find_fibers(contains_neuron=...)`, and about 14 calls per recall. The hint lets
+            # SurrealDB evaluate the IN list as a `pre_decode_filter`, straight off the encoded
+            # row. Pinned by a plan test, not a timing test.
             rows = await self._query(
-                "SELECT * FROM neuron_state WHERE brain_id = $brain_id AND neuron_id IN $ids",
+                "SELECT * FROM neuron_state WITH NOINDEX "
+                "WHERE brain_id = $brain_id AND neuron_id IN $ids",
                 brain_id=brain_id,
                 ids=ids,
             )
