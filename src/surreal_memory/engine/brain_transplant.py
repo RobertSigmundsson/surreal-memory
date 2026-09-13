@@ -81,10 +81,21 @@ def _fiber_matches_tags(
 ) -> bool:
     """Return True if the fiber carries ANY of the required tags.
 
-    Both the fiber's tags and the query tags are lowercased before comparison
-    so that "KB" matches a fiber tagged "kb" regardless of original casing.
+    Reads every spelling a snapshot can carry, because the two exporters disagree:
+    the in-memory backend writes ``tags`` (the ``auto_tags | agent_tags`` union) as
+    well as both halves, while the SurrealDB backend writes only the halves. Keying
+    on ``tags`` alone therefore matched nothing at all for a SurrealDB snapshot — the
+    tag filter of a brain transplant silently selected zero fibers, which reads as
+    "no fiber has that tag" rather than as a defect.
+
+    Both sides are lowercased before comparison so that "KB" matches a fiber tagged
+    "kb" regardless of original casing.
     """
-    fiber_tags = {t.lower() for t in fiber.get("tags", [])}
+    fiber_tags = {
+        str(t).lower()
+        for key in ("tags", "auto_tags", "agent_tags")
+        for t in (fiber.get(key) or ())
+    }
     normalized_required = frozenset(t.lower() for t in required_tags)
     return bool(fiber_tags & normalized_required)
 
