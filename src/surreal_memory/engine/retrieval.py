@@ -1887,14 +1887,16 @@ class ReflexPipeline:
         # `ORDER BY id`, ignoring the BM25 score its own full-text index already computes, so
         # keyword anchors were arbitrary-but-stable rather than relevant. `find_neurons_ranked`
         # orders by that score instead (measured +2/49 golden hits, zero regressions) and gates
-        # out anchors shorter than 25 chars (ties with the un-gated variant on the same golden,
-        # cheap insurance against BM25's length bias — see RAPORT.md ustalenie 2).
+        # out anchors shorter than `keyword_anchor_min_content_len` characters (default 25,
+        # ties with the un-gated variant on the same golden — cheap insurance against BM25's
+        # length bias; see RAPORT.md ustalenie 2). The threshold is an empirical number on one
+        # brain's content, so it lives on BrainConfig rather than in this call.
         keyword_tasks = [
             self._storage.find_neurons_ranked(
                 content_contains=keyword,
                 limit=kw_limits.get(keyword, _default_kw_limit),
                 ephemeral=ephemeral_filter,
-                min_content_len=25,
+                min_content_len=self._config.keyword_anchor_min_content_len,
             )
             for keyword in normalized[:15]  # cap at 15 (expanded with token variants)
         ]

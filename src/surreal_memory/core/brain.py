@@ -97,6 +97,15 @@ class BrainConfig:
     # simply returns no usable rows), so there is no silent behavior change on existing brains.
     fiber_vector_enabled: bool = False
     fiber_vector_top_n: int = 10
+    # Retrieval: minimum content length for a keyword anchor candidate (N1 fix,
+    # smem-recall-leksyka-fibry-reranker, 2026-09-12). `find_neurons_ranked` orders keyword
+    # anchors by BM25, which is length-biased (b=0.75), so very short neurons score high on a
+    # single term match without carrying the context that makes an anchor useful. 25 characters
+    # is the measured value: it tied with the un-gated variant on the 49-pair golden and lost
+    # nothing, so it is cheap insurance rather than a tuned threshold. Configurable because it
+    # is an empirical number on one brain's content — another brain should be able to move it
+    # without a release. 0 disables the gate.
+    keyword_anchor_min_content_len: int = 25
     # Retrieval: Activation strategy
     activation_strategy: str = "classic"  # "ppr" | "classic" | "reflex" | "hybrid" | "auto"
     ppr_damping: float = 0.15
