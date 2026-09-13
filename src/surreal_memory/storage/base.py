@@ -186,6 +186,44 @@ class NeuralStorage(ABC):
         """
         ...
 
+    async def find_neurons_ranked(
+        self,
+        content_contains: str,
+        limit: int = 100,
+        ephemeral: bool | None = None,
+        min_content_len: int | None = None,
+    ) -> list[Neuron]:
+        """Full-text search ranked by relevance, not by ``find_neurons``' default id ordering.
+
+        Concrete method (not abstract): backends with a real ranking index (SurrealDB's BM25
+        full-text index) override this for a relevance-ordered result; backends without one
+        inherit this fallback, which keeps the existing ``find_neurons`` ordering and only adds
+        the length gate. N1 fix (smem-recall-leksyka-fibry-reranker, 2026-09-12): the keyword
+        anchor retriever in ``engine/retrieval.py`` used ``find_neurons(content_contains=...)``
+        directly, whose ``ORDER BY id`` ignores the BM25 score the full-text index already
+        computes — arbitrary-but-stable anchors regardless of relevance. Measured on a copy of
+        the production brain: ordering by that score instead recovers 2/49 golden queries with
+        zero regressions.
+
+        Args:
+            content_contains: full-text term to match.
+            limit: maximum results to return.
+            ephemeral: filter by ephemeral flag (None=all, True=only ephemeral, False=only permanent).
+            min_content_len: drop candidates whose content is shorter than this many characters
+                (measured to tie, never lose, against the un-gated variant — cheap insurance
+                against relevance scores favoring very short content).
+
+        Returns:
+            List of matching neurons, most relevant first where the backend supports ranking.
+        """
+        fetch_limit = limit * 4 if min_content_len is not None else limit
+        neurons = await self.find_neurons(
+            content_contains=content_contains, limit=fetch_limit, ephemeral=ephemeral
+        )
+        if min_content_len is not None:
+            neurons = [n for n in neurons if len(n.content) >= min_content_len]
+        return neurons[:limit]
+
     @abstractmethod
     async def suggest_neurons(
         self,
@@ -650,6 +688,38 @@ class NeuralStorage(ABC):
         raise NotImplementedError(
             f"{type(self).__name__} has no vector search; callers must fall back to a scan"
         )
+
+    async def find_fibers_by_embedding(
+        self,
+        query_embedding: list[float],
+        limit: int = 10,
+    ) -> list[tuple[Fiber, float]]:
+        """Find fibers nearest to ``query_embedding`` by their precomputed ``fiber_vec``, best
+        first — the ONLY retrieval path that reaches a fiber without going through one of its
+        neurons as an anchor (N2 fix, smem-recall-leksyka-fibry-reranker, 2026-09-12; see
+        ``engine/retrieval.py``'s "FIBER VECTOR ANCHORS" step). ``fiber_vec`` is populated by
+        ``scripts/backfill_fiber_vectors.py``, not written inline at encode time (follow-up, not
+        part of this fix — see that script's docstring).
+
+        Returns ``(fiber, cosine_similarity)`` pairs, same scale as
+        :meth:`find_neurons_by_embedding`.
+
+        Raises ``NotImplementedError`` when the backend has no fiber vector search — deliberately
+        different from returning ``[]`` for the same reason as ``find_neurons_by_embedding``.
+        """
+        raise NotImplementedError(
+            f"{type(self).__name__} has no fiber vector search; the fiber-vector retriever "
+            "contributes nothing on this backend"
+        )
+
+    async def update_fiber_embeddings(self, pairs: list[tuple[str, list[float]]]) -> None:
+        """Write ``fiber_vec`` for many fibers in one round-trip (see
+        ``find_fibers_by_embedding``). Unlike ``update_neuron_embeddings``, there is no generic
+        dataclass-level fallback: ``Fiber`` carries no metadata bag equivalent to
+        ``Neuron.metadata["_embedding"]``, so a backend must implement this directly against its
+        own storage to support the fiber-vector retriever at all.
+        """
+        raise NotImplementedError(f"{type(self).__name__} has no fiber embedding storage")
 
     @abstractmethod
     async def find_fibers(
