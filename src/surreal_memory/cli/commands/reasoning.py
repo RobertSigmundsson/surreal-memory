@@ -231,6 +231,10 @@ def reasoning_mine(
                 "traces_ingested": ingest.traces_ingested,
                 "traces_reset": traces_reset,
                 "patterns_learned": distill.patterns_learned,
+                # Merges are work: a run that folded 12 duplicate clusters into
+                # existing patterns and learned nothing new is not the same run
+                # as one that did nothing, and must not print the same line.
+                "patterns_merged": distill.patterns_merged,
                 "files_scanned": ingest.files_scanned,
             }
             if json_output:
@@ -238,7 +242,8 @@ def reasoning_mine(
             else:
                 typer.echo(
                     f"Mined {result['traces_ingested']} traces, "
-                    f"learned {result['patterns_learned']} patterns."
+                    f"learned {result['patterns_learned']} patterns, "
+                    f"merged {result['patterns_merged']} into existing ones."
                 )
         finally:
             await storage.close()

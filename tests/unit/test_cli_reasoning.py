@@ -143,7 +143,9 @@ def test_mine_disabled_exits_nonzero(tmp_path: Path) -> None:
 def test_mine_runs_when_enabled(tmp_path: Path) -> None:
     storage = _storage()
     ingest = SimpleNamespace(traces_ingested=4, traces_scanned=10, files_scanned=3, files_total=3)
-    distill = SimpleNamespace(patterns_learned=2, traces_processed=4, models_seen=1)
+    distill = SimpleNamespace(
+        patterns_learned=2, traces_processed=4, models_seen=1, patterns_merged=0
+    )
     ingest_mock = AsyncMock(return_value=ingest)
     with (
         patch(f"{CLI}.get_config", MagicMock()),
@@ -190,7 +192,9 @@ def test_mine_force_bypasses_disabled(tmp_path: Path) -> None:
     # --force runs mining even when mining_enabled is False (the privacy escape hatch).
     storage = _storage()
     ingest = SimpleNamespace(traces_ingested=1, traces_scanned=1, files_scanned=1, files_total=1)
-    distill = SimpleNamespace(patterns_learned=0, traces_processed=1, models_seen=1)
+    distill = SimpleNamespace(
+        patterns_learned=0, traces_processed=1, models_seen=1, patterns_merged=0
+    )
     with (
         patch(f"{CLI}.get_config", MagicMock()),
         patch(f"{CLI}.get_storage", new=AsyncMock(return_value=storage)),
@@ -219,7 +223,9 @@ def test_mine_applies_overrides(tmp_path: Path) -> None:
         )
     )
     distill_mock = AsyncMock(
-        return_value=SimpleNamespace(patterns_learned=0, traces_processed=1, models_seen=1)
+        return_value=SimpleNamespace(
+            patterns_learned=0, traces_processed=1, models_seen=1, patterns_merged=0
+        )
     )
     with (
         patch(f"{CLI}.get_config", MagicMock()),
@@ -268,7 +274,9 @@ def test_mine_reprocess_reopens_the_backlog(tmp_path: Path) -> None:
         patch(
             "surreal_memory.engine.reasoning_distiller.distill_reasoning_patterns",
             new=AsyncMock(
-                return_value=SimpleNamespace(patterns_learned=2, traces_processed=7, models_seen=1)
+                return_value=SimpleNamespace(
+                    patterns_learned=2, traces_processed=7, models_seen=1, patterns_merged=0
+                )
             ),
         ),
     ):
@@ -301,7 +309,9 @@ def test_mine_without_reprocess_does_not_reset(tmp_path: Path) -> None:
         patch(
             "surreal_memory.engine.reasoning_distiller.distill_reasoning_patterns",
             new=AsyncMock(
-                return_value=SimpleNamespace(patterns_learned=0, traces_processed=1, models_seen=1)
+                return_value=SimpleNamespace(
+                    patterns_learned=0, traces_processed=1, models_seen=1, patterns_merged=0
+                )
             ),
         ),
     ):
