@@ -174,7 +174,19 @@ _BATCH_FETCH_CONCURRENCY = 16
 # composite index is selected, while direct record-id reads complete in
 # milliseconds. Keep the set-based query for consolidation-sized pages, where
 # thousands of individual RPCs would cost more than the scan-like index path.
-_DIRECT_STATE_FETCH_LIMIT = 256
+#
+# The cut-over point is MEASURED, not assumed: with the set-based query hinted
+# past the brain index (see ``get_neuron_states_batch``) it stops being the slow
+# side much earlier than 256. Both paths timed on a copy of the production brain
+# (18 657 state rows, 5 repetitions per point, interleaved), p50 ms:
+#
+#     n:          8     16     32     64    128    256    512   1024
+#     per-id:   2.8    5.2    9.0   15.0   25.6   50.8  103.8  197.3
+#     set:     10.5   11.0   11.7   13.7   17.5   26.2   51.3  125.9
+#
+# so the set query takes the lead at n = 64 and never gives it back.
+# measured 2026-09-13 on a copy of a production brain (18 657 state rows).
+_DIRECT_STATE_FETCH_LIMIT = 64
 
 
 def _prefer_ws_transport(url: str) -> str:
@@ -1859,10 +1871,32 @@ class SurrealDBStorage(
         chunk = 5000
         for start in range(0, len(neuron_ids), chunk):
             ids = list(neuron_ids[start : start + chunk])
+            # Two things this query needs and neither is obvious.
+            #
+            # WITH NOINDEX: ``idx_state_neuron`` is the composite UNIQUE
+            # (brain_id, neuron_id), and for ``neuron_id IN $ids`` the planner can
+            # use only its brain_id prefix — on a single-brain database that selects
+            # every row and evaluates the IN list after decoding each one. Measured
+            # on a copy of production (18 657 rows, 5 ids): 85 ms with the index,
+            # 9.7 ms letting the predicate run as a ``pre_decode_filter``. Pinned by
+            # a plan test, not a timing test.
+            #
+            # The id spelling: the per-id path above addresses
+            # ``neuron_state:state_{_to_surreal_id(nid)}``, which folds ``-`` to
+            # ``_`` and therefore accepts BOTH spellings of the same id. This query
+            # filters the ``neuron_id`` COLUMN, which stores the public, dashed
+            # spelling — measured on the same copy, an underscored id list returns 8
+            # of 8 through the per-id path and 0 of 8 here. Without this union the
+            # two branches would disagree about their own input and the caller would
+            # get states below the threshold and silence above it. Sending both
+            # spellings keeps them equivalent (a folded id that names nothing simply
+            # matches no row).
+            lookup_ids = list(dict.fromkeys(ids + [_to_public_id(i) for i in ids]))
             rows = await self._query(
-                "SELECT * FROM neuron_state WHERE brain_id = $brain_id AND neuron_id IN $ids",
+                "SELECT * FROM neuron_state WITH NOINDEX "
+                "WHERE brain_id = $brain_id AND neuron_id IN $ids",
                 brain_id=brain_id,
-                ids=ids,
+                ids=lookup_ids,
             )
             for r in rows:
                 state = _row_to_neuron_state(r)
