@@ -2292,7 +2292,24 @@ class SurrealDBStorage(
         where = " AND ".join(conditions)
         # Over-fetch when a Python post-filter (time/metadata_key/near) further narrows.
         fetch_limit = min(int(limit) * 3, 3000) if (near is not None or tags) else int(limit)
-        rows = await self._query(f"SELECT * FROM fiber WHERE {where} LIMIT {fetch_limit}", **params)
+        # `brain_id = $brain_id` makes the planner reach for `idx_fiber_brain`. On a brain that
+        # is the only brain in its database that index selects every row and then forces each
+        # one to be DECODED before the remaining predicate can be evaluated — and since the
+        # fiber-vector retriever landed, every fiber row carries a 1024-float `fiber_vec`.
+        # Measured on a copy of the production brain (2299 fibers): 279 ms per call with the
+        # index, 4.9 ms without it, identical rows. `find_fibers(contains_neuron=...)` runs
+        # about 58 times per recall, so this was 78 % of query time; end to end a real
+        # `pipeline.query()` went from 21.7 s to 6.6 s.
+        #
+        # `$x IN neuron_ids` is the one predicate here SurrealDB can answer with
+        # `pre_decode_filter`, i.e. straight off the encoded row, so the hint is applied only
+        # on that path. Everything else keeps the planner's choice: on a database that really
+        # does hold several brains, `idx_fiber_brain` is the right index and skipping it would
+        # scan other brains' fibers for nothing.
+        hint = " WITH NOINDEX" if contains_neuron else ""
+        rows = await self._query(
+            f"SELECT * FROM fiber{hint} WHERE {where} LIMIT {fetch_limit}", **params
+        )
 
         fibers = [_row_to_fiber(r) for r in rows]
 
