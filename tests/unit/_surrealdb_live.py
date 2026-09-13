@@ -55,6 +55,7 @@ LIVE_TEST_BRAIN_NAMES = frozenset(
         "change-log-payload-live",  # test_surrealdb_change_log_payload_live.py
         "sync-change-entry-live",  # test_surrealdb_sync_change_entry_live.py
         "delete-cascade-live",  # test_delete_neuron_cascade_live.py
+        "today-fibers-binding-live",  # test_surrealdb_today_fibers_live.py
     }
 )
 
