@@ -27,7 +27,7 @@ from surreal_memory.core.project import Project
 from surreal_memory.core.synapse import Direction, Synapse, SynapseType
 from surreal_memory.core.sync_records import DeviceRecord
 from surreal_memory.storage.base import NeuralStorage
-from surreal_memory.storage.surrealdb._ids import _safe_brain_id, _to_surreal_id
+from surreal_memory.storage.surrealdb._ids import _safe_brain_id, _to_public_id, _to_surreal_id
 from surreal_memory.storage.surrealdb.activity import SurrealDBActivityMixin
 from surreal_memory.storage.surrealdb.alerts import SurrealDBAlertsMixin
 from surreal_memory.storage.surrealdb.cognitive import SurrealDBCognitiveMixin
@@ -397,11 +397,9 @@ def _row_to_neuron(row: dict[str, Any]) -> Neuron:
     if embedding_vec:
         meta["_embedding"] = list(embedding_vec)
     rid = row["id"]
-    neuron_id = f"{rid.table_name}:{rid.id}" if hasattr(rid, "table_name") else str(rid)
-    # Strip table prefix and convert underscores back to dashes
-    if ":" in neuron_id:
-        neuron_id = neuron_id.split(":", 1)[1]
-    neuron_id = neuron_id.replace("_", "-")
+    neuron_id = _to_public_id(
+        f"{rid.table_name}:{rid.id}" if hasattr(rid, "table_name") else str(rid)
+    )
     return Neuron(
         id=neuron_id,
         type=_parse_neuron_type(row["type"]),
@@ -465,10 +463,7 @@ def _row_to_synapse(row: dict[str, Any]) -> Synapse:
     """
 
     rid = row["id"]
-    syn_id = f"{rid.table_name}:{rid.id}" if hasattr(rid, "table_name") else str(rid)
-    if ":" in syn_id:
-        syn_id = syn_id.split(":", 1)[1]
-    syn_id = syn_id.replace("_", "-")
+    syn_id = _to_public_id(f"{rid.table_name}:{rid.id}" if hasattr(rid, "table_name") else str(rid))
     source_id = _endpoint_to_id(row.get("in"), row.get("source_id"))
     target_id = _endpoint_to_id(row.get("out"), row.get("target_id"))
     syn = Synapse(
@@ -520,24 +515,20 @@ def _change_payload(entity: Any | None) -> dict[str, Any] | None:
 def _row_to_fiber(row: dict[str, Any]) -> Fiber:
     """Convert a SurrealDB fiber record to Fiber.
 
-    NOTE (found while adding `find_fibers_by_embedding` for the N2 fix,
-    smem-recall-leksyka-fibry-reranker, 2026-09-12, NOT fixed here — see that program's
-    REKOMENDACJE.md/DECISIONS.md for the full writeup): unlike `_row_to_neuron`, this never folds
-    the raw record id's underscores back to the dashes `Fiber.create()`'s `uuid4()` produces, so
-    `Fiber.id` does not round-trip through `get_fiber`/`find_fibers`/`find_fibers_batch`
-    (confirmed live: a fresh fiber, saved then re-fetched, comes back with every `-` turned into
-    `_`). This is DOCUMENTED, COMPENSATED-FOR behavior, not an oversight —
-    `test_surrealdb_typed_memory_delete_id_live.py` (BUG-006) exists specifically because
-    `delete_typed_memory` had to be widened to accept BOTH id forms after this exact symptom, and
-    at least 17 files across the tree carry similar dual-form handling. Fixing the root cause here
-    is out of scope for the N2 fix (which only reads `fiber.anchor_neuron_id`, never `fiber.id`,
-    from the vector retriever's results) and risks silently changing behavior everywhere else that
-    has grown to expect the folded form — left as a follow-up for its own dedicated review.
+    Until 2026-09-13 this converter — alone among the three — did not fold the record
+    id's underscores back to dashes, so ``Fiber.id`` did not round-trip through
+    ``get_fiber``/``find_fibers``/``find_fibers_batch``: a fresh fiber, saved and
+    re-fetched, came back with every ``-`` turned into ``_``. Callers grew dual-form
+    compensations to live with it (``delete_typed_memory``, BUG-006), and
+    ``maturation._canonicalised`` actively folded the *other* direction to match. The
+    id now round-trips via the shared ``_to_public_id``; see that fix's ledger,
+    expertP/smem-n1n2-cutover-i-fiber-roundtrip, for the audit of who depended on the
+    old form.
     """
     rid = row["id"]
-    fiber_id = f"{rid.table_name}:{rid.id}" if hasattr(rid, "table_name") else str(rid)
-    if ":" in fiber_id:
-        fiber_id = fiber_id.split(":", 1)[1]
+    fiber_id = _to_public_id(
+        f"{rid.table_name}:{rid.id}" if hasattr(rid, "table_name") else str(rid)
+    )
     return Fiber(
         id=fiber_id,
         neuron_ids=set(row.get("neuron_ids") or []),
