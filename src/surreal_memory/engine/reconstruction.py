@@ -139,7 +139,7 @@ async def reconstruct_answer(
 
     # Strategy 1: Single mode — dominant neuron
     if top_score > 0.8:
-        neuron = await storage.get_neuron(top_id)
+        neuron = await storage.get_neuron(top_id, include_embedding=False)
         if neuron is not None:
             return ReconstructionResult(
                 answer=neuron.content,
@@ -238,7 +238,7 @@ async def _compute_score_breakdown(
     # context_tags match query tokens (via the calling retrieval context)
     decision_domain_boost = 0.0
     try:
-        neuron_obj = await storage.get_neuron(top_id)
+        neuron_obj = await storage.get_neuron(top_id, include_embedding=False)
         if neuron_obj:
             decision_meta = neuron_obj.metadata.get("_decision")
             if decision_meta and isinstance(decision_meta, dict):

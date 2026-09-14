@@ -657,7 +657,9 @@ class ReflexPipeline:
                             reverse=True,
                         )
                     ][: _rr.max_candidates]
-                    neuron_batch = await self._storage.get_neurons_batch(top_nids)
+                    neuron_batch = await self._storage.get_neurons_batch(
+                        top_nids, include_embedding=False
+                    )
                     neuron_contents = {
                         nid: n.content for nid, n in neuron_batch.items() if n.content
                     }
@@ -1512,7 +1514,7 @@ class ReflexPipeline:
 
         # Batch-fetch neurons to check for disputed metadata
         neuron_ids = list(activations.keys())
-        neurons = await self._storage.get_neurons_batch(neuron_ids)
+        neurons = await self._storage.get_neurons_batch(neuron_ids, include_embedding=False)
 
         disputed_ids: list[str] = []
         result: dict[str, ActivationResult] = {}

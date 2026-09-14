@@ -367,7 +367,11 @@ async def format_context(
             lines.append("## Relevant Memories\n")
 
         anchor_ids = list({f.anchor_neuron_id for f in fibers[:5] if not f.summary})
-        anchor_map = await storage.get_neurons_batch(anchor_ids) if anchor_ids else {}
+        anchor_map = (
+            await storage.get_neurons_batch(anchor_ids, include_embedding=False)
+            if anchor_ids
+            else {}
+        )
 
         for fiber in fibers[:5]:
             if fiber.summary:
@@ -419,7 +423,7 @@ async def format_context(
         )
 
         top_ids = [r.neuron_id for r in sorted_activations[:20]]
-        neuron_map = await storage.get_neurons_batch(top_ids)
+        neuron_map = await storage.get_neurons_batch(top_ids, include_embedding=False)
 
         for result in sorted_activations[:20]:
             neuron = neuron_map.get(result.neuron_id)
