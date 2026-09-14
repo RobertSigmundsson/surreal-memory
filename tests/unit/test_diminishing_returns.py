@@ -152,14 +152,19 @@ def _make_storage_mock(
     storage = AsyncMock()
 
     # get_neurons_batch
-    async def mock_get_neurons_batch(ids: list[str]) -> dict[str, Any]:
+    async def mock_get_neurons_batch(
+        ids: list[str], include_embedding: bool = True
+    ) -> dict[str, Any]:
         return {nid: SimpleNamespace(id=nid) for nid in ids if nid in neurons}
 
     storage.get_neurons_batch = mock_get_neurons_batch
 
     # get_neighbors: returns list of (neuron, synapse) tuples
     async def mock_get_neighbors(
-        neuron_id: str, direction: str = "both", min_weight: float = 0.1
+        neuron_id: str,
+        direction: str = "both",
+        min_weight: float = 0.1,
+        include_embedding: bool = True,
     ) -> list:
         result = []
         for target_id, weight in neighbors.get(neuron_id, []):

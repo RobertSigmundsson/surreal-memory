@@ -67,13 +67,15 @@ def _make_mock_storage(
     neurons = neurons or {}
     states = states or {}
 
-    async def get_neuron(nid: str) -> Neuron | None:
+    async def get_neuron(nid: str, include_embedding: bool = True) -> Neuron | None:
         return neurons.get(nid)
 
     async def get_neuron_state(nid: str) -> NeuronState | None:
         return states.get(nid)
 
-    async def get_neurons_batch(nids: list[str]) -> dict[str, Neuron]:
+    async def get_neurons_batch(
+        nids: list[str], include_embedding: bool = True
+    ) -> dict[str, Neuron]:
         return {nid: neurons[nid] for nid in nids if nid in neurons}
 
     storage.get_neuron = AsyncMock(side_effect=get_neuron)
