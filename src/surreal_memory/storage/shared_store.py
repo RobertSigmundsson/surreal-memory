@@ -182,8 +182,13 @@ class SharedStorage(SharedFiberBrainMixin, NeuralStorage):
         result = await self._request("POST", "/memory/neurons", json_data=data)
         return str(result.get("id", neuron.id))
 
-    async def get_neuron(self, neuron_id: str) -> Neuron | None:
-        """Get a neuron by ID."""
+    async def get_neuron(self, neuron_id: str, include_embedding: bool = True) -> Neuron | None:
+        """Get a neuron by ID.
+
+        ``include_embedding`` is a transfer hint (see :meth:`NeuralStorage.get_neuron`);
+        the HTTP surface has no projection parameter, so this backend always returns
+        whatever the server sends.
+        """
         try:
             result = await self._request("GET", f"/memory/neurons/{neuron_id}")
             return dict_to_neuron(result)
@@ -375,8 +380,9 @@ class SharedStorage(SharedFiberBrainMixin, NeuralStorage):
         direction: Literal["out", "in", "both"] = "both",
         synapse_types: list[SynapseType] | None = None,
         min_weight: float | None = None,
+        include_embedding: bool = True,
     ) -> list[tuple[Neuron, Synapse]]:
-        """Get neighboring neurons."""
+        """Get neighboring neurons (``include_embedding`` is a transfer hint)."""
         params: dict[str, Any] = {"direction": direction}
         if synapse_types:
             params["synapse_types"] = ",".join(t.value for t in synapse_types)

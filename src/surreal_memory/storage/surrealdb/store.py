@@ -1270,14 +1270,23 @@ class SurrealDBStorage(
             await self._record_changes_bulk("neuron", "insert", neurons)
         return len(neurons)
 
-    async def get_neuron(self, neuron_id: str) -> Neuron | None:
+    async def get_neuron(self, neuron_id: str, include_embedding: bool = True) -> Neuron | None:
         # Scope to the current brain: a bare record select would let a caller
         # read another brain's neuron by id. The record is still pinned in FROM.
         brain_id = self._get_brain_id()
         sid = _to_surreal_id(neuron_id)
+        # Same OMIT lever as find_neurons: the read paths of a recall never touch
+        # metadata["_embedding"], and dragging 1024 floats per row over the wire
+        # costs real wall time — but only once BOTH vector-carrying read paths are
+        # projected away. Measured on fresh pristine copies, interleaved ABBA:
+        # this projection alone 1.025x (no gain), the get_neighbors one alone
+        # 0.989x, both together 0.8295x / 0.8229x of the recall wall (10/10 and
+        # 10/10 samples faster). Default stays True: the PUT route and
+        # content_refresh decide on re-embedding by reading this key back.
+        projection = "SELECT *" if include_embedding else "SELECT * OMIT embedding_vec"
         try:
             rows = await self._query(
-                f"SELECT * FROM neuron:{sid} WHERE brain_id = $brain_id",
+                f"{projection} FROM neuron:{sid} WHERE brain_id = $brain_id",
                 brain_id=brain_id,
             )
             if rows:
@@ -1286,7 +1295,9 @@ class SurrealDBStorage(
             pass
         return None
 
-    async def get_neurons_batch(self, neuron_ids: list[str]) -> dict[str, Neuron]:
+    async def get_neurons_batch(
+        self, neuron_ids: list[str], include_embedding: bool = True
+    ) -> dict[str, Neuron]:
         """Fetch multiple neurons by id, concurrently over the shared connection.
 
         A single ``id IN [...]`` query was measured *slower* than per-id direct
@@ -1310,13 +1321,18 @@ class SurrealDBStorage(
         # than firing 16 unscoped selects.
         brain_id = self._get_brain_id()
         semaphore = asyncio.Semaphore(_BATCH_FETCH_CONCURRENCY)
+        # ``include_embedding=False`` drops the 1024-float vector from the wire for
+        # callers that never read it (see get_neuron for the measurement). This is
+        # the dominant source of point reads during a recall: 252 of 273 per three
+        # golden queries come through this method.
+        projection = "SELECT *" if include_embedding else "SELECT * OMIT embedding_vec"
 
         async def _fetch_one(nid: str) -> tuple[str, Neuron | None]:
             sid = _to_surreal_id(nid)
             async with semaphore:
                 try:
                     rows = await self._query(
-                        f"SELECT * FROM neuron:{sid} WHERE brain_id = $brain_id",
+                        f"{projection} FROM neuron:{sid} WHERE brain_id = $brain_id",
                         brain_id=brain_id,
                     )
                 except Exception:
@@ -2184,6 +2200,7 @@ class SurrealDBStorage(
         direction: Literal["out", "in", "both"] = "both",
         synapse_types: list[SynapseType] | None = None,
         min_weight: float | None = None,
+        include_embedding: bool = True,
     ) -> list[tuple[Neuron, Synapse]]:
         brain_id = self._get_brain_id()
         base_params: dict[str, Any] = {
@@ -2221,8 +2238,20 @@ class SurrealDBStorage(
             # Inline both endpoint neurons via the native edge links (in.*/out.*)
             # so a single query returns the neighbour records — kills the N+1
             # get_neuron call that ran once per edge before the RELATION migration.
+            # The inlined endpoints carry their own embedding_vec, so a spreading
+            # activation pass ships two 1024-float vectors per edge it walks. OMIT
+            # names the ALIASES (in_neuron/out_neuron), not the link fields: omitting
+            # ``in.embedding_vec`` was measured to leave the alias untouched (the
+            # vector still came back), while omitting the alias field drops it.
+            # Same lever and the same measurement as get_neuron.
+            omit = (
+                ""
+                if include_embedding
+                else " OMIT in_neuron.embedding_vec, out_neuron.embedding_vec"
+            )
             syn_rows = await self._query(
-                f"SELECT *, in.* AS in_neuron, out.* AS out_neuron FROM synapse WHERE {where}",
+                f"SELECT *, in.* AS in_neuron, out.* AS out_neuron{omit} "
+                f"FROM synapse WHERE {where}",
                 **base_params,
             )
             for sr in syn_rows:

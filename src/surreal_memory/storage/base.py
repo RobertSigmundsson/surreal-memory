@@ -91,19 +91,26 @@ class NeuralStorage(ABC):
         return count
 
     @abstractmethod
-    async def get_neuron(self, neuron_id: str) -> Neuron | None:
+    async def get_neuron(self, neuron_id: str, include_embedding: bool = True) -> Neuron | None:
         """
         Get a neuron by ID.
 
         Args:
             neuron_id: The neuron ID
+            include_embedding: When False, the backend MAY omit the stored vector
+                (``metadata["_embedding"]``) from the returned neuron. It is a
+                transfer hint for read-only callers, not a contract change: a
+                caller that later writes the neuron back, or that decides whether
+                to re-embed by looking for that key, must leave it True.
 
         Returns:
             The neuron if found, None otherwise
         """
         ...
 
-    async def get_neurons_batch(self, neuron_ids: list[str]) -> dict[str, Neuron]:
+    async def get_neurons_batch(
+        self, neuron_ids: list[str], include_embedding: bool = True
+    ) -> dict[str, Neuron]:
         """Get multiple neurons by ID in a single operation.
 
         Default implementation falls back to sequential get_neuron.
@@ -111,13 +118,14 @@ class NeuralStorage(ABC):
 
         Args:
             neuron_ids: List of neuron IDs to fetch
+            include_embedding: Transfer hint, see :meth:`get_neuron`.
 
         Returns:
             Dict mapping neuron_id to Neuron for found neurons
         """
         results: dict[str, Neuron] = {}
         for nid in neuron_ids:
-            neuron = await self.get_neuron(nid)
+            neuron = await self.get_neuron(nid, include_embedding=include_embedding)
             if neuron is not None:
                 results[nid] = neuron
         return results
@@ -572,6 +580,7 @@ class NeuralStorage(ABC):
         direction: Literal["out", "in", "both"] = "both",
         synapse_types: list[SynapseType] | None = None,
         min_weight: float | None = None,
+        include_embedding: bool = True,
     ) -> list[tuple[Neuron, Synapse]]:
         """
         Get neighboring neurons connected by synapses.
@@ -584,6 +593,8 @@ class NeuralStorage(ABC):
                 - "both": Follow both directions
             synapse_types: Only follow these synapse types
             min_weight: Only follow synapses with weight >= this
+            include_embedding: Transfer hint for the inlined neighbour records,
+                see :meth:`get_neuron`
 
         Returns:
             List of (neighbor_neuron, connecting_synapse) tuples

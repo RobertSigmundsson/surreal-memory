@@ -139,11 +139,16 @@ class InMemoryStorage(
         self._states[brain_id][neuron.id] = NeuronState(neuron_id=neuron.id)
         return neuron.id
 
-    async def get_neuron(self, neuron_id: str) -> Neuron | None:
+    async def get_neuron(self, neuron_id: str, include_embedding: bool = True) -> Neuron | None:
+        # ``include_embedding`` is a transfer hint (see NeuralStorage.get_neuron).
+        # There is no wire here — the vector already sits in this process's memory —
+        # so honouring it would only cost a defensive copy per read.
         brain_id = self._get_brain_id()
         return self._neurons[brain_id].get(neuron_id)
 
-    async def get_neurons_batch(self, neuron_ids: list[str]) -> dict[str, Neuron]:
+    async def get_neurons_batch(
+        self, neuron_ids: list[str], include_embedding: bool = True
+    ) -> dict[str, Neuron]:
         """Batch fetch neurons from in-memory store."""
         brain_id = self._get_brain_id()
         brain_neurons = self._neurons[brain_id]
@@ -513,7 +518,9 @@ class InMemoryStorage(
         direction: Literal["out", "in", "both"] = "both",
         synapse_types: list[SynapseType] | None = None,
         min_weight: float | None = None,
+        include_embedding: bool = True,
     ) -> list[tuple[Neuron, Synapse]]:
+        # Transfer hint only; the in-memory graph has nothing to omit (see get_neuron).
         brain_id = self._get_brain_id()
         results: list[tuple[Neuron, Synapse]] = []
 
