@@ -134,4 +134,8 @@ class TestQueryIsEmbeddedOncePerQuery:
 
         assert outcome.query_vec is not None
         assert "query_vec" not in repr(outcome)
-        assert "0.11" not in repr(outcome)
+        # Assert on the vector as a WHOLE, never on one of its floats: the repr also
+        # carries elapsed_ms, and a timing of 0.11xx ms made "0.11" match inside that
+        # field (1 of 3 full -n auto runs red, 0 of 30 in isolation — V-GATE round 4, I1).
+        assert str(_QUERY_VECTOR) not in repr(outcome)
+        assert "0.11, 0.22" not in repr(outcome)
