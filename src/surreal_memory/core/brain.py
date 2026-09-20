@@ -242,6 +242,25 @@ class BrainConfig:
     # neighbours. "auto" uses the index when the backend has one and falls
     # back to the scan otherwise, saying so in the retrieval metadata.
     embedding_anchor_mode: str = "auto"
+    # Retrieval: refusal gate on the cross-encoder's raw top-1 score (M4,
+    # smem-recall-brama-odmowy, U2 DIAGNOZA.md §7/§8). Recall's sufficiency
+    # gates (`engine/sufficiency.py`) score the SHAPE of the activation
+    # landscape, not whether it answers the query — measured on a 27-phrase
+    # out-of-base set plus the 49-pair golden, every existing gate accepted
+    # unconditionally (`default_pass`, 0/98 refusals possible today). The
+    # reranker's raw cross-encoder score is the one signal in the pipeline
+    # that reads the (query, content) pair itself: at the log-margin
+    # threshold 0.002146 (5% of the golden range in log-space — the raw
+    # score spans ~342x, so a linear margin degenerates below the whole
+    # measured population) it refuses 17/27 out-of-base phrases while
+    # refusing ZERO of the 98 golden queries (golden+pudła), AUC 0.9728
+    # (highest of the ten signals measured). `None` = gate inactive — an
+    # old brain, or a brain whose operator has not measured its own floor,
+    # sees exactly today's behaviour (no new refusals). Wired in
+    # `engine/retrieval.py` after 4.9 (post-rerank): skipped, never firing
+    # a refusal, when the reranker itself degraded that query
+    # (`metadata.reranker_floor_skipped` records why).
+    reranker_refusal_floor: float | None = None
 
     def with_updates(self, **kwargs: Any) -> BrainConfig:
         """Create a new config with updated values."""
