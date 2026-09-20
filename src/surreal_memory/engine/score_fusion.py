@@ -13,11 +13,44 @@ Formula: score(d) = Σ  weight_i / (k + rank_i(d))
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 
 # Default RRF constant — higher k reduces impact of top-ranked items.
 # k=60 is the standard from the RRF paper.
 DEFAULT_RRF_K = 60
+
+_FIBER_VECTOR_WEIGHT_ENV = "SMEM_FIBER_VECTOR_WEIGHT"
+_FIBER_VECTOR_WEIGHT_DEFAULT = 0.7
+
+
+def _read_fiber_vector_weight() -> float:
+    """Read the `fiber_vector` retriever weight for the ABBA measurement (smem-recall-tor-
+    fibrowy, U2/U3). TEMPORARY: this env read exists only so U3 can measure 0.7 and 0.8
+    without a rebuild — U5 inlines whichever value D1 picks and deletes this function and
+    the env-var indirection entirely.
+
+    A silent fallback to the default on a bad value would measure a variant nobody asked
+    for and call it what was ordered (cisza nie jest sukcesem) — so a non-numeric or
+    out-of-range value is a hard import-time error, not a warning.
+    """
+    raw = os.environ.get(_FIBER_VECTOR_WEIGHT_ENV)
+    if raw is None or not raw.strip():
+        return _FIBER_VECTOR_WEIGHT_DEFAULT
+    try:
+        value = float(raw)
+    except ValueError as exc:
+        raise ValueError(
+            f"{_FIBER_VECTOR_WEIGHT_ENV}={raw!r} is not a number. Unset it to use the "
+            f"default ({_FIBER_VECTOR_WEIGHT_DEFAULT}) or set a float in (0, 1]."
+        ) from exc
+    if not (0 < value <= 1):
+        raise ValueError(
+            f"{_FIBER_VECTOR_WEIGHT_ENV}={value!r} is out of range — must be > 0 and <= 1. "
+            f"Unset it to use the default ({_FIBER_VECTOR_WEIGHT_DEFAULT})."
+        )
+    return value
+
 
 # Default weights per retriever type.
 DEFAULT_RETRIEVER_WEIGHTS: dict[str, float] = {
@@ -27,6 +60,10 @@ DEFAULT_RETRIEVER_WEIGHTS: dict[str, float] = {
     "embedding": 1.0,
     "graph_expansion": 0.5,
     "fuzzy": 0.4,
+    # TEMPORARY measurement knob — see `_read_fiber_vector_weight` docstring. Before this key
+    # existed, `rrf_fuse`'s `weights.get(anchor.retriever, 1.0)` fallback silently gave
+    # `fiber_vector` anchors the highest weight in the system; nobody chose that value.
+    "fiber_vector": _read_fiber_vector_weight(),
 }
 
 

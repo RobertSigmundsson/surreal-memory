@@ -5,6 +5,7 @@ from __future__ import annotations
 import pytest
 
 from surreal_memory.engine.score_fusion import (
+    DEFAULT_RETRIEVER_WEIGHTS,
     DEFAULT_RRF_K,
     RankedAnchor,
     rrf_fuse,
@@ -110,6 +111,26 @@ class TestRRFFuse:
     def test_empty_inner_list(self) -> None:
         scores = rrf_fuse([[]])
         assert scores == {}
+
+
+class TestFiberVectorWeight:
+    """``fiber_vector`` had no entry in ``DEFAULT_RETRIEVER_WEIGHTS`` — the ``weights.get(
+    anchor.retriever, 1.0)`` fallback in ``rrf_fuse`` silently gave it the highest weight in
+    the system (1.0, tied with ``embedding``), which nobody chose."""
+
+    def test_fiber_vector_is_registered_below_one(self) -> None:
+        assert "fiber_vector" in DEFAULT_RETRIEVER_WEIGHTS
+        assert DEFAULT_RETRIEVER_WEIGHTS["fiber_vector"] < 1.0
+
+    def test_keyword_rank_one_beats_fiber_vector_rank_sixteen(self) -> None:
+        """Before the fix: a rank-16 fiber_vector anchor (weight 1.0 fallback) scored
+        1.0 / 76 = 0.01316, higher than a rank-1 keyword anchor (weight 0.7) at
+        0.7 / 61 = 0.01148 — the single best keyword match lost to the sixteenth-best
+        fiber match. The fix must reverse that ordering."""
+        keyword_list = [RankedAnchor(neuron_id="kw", rank=1, retriever="keyword")]
+        fiber_list = [RankedAnchor(neuron_id="fib", rank=16, retriever="fiber_vector")]
+        scores = rrf_fuse([keyword_list, fiber_list])
+        assert scores["kw"] > scores["fib"]
 
 
 class TestRRFToActivationLevels:

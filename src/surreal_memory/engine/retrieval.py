@@ -2047,8 +2047,25 @@ class ReflexPipeline:
                 fiber_hits = await self._storage.find_fibers_by_embedding(
                     embedding_outcome.query_vec, limit=self._config.fiber_vector_top_n
                 )
+                # Reuse `embedding_similarity_threshold` — the neuron-vector track applies
+                # this exact value in `_rank_knn_rows` (`similarity >= threshold`, above),
+                # and `_sim` here is `1 - vector::distance::knn()` (store.py), the same
+                # scale. A dedicated `fiber_vector_similarity_threshold` key is only
+                # justified if a measurement shows this threshold drops golden hits on the
+                # fiber track specifically — it does not exist yet, so don't add it here.
+                threshold = self._config.embedding_similarity_threshold
+                rejected = sum(1 for _f, sim in fiber_hits if sim < threshold)
+                if rejected:
+                    logger.debug(
+                        "Fiber vector anchors: %d/%d below similarity threshold %.2f, dropped",
+                        rejected,
+                        len(fiber_hits),
+                        threshold,
+                    )
                 fiber_anchor_ids = [
-                    f.anchor_neuron_id for f, _sim in fiber_hits if f.anchor_neuron_id
+                    f.anchor_neuron_id
+                    for f, sim in fiber_hits
+                    if f.anchor_neuron_id and sim >= threshold
                 ]
                 if fiber_anchor_ids:
                     anchor_sets.append(fiber_anchor_ids)
