@@ -242,6 +242,9 @@ def check_sufficiency(
     stab_neurons_removed: int,
     query_intent: str = "",
     prev_metrics: SufficiencyMetrics | None = None,
+    anchor_sim_top1: float | None = None,
+    min_neuron_count: int = 0,
+    min_anchor_sim: float | None = None,
 ) -> SufficiencyResult:
     """Evaluate whether retrieval has sufficient signal for reconstruction.
 
@@ -261,6 +264,25 @@ def check_sufficiency(
         prev_metrics: Optional metrics from a previous retrieval pass.
             When provided, the diminishing_returns gate fires if metrics
             have not changed meaningfully (future-proofing for multi-pass).
+        anchor_sim_top1: Cosine similarity of the best embedding anchor for
+            this query (``EmbeddingAnchorOutcome.top_similarity`` in
+            ``engine/retrieval.py``), or ``None`` when the embedding
+            retriever produced no anchor above its own similarity floor (or
+            never ran). Not computed here — the caller supplies it, because
+            it already exists as a byproduct of anchor selection. Optional
+            so every existing caller/test that does not pass it keeps
+            today's behaviour unchanged.
+        min_neuron_count: weak_landscape_floor gate (smem-recall-brama-
+            odmowy, DIAGNOZA.md §7): refuse when
+            ``metrics.neuron_count < min_neuron_count``. ``0`` (default)
+            never fires, since neuron_count is never negative — this is the
+            "gate off" value, matching ``BrainConfig.
+            sufficiency_min_neuron_count``.
+        min_anchor_sim: weak_landscape_floor gate, second condition: refuse
+            when ``anchor_sim_top1 is not None`` and it is below this floor.
+            ``None`` (default) leaves the condition inactive — matching
+            ``BrainConfig.sufficiency_min_anchor_sim``. The two conditions
+            are combined with OR (DIAGNOZA.md §3/§6, KRYTERIUM OS3).
 
     Returns:
         SufficiencyResult with gate decision, confidence, and metrics.
@@ -327,6 +349,38 @@ def check_sufficiency(
                 f"Diffuse activation: entropy={m.activation_entropy:.1f} bits, "
                 f"focus={m.focus_ratio:.2f}, no standout neuron"
             ),
+            metrics=m,
+        )
+
+    # Gate: weak_landscape_floor (smem-recall-brama-odmowy, "tania brama",
+    # DIAGNOZA.md §5/§6/§7). Positioned after gate 4 (ambiguous_spread) and
+    # before every accepting gate (4.5-8), per KRYTERIUM OS3: two cheap,
+    # pre-reranker signals, combined with OR — `min_neuron_count` (default
+    # 0 = off) and `min_anchor_sim` (default None = off). Both floors
+    # default to values that cannot fire, so an old brain / a brain whose
+    # operator never measured its own floor sees identical gates 1-4 and
+    # falls through exactly as it did before this gate existed.
+    if m.neuron_count < min_neuron_count or (
+        min_anchor_sim is not None
+        and anchor_sim_top1 is not None
+        and anchor_sim_top1 < min_anchor_sim
+    ):
+        _floor_reasons = []
+        if m.neuron_count < min_neuron_count:
+            _floor_reasons.append(f"neuron_count {m.neuron_count} < floor {min_neuron_count}")
+        if (
+            min_anchor_sim is not None
+            and anchor_sim_top1 is not None
+            and anchor_sim_top1 < min_anchor_sim
+        ):
+            _floor_reasons.append(
+                f"anchor_sim_top1 {anchor_sim_top1:.6f} < floor {min_anchor_sim:.6f}"
+            )
+        return SufficiencyResult(
+            sufficient=False,
+            confidence=min(conf, 0.1),
+            gate="weak_landscape_floor",
+            reason="Weak landscape: " + "; ".join(_floor_reasons),
             metrics=m,
         )
 

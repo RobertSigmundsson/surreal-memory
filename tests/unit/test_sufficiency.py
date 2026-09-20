@@ -228,6 +228,76 @@ class TestDefaultPass:
         assert result.gate == "default_pass"
 
 
+class TestWeakLandscapeFloor:
+    """smem-recall-brama-odmowy "tania brama" (DIAGNOZA.md §5/§6/§7): a cheap,
+    pre-reranker refusal gate positioned after gate 4 (ambiguous_spread) and before
+    every accepting gate. `min_neuron_count`/`min_anchor_sim` default to values that
+    cannot fire (0 / None) — every scenario here uses the same 10-neuron moderate-
+    activation landscape as TestDefaultPass (falls through gates 1-4 untouched) so
+    that only the new gate's own condition is under test.
+    """
+
+    def _landscape(self, n: int) -> dict[str, object]:
+        return _make_activations([(f"n-{i}", 0.3 + 0.02 * i, 2, "a-0") for i in range(n)])
+
+    def test_neuron_count_below_floor_refuses(self) -> None:
+        result = check_sufficiency(
+            activations=self._landscape(10),
+            anchor_sets=[["a-0"]],
+            intersections=[],
+            stab_converged=True,
+            stab_neurons_removed=0,
+            min_neuron_count=15,
+        )
+        assert result.sufficient is False
+        assert result.gate == "weak_landscape_floor"
+        assert "neuron_count 10 < floor 15" in result.reason
+
+    def test_neuron_count_at_and_above_floor_does_not_refuse(self) -> None:
+        # boundary control in both directions: exactly at the floor (`<`, not `<=`,
+        # so equal must NOT refuse) and comfortably above it.
+        for n in (15, 20):
+            result = check_sufficiency(
+                activations=self._landscape(n),
+                anchor_sets=[["a-0"]],
+                intersections=[],
+                stab_converged=True,
+                stab_neurons_removed=0,
+                min_neuron_count=15,
+            )
+            assert result.gate != "weak_landscape_floor", f"n={n} wrongly refused"
+
+    def test_anchor_sim_below_floor_refuses(self) -> None:
+        result = check_sufficiency(
+            activations=self._landscape(10),
+            anchor_sets=[["a-0"]],
+            intersections=[],
+            stab_converged=True,
+            stab_neurons_removed=0,
+            anchor_sim_top1=0.4,
+            min_anchor_sim=0.524835,
+        )
+        assert result.sufficient is False
+        assert result.gate == "weak_landscape_floor"
+        assert "anchor_sim_top1 0.400000 < floor 0.524835" in result.reason
+
+    def test_anchor_sim_none_leaves_condition_inactive(self) -> None:
+        """The embedding retriever produced no anchor this query (or never ran) —
+        `anchor_sim_top1=None` must not be treated as a similarity of 0."""
+        result = check_sufficiency(
+            activations=self._landscape(10),
+            anchor_sets=[["a-0"]],
+            intersections=[],
+            stab_converged=True,
+            stab_neurons_removed=0,
+            anchor_sim_top1=None,
+            min_anchor_sim=0.524835,
+        )
+        assert result.gate != "weak_landscape_floor"
+        assert result.sufficient is True
+        assert result.gate == "default_pass"
+
+
 # ---------------------------------------------------------------------------
 # Math helpers
 # ---------------------------------------------------------------------------
