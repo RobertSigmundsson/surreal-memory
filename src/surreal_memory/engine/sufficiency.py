@@ -264,14 +264,22 @@ def check_sufficiency(
         prev_metrics: Optional metrics from a previous retrieval pass.
             When provided, the diminishing_returns gate fires if metrics
             have not changed meaningfully (future-proofing for multi-pass).
-        anchor_sim_top1: Cosine similarity of the best embedding anchor for
-            this query (``EmbeddingAnchorOutcome.top_similarity`` in
-            ``engine/retrieval.py``), or ``None`` when the embedding
-            retriever produced no anchor above its own similarity floor (or
-            never ran). Not computed here — the caller supplies it, because
-            it already exists as a byproduct of anchor selection. Optional
-            so every existing caller/test that does not pass it keeps
-            today's behaviour unchanged.
+        anchor_sim_top1: Cosine similarity of the CLOSEST embedding
+            neighbour for this query, BEFORE ``embedding_similarity_
+            threshold`` is applied (``EmbeddingAnchorOutcome.top_similarity``
+            in ``engine/retrieval.py``) — deliberately not the similarity of
+            the best-ranked ANCHOR. ``embedding_similarity_threshold``
+            governs anchor SELECTION; this floor asks a different question
+            (how close the nearest neighbour is at all), and gating it on
+            the same threshold would make it unable to ever fire — measured
+            on DIAGNOZA.md's negative set, every row this floor is meant to
+            refuse has its closest neighbour below that threshold (U3-
+            REVISIT). ``None`` only when the embedding retriever had no row
+            to measure at all (never ran, or every KNN row was a
+            tombstone). Not computed here — the caller supplies it, because
+            it already exists as a byproduct of the KNN scan. Optional so
+            every existing caller/test that does not pass it keeps today's
+            behaviour unchanged.
         min_neuron_count: weak_landscape_floor gate (smem-recall-brama-
             odmowy, DIAGNOZA.md §7): refuse when
             ``metrics.neuron_count < min_neuron_count``. ``0`` (default)

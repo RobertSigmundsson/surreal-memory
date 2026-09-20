@@ -75,15 +75,23 @@ class EmbeddingAnchorOutcome:
     ``repr`` (a thousand-odd floats) and is never copied into
     ``RetrievalResult.metadata``, which selects its fields one by one.
 
-    ``top_similarity`` is the cosine similarity of the best-ranked embedding
-    anchor (``knn`` path only — the single caller of ``storage.
-    find_neurons_by_embedding``, verified with Serena for smem-recall-brama-
-    odmowy). It is already computed by ``_rank_knn_rows`` to sort/filter
-    anchors and was simply discarded at the return boundary (same shape of
-    problem as the reranker's raw score, KONTEKST fact 5) — this field
-    surfaces it, it does not recompute it. ``None`` on the scan/disabled/
-    error paths, which the weak-landscape-floor gate (``sufficiency_min_
-    anchor_sim``) treats as "condition inactive for this query", never as 0.
+    ``top_similarity`` is the cosine similarity of the CLOSEST neighbour the
+    vector index returned (``knn`` path only — the single caller of
+    ``storage.find_neurons_by_embedding``, verified with Serena for
+    smem-recall-brama-odmowy), BEFORE ``embedding_similarity_threshold`` is
+    applied — deliberately not the similarity of the best-ranked ANCHOR
+    (U3-REVISIT: those are two different questions. ``embedding_similarity_
+    threshold`` decides which rows become anchors; the weak-landscape-floor
+    gate's ``sufficiency_min_anchor_sim`` asks how close the nearest
+    neighbour is AT ALL, and measured on DIAGNOZA.md's negative set every
+    row the gate refuses has its closest neighbour below that threshold —
+    gating on the threshold-filtered value made the gate unable to ever
+    fire). It is a byproduct of the max already tracked by ``_rank_knn_rows``
+    over the SAME rows it scores/sorts, not a second pass — this field
+    surfaces it, it does not recompute it. ``None`` only when there was no
+    row to measure (scan/disabled/error paths, or every KNN row was a
+    tombstone), which the weak-landscape-floor gate treats as "condition
+    inactive for this query", never as a similarity of 0.
     """
 
     anchor_ids: list[str]
@@ -1824,26 +1832,40 @@ class ReflexPipeline:
         self, rows: list[tuple[Neuron, float]], top_k: int
     ) -> tuple[list[str], int, int, float | None]:
         """(anchor ids, how many passed the threshold, how many tombstones were
-        dropped, similarity of the best-ranked anchor).
+        dropped, similarity of the closest neighbour overall).
 
-        The fourth element is a byproduct of the sort already done here for
-        anchor selection, not a second pass — surfaced for the weak-landscape-
-        floor gate (``sufficiency_min_anchor_sim``), ``None`` when nothing
-        passed the threshold.
+        The fourth element (U3-REVISIT, smem-recall-brama-odmowy) is the
+        maximum similarity across every non-tombstone row the backend
+        returned, BEFORE ``embedding_similarity_threshold`` is applied —
+        deliberately NOT the max of ``scored`` (anchor selection, which IS
+        threshold-filtered, below). ``embedding_similarity_threshold``
+        governs which rows become ANCHORS; the weak-landscape-floor gate
+        (``sufficiency_min_anchor_sim``) asks a different question — how
+        close the nearest neighbour is AT ALL — and gating that question on
+        the same threshold makes it unable to ever fire: measured on
+        DIAGNOZA.md's 54-row negative set, every row the gate is meant to
+        refuse (36/36) has its closest neighbour BELOW
+        ``embedding_similarity_threshold`` (0.52), so a threshold-filtered
+        ``top_similarity`` would be ``None`` — "condition inactive" — for
+        every one of them. ``None`` here means only "no row to measure" (no
+        KNN rows at all, or every row was a tombstone), never "nothing
+        passed the anchor threshold".
         """
         threshold = self._config.embedding_similarity_threshold
         tombstones = 0
         scored: list[tuple[str, float]] = []
+        top_similarity: float | None = None
         for neuron, similarity in rows:
             if neuron.content == GRAPH_ONLY_PLACEHOLDER:
                 tombstones += 1
                 continue
+            if top_similarity is None or similarity > top_similarity:
+                top_similarity = similarity
             if similarity >= threshold:
                 scored.append((neuron.id, similarity))
         # The backend returns nearest-first, but sort explicitly so the contract
         # holds for any backend implementing the method.
         scored.sort(key=lambda pair: pair[1], reverse=True)
-        top_similarity = scored[0][1] if scored else None
         return [nid for nid, _ in scored[:top_k]], len(scored), tombstones, top_similarity
 
     async def _embedding_anchors_via_scan(

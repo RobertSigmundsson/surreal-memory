@@ -147,17 +147,27 @@ class TestSimilarityThreshold:
 
 
 class TestTopSimilarity:
-    """``outcome.top_similarity`` (smem-recall-brama-odmowy): the similarity of the
-    best-ranked embedding anchor, surfaced from ``_rank_knn_rows``'s own sort — not
-    recomputed — for `sufficiency_min_anchor_sim` (the "tania brama" gate in
-    ``engine/sufficiency.py``)."""
+    """``outcome.top_similarity`` (smem-recall-brama-odmowy, U3-REVISIT): the
+    similarity of the CLOSEST neighbour the vector index returned, BEFORE
+    ``embedding_similarity_threshold`` is applied — surfaced from the max
+    ``_rank_knn_rows`` already tracks over the SAME rows it scores/sorts, not
+    recomputed. Deliberately NOT the similarity of the best-ranked ANCHOR:
+    `embedding_similarity_threshold` governs anchor SELECTION, while
+    `sufficiency_min_anchor_sim` (the "tania brama" gate in
+    ``engine/sufficiency.py``) asks a different question — how close the
+    nearest neighbour is at all. The first version of this gate tied
+    ``top_similarity`` to the threshold-filtered ``scored`` list, which made
+    it unable to ever fire: measured on DIAGNOZA.md's 54-row negative set,
+    every one of the 36 rows the gate is meant to refuse has its closest
+    neighbour BELOW `embedding_similarity_threshold`, so a threshold-filtered
+    value would have been `None` ("inactive") for all 36."""
 
-    async def test_is_the_similarity_of_the_top_ranked_anchor_not_the_first_row(
+    async def test_is_the_max_similarity_across_all_rows_not_the_first_row(
         self, mock_storage: AsyncMock, mock_provider: AsyncMock
     ) -> None:
         low, mid, high = _neuron("low"), _neuron("mid"), _neuron("high")
         # Same "out of order" backend response as the sorting test above — proves
-        # top_similarity tracks the SORTED top-1, not the first row returned.
+        # top_similarity tracks the true max, not the first row returned.
         mock_storage.find_neurons_by_embedding = AsyncMock(
             return_value=[(low, 0.75), (high, 0.95), (mid, 0.85)]
         )
@@ -167,14 +177,47 @@ class TestTopSimilarity:
 
         assert outcome.top_similarity == pytest.approx(0.95)
 
-    async def test_is_none_when_nothing_clears_the_similarity_threshold(
+    async def test_is_reported_even_when_it_never_clears_the_similarity_threshold(
         self, mock_storage: AsyncMock, mock_provider: AsyncMock
     ) -> None:
-        """`None` — not 0.0 — so a caller (`sufficiency_min_anchor_sim`) treats "no
-        anchor found" as "condition inactive", not as a similarity of zero."""
+        """The regression this program shipped and then reverted: a row below
+        `embedding_similarity_threshold` must still be reflected in
+        `top_similarity` (it is correctly EXCLUDED from `anchor_ids` — anchor
+        selection is unchanged) rather than collapsing to `None`."""
         below = _neuron("below")
         mock_storage.find_neurons_by_embedding = AsyncMock(return_value=[(below, 0.1)])
         pipeline = _make_pipeline(mock_storage, mock_provider, mode="knn", threshold=0.7)
+
+        outcome = await pipeline._find_embedding_anchors_outcome("query", top_k=10)
+
+        # Anchor selection is untouched: still threshold-filtered.
+        assert outcome.anchor_ids == []
+        assert outcome.above_threshold == 0
+        # But top_similarity reports the row's own value, not None.
+        assert outcome.top_similarity == pytest.approx(0.1)
+
+    async def test_is_none_when_there_are_no_rows_to_measure(
+        self, mock_storage: AsyncMock, mock_provider: AsyncMock
+    ) -> None:
+        """`None` means "nothing came back from the index", not "nothing passed
+        the anchor threshold" — an empty KNN result is the only case left."""
+        mock_storage.find_neurons_by_embedding = AsyncMock(return_value=[])
+        pipeline = _make_pipeline(mock_storage, mock_provider, mode="knn")
+
+        outcome = await pipeline._find_embedding_anchors_outcome("query", top_k=10)
+
+        assert outcome.top_similarity is None
+
+    async def test_is_none_when_every_row_is_a_tombstone(
+        self, mock_storage: AsyncMock, mock_provider: AsyncMock
+    ) -> None:
+        """Tombstones are excluded from the max the same way they are excluded
+        from anchor selection — a tombstone-only response is "no row to
+        measure", not a similarity of whatever stand-in value the tombstone
+        row carried."""
+        tombstone = _neuron("t1", content=GRAPH_ONLY_PLACEHOLDER)
+        mock_storage.find_neurons_by_embedding = AsyncMock(return_value=[(tombstone, 0.99)])
+        pipeline = _make_pipeline(mock_storage, mock_provider, mode="knn")
 
         outcome = await pipeline._find_embedding_anchors_outcome("query", top_k=10)
 

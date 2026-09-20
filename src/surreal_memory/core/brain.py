@@ -270,16 +270,24 @@ class BrainConfig:
     # negative, so `neuron_count < 0` can never fire) — an old brain keeps
     # today's behaviour.
     sufficiency_min_neuron_count: int = 0
-    # Retrieval: cheap pre-reranker refusal floor on the best embedding
-    # anchor's similarity (weak_landscape_floor gate, same measurement).
-    # `anchor_sim_top1 < 0.524835` alone refuses 18/27 out-of-base phrases
-    # at 0/98 golden refusals (AUC 0.9403); combined with
-    # `sufficiency_min_neuron_count` via OR it reaches 21/27 — KRYTERIUM
-    # OS3, the best ≤2-signal combination measured (DIAGNOZA.md §3/§6).
-    # `None` = gate inactive (an old brain, or a query where the embedding
-    # retriever produced no anchor above `embedding_similarity_threshold`,
-    # sees today's behaviour — the condition is skipped, not treated as a
-    # similarity of 0).
+    # Retrieval: cheap pre-reranker refusal floor on the CLOSEST embedding
+    # neighbour's similarity, BEFORE `embedding_similarity_threshold` is
+    # applied (weak_landscape_floor gate, same measurement) — deliberately
+    # not the similarity of the best-ranked ANCHOR. `embedding_similarity_
+    # threshold` governs anchor SELECTION; this floor asks a different
+    # question (how close the nearest neighbour is at all), and gating it
+    # on the same threshold made it unable to ever fire (U3-REVISIT):
+    # measured on DIAGNOZA.md's 54-row negative set, every one of the 36
+    # rows this floor is meant to refuse has its closest neighbour below
+    # `embedding_similarity_threshold` (0.52) — a threshold-filtered value
+    # would be `None` ("inactive") for all 36. `anchor_sim_top1 <
+    # 0.524835` alone refuses 18/27 out-of-base phrases at 0/98 golden
+    # refusals (AUC 0.9403); combined with `sufficiency_min_neuron_count`
+    # via OR it reaches 21/27 — KRYTERIUM OS3, the best ≤2-signal
+    # combination measured (DIAGNOZA.md §3/§6). `None` = gate inactive (an
+    # old brain, or a query where the embedding retriever had no row to
+    # measure at all — never ran, or every KNN row was a tombstone; the
+    # condition is skipped, not treated as a similarity of 0).
     sufficiency_min_anchor_sim: float | None = None
 
     def with_updates(self, **kwargs: Any) -> BrainConfig:
