@@ -641,6 +641,17 @@ class ReflexPipeline:
             nonlocal _rerank_degraded
             _rerank_degraded = reason
 
+        # M4 refusal gate (smem-recall-brama-odmowy, BrainConfig.
+        # reranker_refusal_floor): the reranker's raw top-1 score, captured
+        # via the same callback pattern as `_mark_rerank_degraded` — see
+        # `rerank_activations(on_raw_top1=...)`. `None` until/unless the
+        # reranker actually runs for this query.
+        _rerank_raw_top1: float | None = None
+
+        def _capture_rerank_raw_top1(raw_score: float) -> None:
+            nonlocal _rerank_raw_top1
+            _rerank_raw_top1 = raw_score
+
         _rr = _get_app_config().reranker
         if _rr.enabled and len(activations) > 1:
             try:
@@ -679,6 +690,7 @@ class ReflexPipeline:
                             limit=50,
                             endpoint=_rr.endpoint,
                             on_degraded=_mark_rerank_degraded,
+                            on_raw_top1=_capture_rerank_raw_top1,
                         )
                         logger.debug(
                             "Reranked %d → %d activations",
@@ -698,6 +710,62 @@ class ReflexPipeline:
             except Exception as exc:  # reported in result metadata
                 logger.warning("Reranking failed (non-critical): %s", exc, exc_info=True)
                 _mark_rerank_degraded(f"{type(exc).__name__}: {exc}")
+
+        # 4.9b M4 refusal gate (BrainConfig.reranker_refusal_floor, smem-recall-
+        # brama-odmowy, DIAGNOZA.md §7/§8): the reranker's raw cross-encoder
+        # score for the top-1 candidate is the only signal in this pipeline
+        # that reads the (query, content) pair itself. At the measured
+        # log-margin threshold 0.002146 it refuses 17/27 out-of-base phrases
+        # at ZERO refusals on the 49-pair golden (98 rows incl. pudła), AUC
+        # 0.9728 (best of ten signals measured). `None` (default) = gate
+        # inactive, identical to today's behaviour. When the reranker
+        # degraded for this query, the raw score is not trustworthy signal
+        # about the CONTENT (it may not have run at all) — skip the refusal
+        # and say so, cisza nie jest sukcesem.
+        _reranker_floor = self._config.reranker_refusal_floor
+        _reranker_floor_skipped: str | None = None
+        if _reranker_floor is not None and _rerank_degraded is not None:
+            _reranker_floor_skipped = _rerank_degraded
+        elif (
+            _reranker_floor is not None
+            and _rerank_raw_top1 is not None
+            and _rerank_raw_top1 < _reranker_floor
+        ):
+            _early_latency = (time.perf_counter() - start_time) * 1000
+            _early_result = RetrievalResult(
+                answer=None,
+                confidence=_rerank_raw_top1,
+                depth_used=depth,
+                neurons_activated=len(activations),
+                fibers_matched=[],
+                subgraph=Subgraph(
+                    neuron_ids=list(activations.keys()),
+                    synapse_ids=[],
+                    anchor_ids=[a for anchors in anchor_sets for a in anchors],
+                ),
+                context="",
+                latency_ms=_early_latency,
+                co_activations=co_activations,
+                synthesis_method="insufficient_signal",
+                metadata={
+                    "query_intent": stimulus.intent.value,
+                    "anchors_found": sum(len(a) for a in anchor_sets),
+                    "sufficiency_gate": "reranker_floor",
+                    "sufficiency_reason": (
+                        f"Cross-encoder raw top-1 {_rerank_raw_top1:.6f} below "
+                        f"reranker_refusal_floor {_reranker_floor:.6f}"
+                    ),
+                    "sufficiency_confidence": _rerank_raw_top1,
+                    **_embedding_anchor_meta,
+                },
+            )
+            # Flush any pending writes even on early exit, same as the 4.8 gate.
+            if self._write_queue.pending_count > 0:
+                try:
+                    await self._write_queue.flush(self._storage)
+                except Exception:
+                    logger.debug("Deferred write flush failed (non-critical)", exc_info=True)
+            return _early_result
 
         # 5. Find matching fibers
         query_tokens = set(query.lower().split())
@@ -804,6 +872,13 @@ class ReflexPipeline:
                 },
             },
         )
+
+        # M4 (reranker_refusal_floor): the floor was configured but this query's
+        # reranking degraded, so the raw top-1 score cannot be trusted as a
+        # refusal signal — cisza nie jest sukcesem, the skip is named rather
+        # than silently doing nothing.
+        if _reranker_floor_skipped is not None:
+            result.metadata["reranker_floor_skipped"] = _reranker_floor_skipped
 
         # U2: surface trust/recency calibration when active (no-op at neutral defaults).
         _tw = max(0.0, min(1.0, self._config.trust_weight))

@@ -257,6 +257,59 @@ class TestRerankActivations:
         result = rerank_activations("test", activations, {})
         assert result is activations
 
+    @_needs_numpy
+    @patch("surreal_memory.engine.reranker._check_cross_encoder", return_value=True)
+    def test_on_raw_top1_gets_the_unnormalized_score_of_the_blended_winner(
+        self, mock_check: MagicMock
+    ) -> None:
+        """smem-recall-brama-odmowy M4: the raw cross-encoder score of whichever
+        candidate ranks FIRST by blended_score (not by raw score, not insertion
+        order) — this is what `engine/retrieval.py`'s reranker_refusal_floor gate
+        reads. n2's raw score (2.0) min-maxes to 1.0 and out-blends n1's higher SA
+        activation (0.8 vs 0.5), so n2 wins the blend despite n1 having the higher
+        starting activation."""
+        activations = {
+            "n1": FakeActivationResult(neuron_id="n1", activation_level=0.8),
+            "n2": FakeActivationResult(neuron_id="n2", activation_level=0.5),
+        }
+        contents = {"n1": "topic one", "n2": "topic two"}
+        captured: list[float] = []
+
+        mock_model = MagicMock()
+        mock_model.predict.return_value = np.array([1.0, 2.0])
+
+        with patch(
+            "surreal_memory.engine.reranker.CrossEncoderReranker._ensure_model",
+            return_value=mock_model,
+        ):
+            rerank_activations("test query", activations, contents, on_raw_top1=captured.append)
+
+        assert captured == [pytest.approx(2.0)]
+
+    @patch("surreal_memory.engine.reranker._check_cross_encoder", return_value=False)
+    @patch("surreal_memory.engine.reranker._rerank_endpoint", return_value="")
+    def test_on_raw_top1_not_called_when_reranker_unavailable(
+        self, mock_endpoint: MagicMock, mock_cross_encoder: MagicMock
+    ) -> None:
+        """Degradation fires `on_degraded`, never `on_raw_top1` — a caller must not
+        read a "raw score" that was never computed."""
+        activations = {
+            "n1": FakeActivationResult(neuron_id="n1", activation_level=0.8),
+        }
+        degraded: list[str] = []
+        raw_top1_calls: list[float] = []
+
+        rerank_activations(
+            "test",
+            activations,
+            {"n1": "content1"},
+            on_degraded=degraded.append,
+            on_raw_top1=raw_top1_calls.append,
+        )
+
+        assert degraded  # on_degraded fired
+        assert raw_top1_calls == []  # on_raw_top1 did not
+
 
 # ---------------------------------------------------------------------------
 # Config integration

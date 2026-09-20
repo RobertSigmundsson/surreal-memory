@@ -332,6 +332,7 @@ def rerank_activations(
     limit: int = 50,
     endpoint: str | None = None,
     on_degraded: Callable[[str], None] | None = None,
+    on_raw_top1: Callable[[float], None] | None = None,
 ) -> dict[str, ActivationResult]:
     """Convenience function: rerank activations and return updated dict.
 
@@ -342,6 +343,17 @@ def rerank_activations(
     server (e.g. llamastash). When ``None``/empty, falls back to the
     ``SURREAL_MEMORY_RERANKER_ENDPOINT`` env var, then to an in-process
     sentence-transformers CrossEncoder.
+
+    ``on_raw_top1``, when given, is called once with the *unnormalised*
+    ``RerankedResult.rerank_score`` of the candidate ranked first by
+    ``blended_score`` — the only value in this pipeline that reads the
+    (query, content) pair itself rather than the shape of the activation
+    landscape (measured AUC 0.9728 on golden-vs-out-of-base, smem-recall-
+    brama-odmowy DIAGNOZA.md §2/§7). It is a callback in the style of
+    ``on_degraded`` rather than a return-shape change: ``blended_score`` /
+    the candidate ordering / the filtering below are untouched bit-for-bit.
+    Not called when reranking degrades (``on_degraded`` fires instead) or
+    when there are no candidates to score.
     """
     resolved_endpoint = (endpoint or "").strip() or _rerank_endpoint()
     if not resolved_endpoint and not _check_cross_encoder():
@@ -400,6 +412,13 @@ def rerank_activations(
         if on_degraded is not None:
             on_degraded(_degradation_reason(last_error))
         return activations
+
+    if on_raw_top1 is not None and reranked:
+        # ``reranked`` is sorted by blended_score descending (both
+        # HttpReranker.rerank and CrossEncoderReranker.rerank do this before
+        # returning) — index 0 is the query's top-1 candidate, unchanged by
+        # this callback.
+        on_raw_top1(reranked[0].rerank_score)
 
     # Build new activations dict with blended scores
     from dataclasses import replace as dc_replace
