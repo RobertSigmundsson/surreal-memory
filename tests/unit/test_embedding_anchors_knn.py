@@ -146,6 +146,42 @@ class TestSimilarityThreshold:
         assert outcome.above_threshold == 1
 
 
+class TestTopSimilarity:
+    """``outcome.top_similarity`` (smem-recall-brama-odmowy): the similarity of the
+    best-ranked embedding anchor, surfaced from ``_rank_knn_rows``'s own sort — not
+    recomputed — for `sufficiency_min_anchor_sim` (the "tania brama" gate in
+    ``engine/sufficiency.py``)."""
+
+    async def test_is_the_similarity_of_the_top_ranked_anchor_not_the_first_row(
+        self, mock_storage: AsyncMock, mock_provider: AsyncMock
+    ) -> None:
+        low, mid, high = _neuron("low"), _neuron("mid"), _neuron("high")
+        # Same "out of order" backend response as the sorting test above — proves
+        # top_similarity tracks the SORTED top-1, not the first row returned.
+        mock_storage.find_neurons_by_embedding = AsyncMock(
+            return_value=[(low, 0.75), (high, 0.95), (mid, 0.85)]
+        )
+        pipeline = _make_pipeline(mock_storage, mock_provider, mode="knn")
+
+        outcome = await pipeline._find_embedding_anchors_outcome("query", top_k=10)
+
+        assert outcome.top_similarity == pytest.approx(0.95)
+
+    async def test_is_none_when_nothing_clears_the_similarity_threshold(
+        self, mock_storage: AsyncMock, mock_provider: AsyncMock
+    ) -> None:
+        """`None` — not 0.0 — so a caller (`sufficiency_min_anchor_sim`) treats "no
+        anchor found" as "condition inactive", not as a similarity of zero."""
+        below = _neuron("below")
+        mock_storage.find_neurons_by_embedding = AsyncMock(return_value=[(below, 0.1)])
+        pipeline = _make_pipeline(mock_storage, mock_provider, mode="knn", threshold=0.7)
+
+        outcome = await pipeline._find_embedding_anchors_outcome("query", top_k=10)
+
+        assert outcome.anchor_ids == []
+        assert outcome.top_similarity is None
+
+
 class TestTombstoneFiltering:
     """``GRAPH_ONLY_PLACEHOLDER`` rows must never occupy an anchor slot."""
 

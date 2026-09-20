@@ -300,6 +300,52 @@ class TestBrainConfigPersistence:
         restored = _deserialize_brain_config(stored)
         assert restored.reranker_enabled is True
 
+    def test_old_brain_without_refusal_gate_keys_gets_disabled_defaults(self) -> None:
+        """smem-recall-brama-odmowy: a brain stored BEFORE `reranker_refusal_floor` /
+        `sufficiency_min_neuron_count` / `sufficiency_min_anchor_sim` existed must
+        deserialise to the disabled defaults, not raise and not silently activate a
+        threshold nobody configured (`_deserialize_brain_config` filters unknown/
+        missing keys to `BrainConfig(**filtered)` — the exact mechanism named in
+        RUNBOOK U3)."""
+        legacy = _serialize_brain_config(BrainConfig(reranker_enabled=True))
+        for key in (
+            "reranker_refusal_floor",
+            "sufficiency_min_neuron_count",
+            "sufficiency_min_anchor_sim",
+        ):
+            legacy.pop(key, None)
+
+        restored = _deserialize_brain_config(legacy)
+
+        assert restored.reranker_refusal_floor is None
+        assert restored.sufficiency_min_neuron_count == 0
+        assert restored.sufficiency_min_anchor_sim is None
+        # And the defaults really are "off": check_sufficiency never fires
+        # weak_landscape_floor on them even for a landscape that WOULD trip a
+        # configured floor (neuron_count=2, well below any measured floor; a
+        # similarity of 0.01, well below any measured floor).
+        from dataclasses import dataclass
+
+        from surreal_memory.engine.sufficiency import check_sufficiency
+
+        @dataclass
+        class _FakeActivation:
+            activation_level: float
+            hop_distance: int = 1
+            source_anchor: str = "a-0"
+
+        result = check_sufficiency(
+            activations={f"n-{i}": _FakeActivation(0.6) for i in range(2)},
+            anchor_sets=[["a-0"]],
+            intersections=[],
+            stab_converged=True,
+            stab_neurons_removed=0,
+            anchor_sim_top1=0.01,
+            min_neuron_count=restored.sufficiency_min_neuron_count,
+            min_anchor_sim=restored.sufficiency_min_anchor_sim,
+        )
+        assert result.gate != "weak_landscape_floor"
+
 
 class TestRerankActivationsSelection:
     """The endpoint path must fire even without an in-process CrossEncoder."""

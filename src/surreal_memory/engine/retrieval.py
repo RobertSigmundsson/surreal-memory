@@ -74,6 +74,16 @@ class EmbeddingAnchorOutcome:
     paying for an identical round-trip to the embedder. It is kept out of
     ``repr`` (a thousand-odd floats) and is never copied into
     ``RetrievalResult.metadata``, which selects its fields one by one.
+
+    ``top_similarity`` is the cosine similarity of the best-ranked embedding
+    anchor (``knn`` path only — the single caller of ``storage.
+    find_neurons_by_embedding``, verified with Serena for smem-recall-brama-
+    odmowy). It is already computed by ``_rank_knn_rows`` to sort/filter
+    anchors and was simply discarded at the return boundary (same shape of
+    problem as the reranker's raw score, KONTEKST fact 5) — this field
+    surfaces it, it does not recompute it. ``None`` on the scan/disabled/
+    error paths, which the weak-landscape-floor gate (``sufficiency_min_
+    anchor_sim``) treats as "condition inactive for this query", never as 0.
     """
 
     anchor_ids: list[str]
@@ -83,6 +93,7 @@ class EmbeddingAnchorOutcome:
     above_threshold: int = 0
     elapsed_ms: float = 0.0
     query_vec: list[float] | None = dataclasses.field(default=None, repr=False)
+    top_similarity: float | None = None
 
 
 def _is_knn_result(rows: object) -> bool:
@@ -582,6 +593,13 @@ class ReflexPipeline:
             stab_converged=_stab_report.converged,
             stab_neurons_removed=_stab_report.neurons_removed,
             query_intent=stimulus.intent.value,
+            # weak_landscape_floor (smem-recall-brama-odmowy): anchor_sim_top1
+            # is a byproduct of embedding-anchor selection above (step 3),
+            # not recomputed here. Both floors default to "gate off" in
+            # BrainConfig, so an old brain sees identical behaviour.
+            anchor_sim_top1=embedding_outcome.top_similarity,
+            min_neuron_count=self._config.sufficiency_min_neuron_count,
+            min_anchor_sim=self._config.sufficiency_min_anchor_sim,
         )
 
         if not _sufficiency.sufficient:
@@ -1681,6 +1699,7 @@ class ReflexPipeline:
             knn_rows: int = 0,
             tombstones: int = 0,
             above_threshold: int = 0,
+            top_similarity: float | None = None,
         ) -> EmbeddingAnchorOutcome:
             return EmbeddingAnchorOutcome(
                 anchor_ids=anchor_ids,
@@ -1690,6 +1709,7 @@ class ReflexPipeline:
                 above_threshold=above_threshold,
                 elapsed_ms=(time.perf_counter() - started) * 1000,
                 query_vec=query_vec,
+                top_similarity=top_similarity,
             )
 
         if self._embedding_provider is None:
@@ -1711,13 +1731,14 @@ class ReflexPipeline:
         if mode != "scan":
             knn_result, reason = await self._embedding_anchors_via_knn(query_vec, top_k)
             if knn_result is not None:
-                anchor_ids, above, tombstones, rows_seen = knn_result
+                anchor_ids, above, tombstones, rows_seen, top_similarity = knn_result
                 return _finish(
                     anchor_ids,
                     "knn",
                     knn_rows=rows_seen,
                     tombstones=tombstones,
                     above_threshold=above,
+                    top_similarity=top_similarity,
                 )
             if mode == "knn":
                 # Strict mode never silently reads the wrong slice of the brain.
@@ -1730,13 +1751,14 @@ class ReflexPipeline:
 
     async def _embedding_anchors_via_knn(
         self, query_vec: list[float], top_k: int
-    ) -> tuple[tuple[list[str], int, int, int] | None, str]:
+    ) -> tuple[tuple[list[str], int, int, int, float | None] | None, str]:
         """Anchor neurons from the backend's vector index.
 
-        Returns ``((anchor_ids, above_threshold, tombstones, rows_seen), "")`` on
-        success, or ``(None, reason)`` when the index could not be used. The
-        reason travels back as a value rather than on the instance: one pipeline
-        serves concurrent queries, so per-query state on ``self`` would race.
+        Returns ``((anchor_ids, above_threshold, tombstones, rows_seen,
+        top_similarity), "")`` on success, or ``(None, reason)`` when the
+        index could not be used. The reason travels back as a value rather
+        than on the instance: one pipeline serves concurrent queries, so
+        per-query state on ``self`` would race.
         """
         # Ask for more neighbours than needed: tombstones and the similarity
         # threshold both thin the list before top_k is taken.
@@ -1746,7 +1768,7 @@ class ReflexPipeline:
         if rows is None:
             return None, reason
 
-        anchor_ids, above, tombstones = self._rank_knn_rows(rows, top_k)
+        anchor_ids, above, tombstones, top_similarity = self._rank_knn_rows(rows, top_k)
         rows_seen = len(rows)
         if tombstones > 0 and len(anchor_ids) < top_k:
             # Tombstones share one placeholder vector brain-wide, so a query near
@@ -1755,10 +1777,10 @@ class ReflexPipeline:
             wider, wider_reason = await self._knn_rows(query_vec, limit * TOMBSTONE_RETRY_FACTOR)
             if wider is None:
                 return None, wider_reason
-            anchor_ids, above, tombstones = self._rank_knn_rows(wider, top_k)
+            anchor_ids, above, tombstones, top_similarity = self._rank_knn_rows(wider, top_k)
             rows_seen = len(wider)
 
-        return (anchor_ids, above, tombstones, rows_seen), ""
+        return (anchor_ids, above, tombstones, rows_seen, top_similarity), ""
 
     async def _knn_rows(
         self, query_vec: list[float], limit: int
@@ -1800,8 +1822,15 @@ class ReflexPipeline:
 
     def _rank_knn_rows(
         self, rows: list[tuple[Neuron, float]], top_k: int
-    ) -> tuple[list[str], int, int]:
-        """(anchor ids, how many passed the threshold, how many tombstones were dropped)."""
+    ) -> tuple[list[str], int, int, float | None]:
+        """(anchor ids, how many passed the threshold, how many tombstones were
+        dropped, similarity of the best-ranked anchor).
+
+        The fourth element is a byproduct of the sort already done here for
+        anchor selection, not a second pass — surfaced for the weak-landscape-
+        floor gate (``sufficiency_min_anchor_sim``), ``None`` when nothing
+        passed the threshold.
+        """
         threshold = self._config.embedding_similarity_threshold
         tombstones = 0
         scored: list[tuple[str, float]] = []
@@ -1814,7 +1843,8 @@ class ReflexPipeline:
         # The backend returns nearest-first, but sort explicitly so the contract
         # holds for any backend implementing the method.
         scored.sort(key=lambda pair: pair[1], reverse=True)
-        return [nid for nid, _ in scored[:top_k]], len(scored), tombstones
+        top_similarity = scored[0][1] if scored else None
+        return [nid for nid, _ in scored[:top_k]], len(scored), tombstones, top_similarity
 
     async def _embedding_anchors_via_scan(
         self, query_vec: list[float], top_k: int

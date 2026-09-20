@@ -261,6 +261,26 @@ class BrainConfig:
     # a refusal, when the reranker itself degraded that query
     # (`metadata.reranker_floor_skipped` records why).
     reranker_refusal_floor: float | None = None
+    # Retrieval: cheap pre-reranker refusal floor on activated neuron count
+    # (weak_landscape_floor gate, `engine/sufficiency.py`, same DIAGNOZA.md
+    # §7 measurement as above). `suff_neuron_count < 15` alone refuses
+    # 19/27 out-of-base phrases at 0/98 golden refusals (AUC 0.9637) — the
+    # single best individual signal measured, available at step 4.8 before
+    # the reranker's ~1.2s cost. `0` = gate inactive (neuron_count is never
+    # negative, so `neuron_count < 0` can never fire) — an old brain keeps
+    # today's behaviour.
+    sufficiency_min_neuron_count: int = 0
+    # Retrieval: cheap pre-reranker refusal floor on the best embedding
+    # anchor's similarity (weak_landscape_floor gate, same measurement).
+    # `anchor_sim_top1 < 0.524835` alone refuses 18/27 out-of-base phrases
+    # at 0/98 golden refusals (AUC 0.9403); combined with
+    # `sufficiency_min_neuron_count` via OR it reaches 21/27 — KRYTERIUM
+    # OS3, the best ≤2-signal combination measured (DIAGNOZA.md §3/§6).
+    # `None` = gate inactive (an old brain, or a query where the embedding
+    # retriever produced no anchor above `embedding_similarity_threshold`,
+    # sees today's behaviour — the condition is skipped, not treated as a
+    # similarity of 0).
+    sufficiency_min_anchor_sim: float | None = None
 
     def with_updates(self, **kwargs: Any) -> BrainConfig:
         """Create a new config with updated values."""
