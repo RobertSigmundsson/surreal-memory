@@ -105,6 +105,19 @@ class BrainConfig:
     # simply returns no usable rows), so there is no silent behavior change on existing brains.
     fiber_vector_enabled: bool = False
     fiber_vector_top_n: int = 10
+    # Retrieval: similarity floor for fiber-vector anchors specifically (smem-recall-tor-
+    # fibrowy, U2-REVISIT/B5). Until this key existed, the fiber track reused
+    # `embedding_similarity_threshold` (below) — but that value also gates the neuron-vector
+    # track's `_rank_knn_rows`, and the two tracks need different values: measured on the
+    # production golden set, the two fiber anchors that recover a lost golden pair have
+    # `_sim` 0.4879 and 0.5027 (ABBA measurement, `qa/anatomia-kotwic-*.json` in the program
+    # ledger), so 0.52 drops both while 0.45 keeps both with headroom. Lowering the SHARED
+    # `embedding_similarity_threshold` to 0.45 instead would "fix" the fiber track but also
+    # loosens the neuron track's KNN filter, which measurably let a negative-control query
+    # accumulate anchors it should not have had — hence a track-specific key rather than a
+    # shared one. 0.45 is not "disable the filter": it is the measured floor with headroom
+    # below the lower of the two recovered similarities (0.4879), not 0.
+    fiber_vector_similarity_threshold: float = 0.45
     # Retrieval: Activation strategy
     activation_strategy: str = "classic"  # "ppr" | "classic" | "reflex" | "hybrid" | "auto"
     ppr_damping: float = 0.15
