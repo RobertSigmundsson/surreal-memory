@@ -2042,17 +2042,22 @@ class ReflexPipeline:
                 fiber_hits = await self._storage.find_fibers_by_embedding(
                     embedding_outcome.query_vec, limit=self._config.fiber_vector_top_n
                 )
-                # Reuse `embedding_similarity_threshold` — the neuron-vector track applies
-                # this exact value in `_rank_knn_rows` (`similarity >= threshold`, above),
-                # and `_sim` here is `1 - vector::distance::knn()` (store.py), the same
-                # scale. A dedicated `fiber_vector_similarity_threshold` key is only
-                # justified if a measurement shows this threshold drops golden hits on the
-                # fiber track specifically — it does not exist yet, so don't add it here.
-                threshold = self._config.embedding_similarity_threshold
+                # Track-specific threshold (smem-recall-tor-fibrowy, U2-REVISIT/B5) — NOT
+                # `embedding_similarity_threshold`. That value also gates the neuron-vector
+                # track's `_rank_knn_rows` (above); measurement showed one shared knob cannot
+                # serve both: 0.52 drops two golden fiber anchors (`_sim` 0.4879 and 0.5027),
+                # but lowering the SHARED threshold to recover them also loosens the neuron
+                # track's KNN filter and measurably let a negative-control query accumulate
+                # anchors it should not have had. `fiber_vector_similarity_threshold`
+                # (`core/brain.py`, default 0.45) is a separate knob so the two tracks can be
+                # tuned independently. `_sim` here is `1 - vector::distance::knn()`
+                # (store.py) — same scale as the neuron track, just a different threshold.
+                threshold = self._config.fiber_vector_similarity_threshold
                 rejected = sum(1 for _f, sim in fiber_hits if sim < threshold)
                 if rejected:
                     logger.debug(
-                        "Fiber vector anchors: %d/%d below similarity threshold %.2f, dropped",
+                        "Fiber vector anchors: %d/%d below fiber_vector_similarity_threshold "
+                        "%.2f, dropped",
                         rejected,
                         len(fiber_hits),
                         threshold,

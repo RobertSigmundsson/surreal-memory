@@ -44,6 +44,7 @@ def _make_config() -> MagicMock:
     config.query_expansion_max_per_term = 0
     config.fiber_vector_enabled = True
     config.fiber_vector_top_n = 10
+    config.fiber_vector_similarity_threshold = 0.45
     return config
 
 
