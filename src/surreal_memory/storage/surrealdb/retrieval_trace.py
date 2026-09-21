@@ -22,6 +22,7 @@ _PAYLOAD_KEYS = (
     "fiber_scores",
     "filters",
     "config_snapshot",
+    "signals",
     "trace_version",
 )
 

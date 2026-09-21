@@ -100,6 +100,17 @@ def build_retrieval_trace(
     except (TypeError, ValueError):
         latency_ms = 0.0
 
+    # Program smem-recall-trzy-warstwy: refusal-gate observability signals,
+    # written by engine/retrieval.py into metadata["odmowa_sygnaly"] only
+    # when refusal_mode != "off" — everything else (a mock result, an "off"
+    # recall, an older RetrievalResult with no such key) yields {}.
+    metadata = getattr(result, "metadata", None)
+    signals: dict[str, Any] = {}
+    if isinstance(metadata, dict):
+        _raw_signals = metadata.get("odmowa_sygnaly")
+        if isinstance(_raw_signals, dict):
+            signals = dict(_raw_signals)
+
     return RetrievalTrace(
         brain_id=brain_id,
         session_id=session_id,
@@ -114,4 +125,5 @@ def build_retrieval_trace(
         fiber_scores=(),  # no per-fiber score vector on RetrievalResult; telemetry-optional
         filters=_extract_filters(args, mode),
         config_snapshot=dict(config_snapshot or {}),
+        signals=signals,
     )

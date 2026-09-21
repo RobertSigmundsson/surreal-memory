@@ -15,8 +15,8 @@ Advanced features:
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from dataclasses import dataclass, field
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from surreal_memory.engine.activation import ActivationResult
@@ -44,13 +44,41 @@ class SufficiencyMetrics:
 
 @dataclass(frozen=True)
 class SufficiencyResult:
-    """Result of the sufficiency check gate."""
+    """Result of the sufficiency check gate.
+
+    Attributes:
+        sufficient: Whether the gate accepted the landscape.
+        confidence: Confidence score for the decision.
+        gate: Name of the gate that produced this result.
+        reason: Human-readable explanation.
+        metrics: The raw SufficiencyMetrics this decision was based on.
+        would_refuse: Program smem-recall-trzy-warstwy (W3 observability).
+            Whether the SEPARATE "observe" threshold's weak_landscape_floor
+            condition was met for this call. Computed ONLY when
+            `refusal_mode="observe"` — always False in "off"/"enforce",
+            where this observation mechanism does not run at all (those
+            two modes decide refusal from `sufficient`/`gate` directly, via
+            the enforcement knobs, exactly as before this field existed).
+            Default False so every pre-existing construction of
+            SufficiencyResult (tests included) is unaffected.
+        would_refuse_gate: Name of the gate that would_refuse refers to
+            (currently only ever "weak_landscape_floor", or "" when
+            would_refuse is False). Default "".
+        signals: Program smem-recall-trzy-warstwy (W3 observability). Flat
+            dict of raw scalars (`neuron_count`, `anchor_sim_top1`) behind
+            the would_refuse decision — populated only when
+            `refusal_mode="observe"`, empty ({}) otherwise. Default
+            empty dict so existing constructions/tests are unaffected.
+    """
 
     sufficient: bool
     confidence: float
     gate: str
     reason: str
     metrics: SufficiencyMetrics
+    would_refuse: bool = False
+    would_refuse_gate: str = ""
+    signals: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -245,6 +273,9 @@ def check_sufficiency(
     anchor_sim_top1: float | None = None,
     min_neuron_count: int = 0,
     min_anchor_sim: float | None = None,
+    refusal_mode: str = "enforce",
+    observe_min_neuron_count: int = 15,
+    observe_min_anchor_sim: float = 0.524835,
 ) -> SufficiencyResult:
     """Evaluate whether retrieval has sufficient signal for reconstruction.
 
@@ -291,6 +322,44 @@ def check_sufficiency(
             ``None`` (default) leaves the condition inactive — matching
             ``BrainConfig.sufficiency_min_anchor_sim``. The two conditions
             are combined with OR (DIAGNOZA.md §3/§6, KRYTERIUM OS3).
+        refusal_mode: Program smem-recall-trzy-warstwy — corrected in a
+            second round after "off" was found to silently disable an
+            OPERATOR-configured ``min_neuron_count``/``min_anchor_sim`` on
+            any caller that did not also pass ``refusal_mode``. One of
+            "off" | "observe" | "enforce". Default is "enforce"
+            (documentation only — see below, "off" behaves identically).
+            - "off" and "enforce" are DELIBERATE SYNONYMS: both evaluate
+              ONLY ``min_neuron_count``/``min_anchor_sim`` (the enforcement
+              knobs), exactly the gate's ORIGINAL unconditional logic from
+              before this parameter existed — a knob left at its own
+              inactive default (0 / None) still never fires, but a knob a
+              caller explicitly set keeps refusing with zero extra opt-in.
+              Every existing call site and pinning test (notably
+              ``tests/unit/test_sufficiency.py::TestWeakLandscapeFloor``,
+              ``tests/unit/test_reranker_refusal_floor.py`` via
+              ``engine/retrieval.py``) passes ``min_neuron_count``/
+              ``min_anchor_sim`` without ever passing ``refusal_mode`` and
+              keeps working unmodified — any value other than "observe"
+              (a typo included) falls into this same safe bucket.
+            - "observe" is the ONLY mode that changes control flow: it
+              evaluates its OWN, separate condition —
+              ``observe_min_neuron_count``/``observe_min_anchor_sim``
+              below, NOT ``min_neuron_count``/``min_anchor_sim`` — and
+              NEVER short-circuits, so the client's answer is identical to
+              "off"/"enforce". The decision is recorded on every returned
+              ``SufficiencyResult`` (``would_refuse``/``would_refuse_gate``/
+              ``signals``, all empty/False outside "observe"). The
+              enforcement knobs are not even read in this mode — turning
+              observation on can never accidentally start enforcing.
+        observe_min_neuron_count: "observe"-only threshold (ignored in
+            "off"/"enforce"). Default 15 — the W3 variant measured by
+            program smem-recall-brama-odmowy (``~/expertP/smem-recall-
+            brama-odmowy/qa/D1.md`` §2a).
+        observe_min_anchor_sim: "observe"-only threshold (ignored in
+            "off"/"enforce"). Default 0.524835 — same D1 §2a measurement.
+            Unlike ``min_anchor_sim`` this is never ``None``: an inactive
+            "gate off" value has no meaning in "observe" mode, since the
+            mode itself is the on/off switch.
 
     Returns:
         SufficiencyResult with gate decision, confidence, and metrics.
@@ -306,29 +375,68 @@ def check_sufficiency(
 
     profile = _get_profile(query_intent)
 
+    # Program smem-recall-trzy-warstwy (W3 observability), round-2
+    # correction. "observe" is the ONLY mode that evaluates anything here,
+    # and it uses its OWN threshold params (observe_min_neuron_count/
+    # observe_min_anchor_sim) — NEVER min_neuron_count/min_anchor_sim (the
+    # enforcement knobs), so enabling observation can never read, let alone
+    # trip, a knob the caller configured for enforcement. "off"/"enforce"
+    # compute nothing here at all: their gate below runs the ORIGINAL,
+    # unconditional enforcement-knob logic exactly as before this whole
+    # observability mechanism existed.
+    _w3_would_refuse = False
+    _w3_gate = ""
+    if refusal_mode == "observe":
+        _w3_observe_condition = m.neuron_count < observe_min_neuron_count or (
+            anchor_sim_top1 is not None and anchor_sim_top1 < observe_min_anchor_sim
+        )
+        if _w3_observe_condition:
+            _w3_would_refuse = True
+            _w3_gate = "weak_landscape_floor"
+
+    def _w3_signals() -> dict[str, Any]:
+        if refusal_mode != "observe":
+            return {}
+        return {
+            "neuron_count": m.neuron_count,
+            "anchor_sim_top1": anchor_sim_top1,
+        }
+
+    def _result(
+        *, sufficient: bool, confidence: float, gate: str, reason: str
+    ) -> SufficiencyResult:
+        return SufficiencyResult(
+            sufficient=sufficient,
+            confidence=confidence,
+            gate=gate,
+            reason=reason,
+            metrics=m,
+            would_refuse=_w3_would_refuse,
+            would_refuse_gate=_w3_gate,
+            signals=_w3_signals(),
+        )
+
     # Gate 1: no_anchors
     if m.anchor_count == 0:
-        return SufficiencyResult(
+        return _result(
             sufficient=False,
             confidence=0.0,
             gate="no_anchors",
             reason="No anchor neurons found for query",
-            metrics=m,
         )
 
     # Gate 2: empty_landscape
     if m.neuron_count == 0:
-        return SufficiencyResult(
+        return _result(
             sufficient=False,
             confidence=0.0,
             gate="empty_landscape",
             reason="All activations died during stabilization",
-            metrics=m,
         )
 
     # Gate 3: unstable_noise
     if not m.stab_converged and m.stab_neurons_removed > m.neuron_count and m.top_activation < 0.3:
-        return SufficiencyResult(
+        return _result(
             sufficient=False,
             confidence=min(conf, 0.1),
             gate="unstable_noise",
@@ -336,7 +444,6 @@ def check_sufficiency(
                 f"Unstable signal: {m.stab_neurons_removed} neurons removed, "
                 f"only {m.neuron_count} survived, top activation {m.top_activation:.2f}"
             ),
-            metrics=m,
         )
 
     # Gate 4: ambiguous_spread
@@ -349,7 +456,7 @@ def check_sufficiency(
         and m.neuron_count >= 15
         and m.top_activation < _top_act_threshold_ambiguous
     ):
-        return SufficiencyResult(
+        return _result(
             sufficient=False,
             confidence=min(conf, 0.1),
             gate="ambiguous_spread",
@@ -357,7 +464,6 @@ def check_sufficiency(
                 f"Diffuse activation: entropy={m.activation_entropy:.1f} bits, "
                 f"focus={m.focus_ratio:.2f}, no standout neuron"
             ),
-            metrics=m,
         )
 
     # Gate: weak_landscape_floor (smem-recall-brama-odmowy, "tania brama",
@@ -368,10 +474,22 @@ def check_sufficiency(
     # default to values that cannot fire, so an old brain / a brain whose
     # operator never measured its own floor sees identical gates 1-4 and
     # falls through exactly as it did before this gate existed.
-    if m.neuron_count < min_neuron_count or (
-        min_anchor_sim is not None
-        and anchor_sim_top1 is not None
-        and anchor_sim_top1 < min_anchor_sim
+    #
+    # Program smem-recall-trzy-warstwy, round-2 correction: this block is
+    # the ORIGINAL, unconditional gate — UNCHANGED, active in "off" AND
+    # "enforce" (deliberate synonyms; any value other than "observe" lands
+    # here) so an operator-configured knob keeps refusing with zero extra
+    # opt-in. "observe" NEVER takes this branch: it evaluated its own,
+    # separate condition above (`observe_min_neuron_count`/
+    # `observe_min_anchor_sim`) and never short-circuits, so gates 4.5-8
+    # still run and the client's answer is identical to "off"/"enforce".
+    if refusal_mode != "observe" and (
+        m.neuron_count < min_neuron_count
+        or (
+            min_anchor_sim is not None
+            and anchor_sim_top1 is not None
+            and anchor_sim_top1 < min_anchor_sim
+        )
     ):
         _floor_reasons = []
         if m.neuron_count < min_neuron_count:
@@ -384,12 +502,11 @@ def check_sufficiency(
             _floor_reasons.append(
                 f"anchor_sim_top1 {anchor_sim_top1:.6f} < floor {min_anchor_sim:.6f}"
             )
-        return SufficiencyResult(
+        return _result(
             sufficient=False,
             confidence=min(conf, 0.1),
             gate="weak_landscape_floor",
             reason="Weak landscape: " + "; ".join(_floor_reasons),
-            metrics=m,
         )
 
     # Gate 4.5: diminishing_returns
@@ -401,7 +518,7 @@ def check_sufficiency(
         if _act_delta < 0.05 and _neuron_delta <= 1 and _focus_delta < 0.05:
             # Take what we have — additional passes won't improve signal
             _dr_conf = max(0.0, min(1.0, conf * 0.85))
-            return SufficiencyResult(
+            return _result(
                 sufficient=True,
                 confidence=_dr_conf,
                 gate="diminishing_returns",
@@ -409,14 +526,13 @@ def check_sufficiency(
                     f"Diminishing returns: activation delta={_act_delta:.3f}, "
                     f"neuron delta={_neuron_delta}, focus delta={_focus_delta:.3f}"
                 ),
-                metrics=m,
             )
 
     # Gate 5: intersection_convergence
     _top_act_threshold_intersect = 0.4 * profile.min_top_activation_factor
     _min_intersect = profile.min_intersection_count
     if m.intersection_count >= _min_intersect and m.top_activation >= _top_act_threshold_intersect:
-        result = SufficiencyResult(
+        return _result(
             sufficient=True,
             confidence=conf,
             gate="intersection_convergence",
@@ -424,9 +540,7 @@ def check_sufficiency(
                 f"Multi-anchor convergence: {m.intersection_count} intersections, "
                 f"top activation {m.top_activation:.2f}"
             ),
-            metrics=m,
         )
-        return result
 
     # Gate 6: high_coverage_strong_hit
     _top_act_threshold_strong = 0.7 * profile.min_top_activation_factor
@@ -435,7 +549,7 @@ def check_sufficiency(
         and m.top_activation >= _top_act_threshold_strong
         and m.focus_ratio >= 0.4
     ):
-        result = SufficiencyResult(
+        return _result(
             sufficient=True,
             confidence=conf,
             gate="high_coverage_strong_hit",
@@ -443,9 +557,7 @@ def check_sufficiency(
                 f"Strong signal: coverage={m.coverage_ratio:.0%}, "
                 f"top={m.top_activation:.2f}, focus={m.focus_ratio:.2f}"
             ),
-            metrics=m,
         )
-        return result
 
     # Gate 7: focused_result
     _top_act_threshold_focused = 0.5 * profile.min_top_activation_factor
@@ -454,7 +566,7 @@ def check_sufficiency(
         and m.top_activation >= _top_act_threshold_focused
         and m.focus_ratio >= 0.6
     ):
-        result = SufficiencyResult(
+        return _result(
             sufficient=True,
             confidence=conf,
             gate="focused_result",
@@ -462,16 +574,12 @@ def check_sufficiency(
                 f"Focused result: {m.neuron_count} neurons, "
                 f"top={m.top_activation:.2f}, focus={m.focus_ratio:.2f}"
             ),
-            metrics=m,
         )
-        return result
 
     # Gate 8: default_pass
-    result = SufficiencyResult(
+    return _result(
         sufficient=True,
         confidence=conf,
         gate="default_pass",
         reason=f"Default pass: {m.neuron_count} neurons, conf={conf:.2f}",
-        metrics=m,
     )
-    return result

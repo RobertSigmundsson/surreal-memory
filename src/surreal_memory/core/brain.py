@@ -289,6 +289,47 @@ class BrainConfig:
     # measure at all — never ran, or every KNN row was a tombstone; the
     # condition is skipped, not treated as a similarity of 0).
     sufficiency_min_anchor_sim: float | None = None
+    # Retrieval: master mode for the refusal gates (weak_landscape_floor in
+    # `engine/sufficiency.py`, the post-rerank M4 floor in
+    # `engine/retrieval.py`), program `smem-recall-trzy-warstwy`. One of
+    # "off" | "observe" | "enforce" — corrected 2026-09-21 (runner round 2)
+    # after "off" was found to silently disable an OPERATOR-configured
+    # enforcement knob (`reranker_refusal_floor` etc.) on any existing
+    # brain that did not also set this new field:
+    #   "off" (default) and "enforce" are DELIBERATE SYNONYMS — both read
+    #     ONLY the enforcement knobs below (`sufficiency_min_neuron_count`,
+    #     `sufficiency_min_anchor_sim`, `reranker_refusal_floor`) exactly as
+    #     this gate worked before this field existed: a knob left at its
+    #     own inactive default (0 / None) still never fires, but a knob an
+    #     operator explicitly set keeps refusing with ZERO extra opt-in.
+    #     Any value other than "observe" (a typo included) falls into this
+    #     same safe bucket — never a silent disable.
+    #   "observe" is the ONLY mode that changes control flow: the gates
+    #     evaluate their OWN, separate, independent thresholds
+    #     (`refusal_observe_min_neuron_count` / `refusal_observe_min_anchor_
+    #     sim` / `refusal_observe_rerank_floor` below) and NEVER refuse —
+    #     the client sees the same answer as "off"/"enforce" while
+    #     `SufficiencyResult.would_refuse`/`would_refuse_gate`/`signals` and
+    #     `RetrievalResult.metadata["odmowa_sygnaly"]` record what the
+    #     decision WOULD have been. The enforcement knobs above are not
+    #     even read in this mode — enabling observation can never
+    #     accidentally start enforcing.
+    refusal_mode: str = "off"
+    # Program smem-recall-trzy-warstwy — thresholds used ONLY by
+    # `refusal_mode="observe"` to compute "would refuse" signals; NEVER
+    # read outside "observe", and NEVER cause an actual refusal (mandate:
+    # "wyłącznie tryb obserwacji, wszystkie gałki egzekwowania OFF" — so
+    # turning observation on must never require touching the enforcement
+    # knobs above). Defaults are the W3 variant measured by program
+    # smem-recall-brama-odmowy (`~/expertP/smem-recall-brama-odmowy/qa/
+    # D1.md` §2a: "W3 (W2 + `reranker_refusal_floor=0.002146`)", where
+    # "W2" is `sufficiency_min_neuron_count=15` LUB `sufficiency_min_
+    # anchor_sim=0.524835`) — the same numbers as the enforcement knobs'
+    # own DIAGNOZA.md measurement, just wired to a mode that can never
+    # enforce.
+    refusal_observe_min_neuron_count: int = 15
+    refusal_observe_min_anchor_sim: float = 0.524835
+    refusal_observe_rerank_floor: float = 0.002146
 
     def with_updates(self, **kwargs: Any) -> BrainConfig:
         """Create a new config with updated values."""
