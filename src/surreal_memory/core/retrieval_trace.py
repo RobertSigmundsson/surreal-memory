@@ -1,4 +1,4 @@
-"""RetrievalTrace — a compact, queryable record of one recall (schema v9).
+"""RetrievalTrace — a compact, queryable record of one recall (schema v10).
 
 Telemetry only: captures what fed a recall answer (fiber ids/scores, anchors,
 depth, mode, confidence, latency, config snapshot) without dumping subgraphs or
@@ -17,6 +17,8 @@ from surreal_memory.utils.timeutils import utcnow
 
 _MAX_QUERY_LEN = 500
 _MAX_IDS = 10
+_MAX_SIGNALS = 24
+_MAX_SIGNAL_STR_LEN = 120
 
 
 def _parse_dt(value: Any) -> datetime | None:
@@ -52,7 +54,14 @@ class RetrievalTrace:
         fiber_scores: Scores parallel to fiber_ids (capped at 10)
         filters: Recall filters applied (tags, valid_at, near, ...)
         config_snapshot: A few scalar config values in effect
-        trace_version: Schema version of this trace record
+        signals: Refusal-gate observability signals (program
+            smem-recall-trzy-warstwy) — a flat, bounded dict of scalars
+            (at most 24 keys; see __post_init__), empty unless the brain's
+            `refusal_mode` was "observe" for this recall.
+        trace_version: Schema version of this trace record. Default 2
+            (this field exists); rows written before `signals` existed have
+            no `trace_version` at all in storage — `from_dict` reads those
+            as 1, never upgrading them silently.
         created_at: When the recall happened
     """
 
@@ -70,7 +79,8 @@ class RetrievalTrace:
     fiber_scores: tuple[float, ...] = ()
     filters: dict[str, Any] = field(default_factory=dict)
     config_snapshot: dict[str, Any] = field(default_factory=dict)
-    trace_version: int = 1
+    signals: dict[str, Any] = field(default_factory=dict)
+    trace_version: int = 2
     created_at: datetime = field(default_factory=utcnow)
 
     def __post_init__(self) -> None:
@@ -83,6 +93,18 @@ class RetrievalTrace:
             object.__setattr__(self, "fiber_ids", tuple(self.fiber_ids[:_MAX_IDS]))
         if len(self.fiber_scores) > _MAX_IDS:
             object.__setattr__(self, "fiber_scores", tuple(self.fiber_scores[:_MAX_IDS]))
+        if self.signals:
+            _bounded: dict[str, Any] = {}
+            for key, value in self.signals.items():
+                if len(_bounded) >= _MAX_SIGNALS:
+                    break
+                if isinstance(value, str):
+                    _bounded[key] = value[:_MAX_SIGNAL_STR_LEN]
+                elif value is None or isinstance(value, (bool, int, float)):
+                    _bounded[key] = value
+                # Non-scalar values (lists, dicts, ...) are silently dropped here,
+                # never serialised into the trace.
+            object.__setattr__(self, "signals", _bounded)
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize to a JSON-friendly dict (lists, ISO datetime)."""
@@ -101,6 +123,7 @@ class RetrievalTrace:
             "fiber_scores": list(self.fiber_scores),
             "filters": dict(self.filters),
             "config_snapshot": dict(self.config_snapshot),
+            "signals": dict(self.signals),
             "trace_version": self.trace_version,
             "created_at": self.created_at.isoformat(),
         }
@@ -122,6 +145,7 @@ class RetrievalTrace:
             "fiber_scores": tuple(float(s) for s in (data.get("fiber_scores") or ())),
             "filters": dict(data.get("filters") or {}),
             "config_snapshot": dict(data.get("config_snapshot") or {}),
+            "signals": dict(data.get("signals") or {}),
             "trace_version": int(data.get("trace_version", 1) or 1),
         }
         if data.get("id"):

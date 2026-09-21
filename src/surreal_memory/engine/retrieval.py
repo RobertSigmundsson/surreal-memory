@@ -613,7 +613,52 @@ class ReflexPipeline:
             anchor_sim_top1=embedding_outcome.top_similarity,
             min_neuron_count=self._config.sufficiency_min_neuron_count,
             min_anchor_sim=self._config.sufficiency_min_anchor_sim,
+            refusal_mode=self._config.refusal_mode,
+            observe_min_neuron_count=self._config.refusal_observe_min_neuron_count,
+            observe_min_anchor_sim=self._config.refusal_observe_min_anchor_sim,
         )
+
+        # Program smem-recall-trzy-warstwy, round-2 correction: one
+        # refusal-signals dict, built fresh at each of the three
+        # RetrievalResult construction points in this method (4.8 early
+        # exit below, the M4/4.9b early exit, and the final result) because
+        # `m4_would_refuse`/`rerank_raw_top1` are only known after 4.9 runs.
+        # `None` outside "observe" ("off" and "enforce" both) — the key is
+        # then omitted from metadata entirely (mandate: signals exist ONLY
+        # in "observe").
+        def _make_odmowa_sygnaly(
+            *,
+            m4_would_refuse: bool,
+            rerank_raw_top1: float | None,
+            m4_unmeasured_reason: str | None,
+        ) -> dict[str, Any] | None:
+            if self._config.refusal_mode != "observe":
+                return None
+            if _sufficiency.would_refuse:
+                _w3_gate = _sufficiency.would_refuse_gate or "weak_landscape_floor"
+            elif m4_would_refuse:
+                _w3_gate = "reranker_floor"
+            else:
+                _w3_gate = ""
+            return {
+                "w3_would_refuse": bool(_sufficiency.would_refuse or m4_would_refuse),
+                "w3_gate": _w3_gate,
+                "neuron_count": _sufficiency.metrics.neuron_count,
+                "anchor_sim_top1": embedding_outcome.top_similarity,
+                "rerank_raw_top1": rerank_raw_top1,
+                # Program smem-recall-trzy-warstwy, runner review: "the M4
+                # signal could not be measured" must NEVER be recorded as
+                # "M4 would not have refused" — that is the silent-failure
+                # mode this program exists to remove (cisza nie jest
+                # sukcesem). The enforcement path names its skip via
+                # `reranker_floor_skipped`; observation needs the same
+                # honesty, otherwise a degraded reranker inflates the "this
+                # layer would have let the query through" count in the
+                # weekly report for Robert.
+                "m4_measured": m4_unmeasured_reason is None,
+                "m4_unmeasured_reason": m4_unmeasured_reason,
+                "refusal_mode": self._config.refusal_mode,
+            }
 
         if not _sufficiency.sufficient:
             _early_latency = (time.perf_counter() - start_time) * 1000
@@ -641,6 +686,16 @@ class ReflexPipeline:
                     **_embedding_anchor_meta,
                 },
             )
+            _odmowa_sygnaly = _make_odmowa_sygnaly(
+                m4_would_refuse=False,
+                rerank_raw_top1=None,
+                # 4.8 short-circuits BEFORE step 4.9, so the cross-encoder
+                # never ran for this query — M4 has no signal at all here.
+                m4_unmeasured_reason="early exit at gate 4.8; reranking never ran",
+            )
+            if _odmowa_sygnaly is not None:
+                _early_result.metadata["odmowa_sygnaly"] = _odmowa_sygnaly
+
             # Flush any pending writes even on early exit
             if self._write_queue.pending_count > 0:
                 try:
@@ -748,9 +803,31 @@ class ReflexPipeline:
         # degraded for this query, the raw score is not trustworthy signal
         # about the CONTENT (it may not have run at all) — skip the refusal
         # and say so, cisza nie jest sukcesem.
+        # Program smem-recall-trzy-warstwy, round-2 correction: `refusal_mode`
+        # changes anything ONLY in "observe". "off" and "enforce" are
+        # deliberate synonyms (any value other than "observe" lands in this
+        # same bucket) and run the block below EXACTLY as it was before
+        # this observability mechanism existed — unconditional on
+        # `reranker_refusal_floor` alone, so an operator-configured floor
+        # keeps refusing/reporting degradation with zero extra opt-in.
+        # "observe" evaluates its OWN, separate threshold
+        # (`refusal_observe_rerank_floor`) and NEVER short-circuits or even
+        # reads `reranker_refusal_floor`.
         _reranker_floor = self._config.reranker_refusal_floor
         _reranker_floor_skipped: str | None = None
-        if _reranker_floor is not None and _rerank_degraded is not None:
+        _m4_would_refuse = False
+        if self._config.refusal_mode == "observe":
+            if (
+                _rerank_degraded is None
+                and _rerank_raw_top1 is not None
+                and _rerank_raw_top1 < self._config.refusal_observe_rerank_floor
+            ):
+                _m4_would_refuse = True
+            # "observe": would_refuse recorded above; always falls through
+            # to the final reconstruction so the client's answer is
+            # unchanged (degraded reranks are simply not evaluated, same
+            # "not trustworthy signal" reasoning as the enforcement path).
+        elif _reranker_floor is not None and _rerank_degraded is not None:
             _reranker_floor_skipped = _rerank_degraded
         elif (
             _reranker_floor is not None
@@ -905,6 +982,20 @@ class ReflexPipeline:
         # than silently doing nothing.
         if _reranker_floor_skipped is not None:
             result.metadata["reranker_floor_skipped"] = _reranker_floor_skipped
+
+        if _rerank_degraded is not None:
+            _m4_unmeasured = _rerank_degraded
+        elif _rerank_raw_top1 is None:
+            _m4_unmeasured = "no raw cross-encoder top-1 score for this query"
+        else:
+            _m4_unmeasured = None
+        _odmowa_sygnaly = _make_odmowa_sygnaly(
+            m4_would_refuse=_m4_would_refuse,
+            rerank_raw_top1=_rerank_raw_top1,
+            m4_unmeasured_reason=_m4_unmeasured,
+        )
+        if _odmowa_sygnaly is not None:
+            result.metadata["odmowa_sygnaly"] = _odmowa_sygnaly
 
         # U2: surface trust/recency calibration when active (no-op at neutral defaults).
         _tw = max(0.0, min(1.0, self._config.trust_weight))
