@@ -173,6 +173,12 @@ def _is_auth_error(exc: Exception) -> bool:
 
 _BRAIN_ID_SAFE = re.compile(r"^[a-zA-Z0-9_.\-]+$")
 
+# Program smem-recall-trzy-warstwy, unit U2: tokens fed into
+# `any_neuron_matches_any_token`'s inline `content @@ "tok"` clauses must be
+# pure lowercase-ASCII-letter/digit (matching what `engine/leksyka.tokenizuj`
+# ever produces) before they are safe to inline.
+_SAFE_TOKEN = re.compile(r"^[a-z0-9]+$")
+
 # Bounded concurrency for per-id batch fetches (get_neurons_batch/get_synapses_batch).
 # Pipelines direct record selects over the one shared AsyncSurreal connection;
 # measured ~1.7x over sequential on a 67k-neuron brain, with diminishing
@@ -1550,6 +1556,45 @@ class SurrealDBStorage(
             if c is not None and c not in out:
                 out[str(c)] = _row_to_neuron(r)
         return out
+
+    async def any_neuron_matches_any_token(self, tokens: list[str]) -> bool:
+        """True iff at least one neuron in this brain has `content` matching
+        (BM25 full-text, `@@`) ANY of `tokens` — the storage primitive behind
+        the W3 leksyka/gibberish signal (program smem-recall-trzy-warstwy,
+        unit U2). `content @@ 'a b'` is an AND over tokens, not an OR/phrase
+        match (measured: `@@ 'nautilus'` = 274 rows, `@@ 'nautilus
+        qwzlmnprt'` = 0 rows) — so "does the base contain ANY of these
+        tokens" has to be an explicit `OR` of single-token `@@` predicates,
+        not one multi-token phrase match. Measured latency (7 phrases x 5
+        repeats): 27-47 ms median for this single-query `LIMIT 1` shape,
+        vs. 30-124 ms for a `count() ... GROUP ALL` variant that gives the
+        same verdict but costs more as hit count grows — hence `LIMIT 1`.
+
+        Fail-closed input validation: `tokens` come from a user query's raw
+        text, so — independent of whatever the caller already filtered —
+        every token must match `^[a-z0-9]+$` or this raises `ValueError`
+        before any query is built. Tokens are inlined into the query text
+        the same way `_brain_literal` inlines `brain_id` (SurrealDB 3.2.0
+        does not use the content FTS index for a `$bind` parameter either —
+        see `_brain_literal`'s docstring and `storage/surrealdb/retrieval_
+        trace.py`), so this validation is the only thing standing between a
+        query token and SQL injection here.
+
+        An empty `tokens` list returns `False` immediately without issuing
+        any query.
+        """
+        if not tokens:
+            return False
+        for tok in tokens:
+            if not _SAFE_TOKEN.match(tok):
+                raise ValueError(f"unsafe token for inline FTS query: {tok!r}")
+        brain_id = self._get_brain_id()
+        lit = _brain_literal(brain_id)
+        clauses = " OR ".join(f'content @@ "{tok}"' for tok in tokens)
+        rows = await self._query(
+            f"SELECT id FROM neuron WHERE brain_id = {lit} AND ({clauses}) LIMIT 1"
+        )
+        return len(rows) > 0
 
     async def find_neurons_by_ids(
         self, neuron_ids: list[str], include_embedding: bool = False
