@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import math
 import random
+import re
 from collections import defaultdict
 from dataclasses import replace
 from datetime import datetime, timedelta
@@ -30,6 +31,7 @@ from surreal_memory.core.synapse import Synapse, SynapseType
 from surreal_memory.core.sync_records import ChangeEntry, DeviceRecord
 from surreal_memory.engine.brain_versioning import BrainVersion
 from surreal_memory.engine.depth_prior import DepthPrior
+from surreal_memory.engine.leksyka import tokenizuj
 from surreal_memory.storage.base import NeuralStorage
 from surreal_memory.storage.memory_brain_ops import InMemoryBrainMixin
 from surreal_memory.storage.memory_collections import InMemoryCollectionsMixin
@@ -41,6 +43,12 @@ from surreal_memory.storage.memory_reviews import InMemoryReviewsMixin
 from surreal_memory.storage.memory_sync_ops import InMemorySyncMixin
 from surreal_memory.storage.memory_watch_state import InMemoryWatchStateMixin
 from surreal_memory.utils.timeutils import ensure_naive_utc, utcnow
+
+# Program smem-recall-trzy-warstwy, unit U2: same fail-closed charset as
+# `storage/surrealdb/store.py`'s `_SAFE_TOKEN` — tokens originate in user
+# query text, so this backend validates independently rather than trusting
+# the caller already filtered.
+_SAFE_TOKEN = re.compile(r"^[a-z0-9]+$")
 
 
 def _pass_ran_at(record: dict[str, Any]) -> datetime:
@@ -184,6 +192,34 @@ class InMemoryStorage(
 
         results.sort(key=lambda n: n.id)
         return results[offset : offset + limit]
+
+    async def any_neuron_matches_any_token(self, tokens: list[str]) -> bool:
+        """Mirrors `storage/surrealdb/store.py`'s `SurrealDBStorage.any_neuron_matches_
+        any_token` — same contract, same fail-closed validation, same "match by TOKEN,
+        not substring" semantics, enforced identical by `tests/unit/test_storage_
+        parity.py`. Matching is via `engine.leksyka.tokenizuj`, the same tokenization
+        the SurrealDB full-text index (`smem_content` analyzer) applies to `content` at
+        write time — so, e.g., the token `dd` does NOT match inside a neuron whose
+        content contains the word `address`, the same way SurrealDB's `content @@ 'dd'`
+        would not (BM25 full-text `@@` matches whole analyzer tokens, never
+        substrings).
+
+        Fail-closed input validation matches the SurrealDB backend: every token must
+        match `^[a-z0-9]+$` or this raises `ValueError`. An empty `tokens` list returns
+        `False` immediately. Short-circuits at the first matching neuron (mirrors the
+        SurrealDB backend's `LIMIT 1`).
+        """
+        if not tokens:
+            return False
+        for tok in tokens:
+            if not _SAFE_TOKEN.match(tok):
+                raise ValueError(f"unsafe token for lexical lookup: {tok!r}")
+        wanted = set(tokens)
+        brain_id = self._get_brain_id()
+        for neuron in self._neurons[brain_id].values():
+            if wanted.intersection(tokenizuj(neuron.content)):
+                return True
+        return False
 
     async def find_neurons_by_embedding(
         self,

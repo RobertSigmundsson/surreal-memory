@@ -426,3 +426,204 @@ class TestObserveNeverReportsUnmeasuredAsNegative:
         pipeline = ReflexPipeline(obs_storage, _obs_config())  # refusal_mode default "off"
         result = await pipeline.query(_OBS_QUERY)
         assert "odmowa_sygnaly" not in result.metadata
+
+
+# ---------------------------------------------------------------------------
+# Program smem-recall-trzy-warstwy, unit U2: W3 leksyka/gibberish layer.
+#
+# `engine/leksyka.py` emulates the `smem_content` analyzer's tokenization;
+# `storage/surrealdb/store.py::SurrealDBStorage.any_neuron_matches_any_token`
+# is the storage primitive (one `content @@ 't1' OR content @@ 't2' ...`
+# query); `engine/retrieval.py::ReflexPipeline._leksyka_sygnal` wires the two
+# together, ONLY in `refusal_mode="observe"`, and follows the same "unmeasured
+# is never a negative" discipline as the M4 signal above.
+# ---------------------------------------------------------------------------
+
+
+class TestTokenizuj:
+    """U2: `tokenizuj`/`tokeny_do_sprawdzenia` emulate the `smem_content`
+    analyzer contract (`blank`+`class` tokenizers, `lowercase`+`ascii`
+    filters) without touching a database."""
+
+    def test_tokenizuj_matches_analyzer_contract(self) -> None:
+        from surreal_memory.engine.leksyka import tokenizuj
+
+        tokens = tokenizuj("Nautilus 2026 termopastą uruboros_kafka")
+        assert tokens == ["nautilus", "2026", "termopasta", "uruboros", "kafka"]
+
+    def test_tokeny_do_sprawdzenia_filters_and_caps(self) -> None:
+        from surreal_memory.engine.leksyka import tokeny_do_sprawdzenia
+
+        # Below min_len is dropped ("ab", "abc", "six" has length 3);
+        # duplicates ("four" twice) keep only the first occurrence, in
+        # original order.
+        result = tokeny_do_sprawdzenia("ab abc four five four six seven", min_len=4)
+        assert result == ["four", "five", "seven"]
+
+        # Cap at 32, first-32-in-order, no duplicates counted twice against
+        # the cap. Suffixes are two ASCII letters (not digits) so the
+        # `class` tokenizer's letter/digit boundary split never fragments
+        # them -- each "wordXX" is one token, all distinct, all >= min_len.
+        words = [f"word{chr(97 + i // 26)}{chr(97 + i % 26)}" for i in range(50)]
+        capped = tokeny_do_sprawdzenia(" ".join(words), min_len=4)
+        assert len(capped) == 32
+        assert capped == words[:32]
+
+
+class TestAnyNeuronMatchesAnyTokenValidation:
+    """U2: storage-layer fail-closed validation — never trust that the caller
+    already filtered tokens, since they originate in user query text."""
+
+    async def test_storage_method_rejects_unsafe_token(self) -> None:
+        from surreal_memory.storage.surrealdb.store import SurrealDBStorage
+
+        storage = SurrealDBStorage()
+        with pytest.raises(ValueError):
+            await storage.any_neuron_matches_any_token(["a' OR 1=1"])
+
+        queried = False
+
+        async def _fake_query(sql: str, **params: Any) -> list[dict[str, Any]]:
+            nonlocal queried
+            queried = True
+            return []
+
+        storage._query = _fake_query  # type: ignore[method-assign]
+        assert await storage.any_neuron_matches_any_token([]) is False
+        assert queried is False
+
+    async def test_both_backends_agree_on_lexical_lookup(self) -> None:
+        """`SurrealDBStorage` and `InMemoryStorage` must give the SAME verdict for
+        the same tokens over the same content (tests/unit/test_storage_parity.py
+        requires the method to exist on both; this pins that it also BEHAVES the
+        same, not just that the name resolves). Matching is per analyzer TOKEN,
+        not raw substring: `address` contains the substring `ddre`, but no token
+        of `address` (tokenized: `["address"]`) equals `ddre` — the same way
+        SurrealDB's BM25 `content @@ 'ddre'` would not match it either.
+        """
+        from surreal_memory.core.brain import Brain
+        from surreal_memory.core.neuron import Neuron, NeuronType
+        from surreal_memory.storage.memory_store import InMemoryStorage
+
+        storage = InMemoryStorage()
+        brain = Brain.create(name="lexical_parity_test")
+        await storage.save_brain(brain)
+        storage.set_brain(brain.id)
+        await storage.add_neuron(
+            Neuron.create(type=NeuronType.CONCEPT, content="Emma lives in Oslo Norway")
+        )
+        await storage.add_neuron(
+            Neuron.create(type=NeuronType.CONCEPT, content="please note the address below")
+        )
+
+        assert await storage.any_neuron_matches_any_token(["oslo"]) is True
+        assert await storage.any_neuron_matches_any_token(["qwzlmnprt", "vxbdfghj"]) is False
+        assert await storage.any_neuron_matches_any_token(["ddre"]) is False
+
+        await storage.close()
+
+
+class TestLeksykaObserveSignal:
+    """U2: the pipeline wiring, driven end-to-end over `obs_storage`
+    (InMemoryStorage) the same way as `TestObserveNeverReportsUnmeasuredAsNegative`
+    above. `InMemoryStorage` now implements `any_neuron_matches_any_token` for
+    real (parity with `SurrealDBStorage`, see `TestAnyNeuronMatchesAnyTokenValidation
+    .test_both_backends_agree_on_lexical_lookup`); these tests still override it per
+    test via `monkeypatch.setattr` on the fixture INSTANCE so the pipeline-wiring
+    verdict is deterministic and independent of `obs_storage`'s actual two neurons."""
+
+    async def test_observe_flags_gibberish_when_no_token_found(
+        self, obs_storage: Any, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from surreal_memory.engine.retrieval import ReflexPipeline
+
+        _obs_reranker_enabled(monkeypatch)
+        monkeypatch.setattr(
+            "surreal_memory.engine.reranker.rerank_activations",
+            _obs_fake_rerank(raw_top1=0.9, degraded_reason=None),
+        )
+
+        async def _no_match(tokens: list[str]) -> bool:
+            return False
+
+        monkeypatch.setattr(obs_storage, "any_neuron_matches_any_token", _no_match, raising=False)
+        pipeline = ReflexPipeline(obs_storage, _obs_config(refusal_mode="observe"))
+        result = await pipeline.query(_OBS_QUERY)
+        sygnaly = result.metadata["odmowa_sygnaly"]
+        assert sygnaly["leksyka_would_refuse"] is True
+        assert sygnaly["leksyka_zbadana"] is True
+        assert sygnaly["leksyka_niezbadana_powod"] is None
+        assert sygnaly["leksyka_tokenow"] > 0
+
+    async def test_observe_does_not_flag_when_a_token_is_found(
+        self, obs_storage: Any, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from surreal_memory.engine.retrieval import ReflexPipeline
+
+        _obs_reranker_enabled(monkeypatch)
+        monkeypatch.setattr(
+            "surreal_memory.engine.reranker.rerank_activations",
+            _obs_fake_rerank(raw_top1=0.9, degraded_reason=None),
+        )
+
+        async def _match(tokens: list[str]) -> bool:
+            return True
+
+        monkeypatch.setattr(obs_storage, "any_neuron_matches_any_token", _match, raising=False)
+        pipeline = ReflexPipeline(obs_storage, _obs_config(refusal_mode="observe"))
+        result = await pipeline.query(_OBS_QUERY)
+        sygnaly = result.metadata["odmowa_sygnaly"]
+        assert sygnaly["leksyka_would_refuse"] is False
+        assert sygnaly["leksyka_zbadana"] is True
+
+    async def test_off_mode_makes_no_lexical_query(
+        self, obs_storage: Any, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from surreal_memory.engine.retrieval import ReflexPipeline
+
+        _obs_reranker_enabled(monkeypatch)
+        monkeypatch.setattr(
+            "surreal_memory.engine.reranker.rerank_activations",
+            _obs_fake_rerank(raw_top1=0.9, degraded_reason=None),
+        )
+        calls = 0
+
+        async def _counting(tokens: list[str]) -> bool:
+            nonlocal calls
+            calls += 1
+            return False
+
+        monkeypatch.setattr(obs_storage, "any_neuron_matches_any_token", _counting, raising=False)
+        pipeline = ReflexPipeline(obs_storage, _obs_config())  # refusal_mode default "off"
+        result = await pipeline.query(_OBS_QUERY)
+        assert calls == 0
+        assert "odmowa_sygnaly" not in result.metadata
+
+    async def test_lexical_failure_is_named_not_silent(
+        self, obs_storage: Any, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The most important test in this unit: a raising storage must
+        neither crash the recall nor be reported as `leksyka_would_refuse=
+        False` (a silent, wrong "this layer let it through") -- it must be
+        named `None`/unmeasured, with the exception text in the reason."""
+        from surreal_memory.engine.retrieval import ReflexPipeline
+
+        _obs_reranker_enabled(monkeypatch)
+        monkeypatch.setattr(
+            "surreal_memory.engine.reranker.rerank_activations",
+            _obs_fake_rerank(raw_top1=0.9, degraded_reason=None),
+        )
+
+        async def _boom(tokens: list[str]) -> bool:
+            raise RuntimeError("db down")
+
+        monkeypatch.setattr(obs_storage, "any_neuron_matches_any_token", _boom, raising=False)
+        pipeline = ReflexPipeline(obs_storage, _obs_config(refusal_mode="observe"))
+        result = await pipeline.query(_OBS_QUERY)
+        sygnaly = result.metadata["odmowa_sygnaly"]
+        assert sygnaly["leksyka_would_refuse"] is None
+        assert sygnaly["leksyka_zbadana"] is False
+        assert sygnaly["leksyka_niezbadana_powod"] is not None
+        assert "db down" in sygnaly["leksyka_niezbadana_powod"]
+        # recall must still answer normally -- observation never refuses.
+        assert result.synthesis_method != "insufficient_signal"

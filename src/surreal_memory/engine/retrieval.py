@@ -21,6 +21,7 @@ from surreal_memory.engine.causal_traversal import (
     trace_causal_chain,
     trace_event_sequence,
 )
+from surreal_memory.engine.leksyka import tokeny_do_sprawdzenia
 from surreal_memory.engine.lifecycle import ReinforcementManager
 from surreal_memory.engine.query_expansion import expand_via_graph
 from surreal_memory.engine.reconstruction import (
@@ -591,6 +592,22 @@ class ReflexPipeline:
         # 4.7 Deprioritize disputed neurons (conflict resolution)
         activations, disputed_ids = await self._deprioritize_disputed(activations)
 
+        # W3 leksyka/gibberish signal (program smem-recall-trzy-warstwy, unit
+        # U2): computed BEFORE gate 4.8 (and thus before `check_sufficiency`)
+        # so the signal is available even when 4.8 short-circuits the rest
+        # of the pipeline. ONLY in "observe" — "off"/"enforce" issue zero
+        # lexical queries and pay zero extra cost, matching every other W3
+        # signal in this method.
+        _leksyka_would_refuse: bool | None = None
+        _leksyka_tokenow = 0
+        _leksyka_niezbadana_powod: str | None = None
+        if self._config.refusal_mode == "observe":
+            (
+                _leksyka_would_refuse,
+                _leksyka_tokenow,
+                _leksyka_niezbadana_powod,
+            ) = await self._leksyka_sygnal(query)
+
         # 4.8 Sufficiency check: early exit if signal is too weak
         from surreal_memory.engine.sufficiency import check_sufficiency
 
@@ -653,6 +670,16 @@ class ReflexPipeline:
                 "m4_measured": m4_unmeasured_reason is None,
                 "m4_unmeasured_reason": m4_unmeasured_reason,
                 "refusal_mode": self._config.refusal_mode,
+                # W3 leksyka/gibberish signal (unit U2): same "unmeasured is
+                # not a negative" discipline as M4 above — `leksyka_zbadana`
+                # is False whenever the check could not run (unsupported
+                # storage, an exception, or no token long enough), and
+                # `leksyka_niezbadana_powod` names the reason instead of
+                # letting the gap collapse into a silent "would not refuse".
+                "leksyka_would_refuse": _leksyka_would_refuse,
+                "leksyka_tokenow": _leksyka_tokenow,
+                "leksyka_zbadana": _leksyka_niezbadana_powod is None,
+                "leksyka_niezbadana_powod": _leksyka_niezbadana_powod,
             }
 
         if not _sufficiency.sufficient:
@@ -1147,6 +1174,42 @@ class ReflexPipeline:
                 logger.debug("Session recording failed (non-critical)", exc_info=True)
 
         return result
+
+    async def _leksyka_sygnal(self, query: str) -> tuple[bool | None, int, str | None]:
+        """W3 lexical/gibberish signal (program smem-recall-trzy-warstwy, unit
+        U2): "no token of the query appears anywhere in the base" -> likely
+        gibberish. ONLY called from `query_with_stimulus` when
+        `refusal_mode == "observe"`; NEVER causes a refusal itself, only
+        reports what the signal WOULD have been.
+
+        Returns `(would_refuse, liczba_tokenow, powod_niezbadania)`:
+          - `would_refuse` is `True`/`False` when the check actually ran, or
+            `None` when it could not be measured for this query.
+          - `liczba_tokenow` is the number of (deduped, length-filtered)
+            tokens the check considered — 0 when there was nothing to check.
+          - `powod_niezbadania` is `None` when measured, otherwise a specific
+            reason: the storage backend has no lexical lookup at all (declared
+            on `NeuralStorage` as a `NotImplementedError` default — e.g.
+            `SharedStorage`; both `SurrealDBStorage` and `InMemoryStorage`
+            implement it for real, see `tests/unit/test_storage_parity.py`),
+            the query raised some other exception, or the query had no token
+            reaching `refusal_observe_leksyka_min_token_len`. Cisza nie jest
+            sukcesem — a degraded/unavailable check is NAMED, never silently
+            folded into "would not have refused".
+        """
+        tokens = tokeny_do_sprawdzenia(query, self._config.refusal_observe_leksyka_min_token_len)
+        if not tokens:
+            return None, 0, "no query token of the required length"
+        check = getattr(self._storage, "any_neuron_matches_any_token", None)
+        if check is None:
+            return None, len(tokens), "storage does not support lexical token lookup"
+        try:
+            found = await check(tokens)
+        except NotImplementedError:
+            return None, len(tokens), "storage does not support lexical token lookup"
+        except Exception as exc:
+            return None, len(tokens), f"{type(exc).__name__}: {exc}"
+        return (not found), len(tokens), None
 
     async def _auto_select_strategy(self) -> str:
         """Auto-select activation strategy based on graph density.

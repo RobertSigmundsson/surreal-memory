@@ -224,6 +224,21 @@ class NeuralStorage(ABC):
             neurons = [n for n in neurons if len(n.content) >= min_content_len]
         return neurons[:limit]
 
+    async def any_neuron_matches_any_token(self, tokens: list[str]) -> bool:
+        """True iff at least one neuron in this brain has ``content`` matching ANY of
+        ``tokens`` via full-text search — the storage primitive behind the W3
+        lexical/gibberish signal (program ``smem-recall-trzy-warstwy``, unit U2,
+        ``engine/leksyka.py``).
+
+        Raises ``NotImplementedError`` when the backend has no full-text index to check
+        against. That is deliberately different from returning ``False``: "this backend
+        cannot check" and "no neuron contains any of these tokens" lead to different
+        caller decisions (``engine/retrieval.py``'s ``_leksyka_sygnal`` reports the former
+        as unmeasured, never as a negative), and collapsing them into ``False`` would
+        silently hide a missing capability.
+        """
+        raise NotImplementedError(f"{type(self).__name__} has no lexical token lookup")
+
     @abstractmethod
     async def suggest_neurons(
         self,

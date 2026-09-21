@@ -330,6 +330,18 @@ class BrainConfig:
     refusal_observe_min_neuron_count: int = 15
     refusal_observe_min_anchor_sim: float = 0.524835
     refusal_observe_rerank_floor: float = 0.002146
+    # Program smem-recall-trzy-warstwy, unit U2 (W3 leksyka/gibberish layer):
+    # used EXCLUSIVELY in `refusal_mode="observe"` — never read in "off"/
+    # "enforce", never causes an actual refusal. Minimum token length (after
+    # `engine/leksyka.tokenizuj`) a query token must reach before it is
+    # checked against the base via `any_neuron_matches_any_token`. Measured
+    # on the 82-query apparatus (program smem-recall-trzy-warstwy U1/U2
+    # measurement pass): "no token of length >= 4 appears anywhere in the
+    # base" flags gibberish 5/5 while firing 0/49 on golden queries; at
+    # length >= 3 the gibberish catch rate drops to 4/5 (short tokens like
+    # `zzz`/`dd` collide with hex fragments already present in the base) —
+    # hence 4, not 3.
+    refusal_observe_leksyka_min_token_len: int = 4
 
     def with_updates(self, **kwargs: Any) -> BrainConfig:
         """Create a new config with updated values."""
