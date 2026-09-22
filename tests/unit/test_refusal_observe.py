@@ -627,3 +627,362 @@ class TestLeksykaObserveSignal:
         assert "db down" in sygnaly["leksyka_niezbadana_powod"]
         # recall must still answer normally -- observation never refuses.
         assert result.synthesis_method != "insufficient_signal"
+
+
+# ---------------------------------------------------------------------------
+# Program smem-recall-trzy-warstwy, unit U3: Jev (TypeSafe System One)
+# refusal-observability signal.
+#
+# `engine/jev_pytania.py` holds the (versioned) questions + starting
+# threshold; `engine/jev_gate.py` is the stdlib-`urllib` HTTP client
+# (`zapytaj_jev`/`OdpowiedzJev`/`redaguj`); `engine/retrieval.py` wires it in
+# right after step 4.9, gated on BOTH `refusal_mode == "observe"` and
+# `jev.mode == "observe"`. Direct tests below drive `zapytaj_jev` itself,
+# monkeypatching the ONE seam `jev_gate._blocking_post` (never a real
+# connection, per the program's hard network ban). The two pipeline tests
+# reuse the `obs_storage`/`_obs_config`/`_obs_fake_rerank` harness above,
+# patching `[jev]` the same way `_obs_reranker_enabled` patches `[reranker]`.
+# ---------------------------------------------------------------------------
+
+
+def _obs_jev_enabled(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    jev_mode: str = "observe",
+    api_key_env: str = "SMEM_TEST_JEV_KEY",
+) -> None:
+    """Patches BOTH `[reranker]` (so `neuron_contents` gets populated -- Jev's
+    candidates are the reranker's fetched content, no second storage read)
+    and `[jev]` on the effective app config, the same seam
+    `_obs_reranker_enabled` uses alone."""
+    import dataclasses
+
+    from surreal_memory.unified_config import JevConfig, RerankerConfig, get_config
+
+    patched = dataclasses.replace(
+        get_config(),
+        reranker=RerankerConfig(enabled=True, endpoint="http://fake-reranker.invalid/v1"),
+        jev=JevConfig(mode=jev_mode, api_key_env=api_key_env),
+    )
+    monkeypatch.setattr("surreal_memory.unified_config.get_config", lambda reload=False: patched)
+
+
+def _jev_ok_body(**answers_overrides: Any) -> bytes:
+    import json as _json
+
+    answers = {
+        "odpowiada": {"type": "noul", "noul": 0.97},
+        "sensowne": {"type": "noul", "noul": 0.98},
+        "ta_domena": {"type": "noul", "noul": 0.9},
+        "jakosc": {"type": "score", "score": 3, "confidence": 0.8},
+    }
+    answers.update(answers_overrides)
+    return _json.dumps(
+        {"model": "jev-1.13.0", "answers": answers, "usage": {"input_tokens": 401}}
+    ).encode("utf-8")
+
+
+class TestJevGateDirect:
+    """Direct tests of `engine/jev_gate.zapytaj_jev` -- no pipeline, no
+    storage, the atrapa is `jev_gate._blocking_post` (the ONE HTTP-response
+    mock this program allows, per the runner's hard ban on any other mock in
+    production code paths)."""
+
+    async def test_jev_body_shape_has_pin_and_no_extra_top_level(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import json as _json
+
+        from surreal_memory.engine import jev_gate
+
+        captured: dict[str, Any] = {}
+
+        def _fake_post(
+            url: str, body: bytes, headers: dict[str, str], timeout_s: float
+        ) -> tuple[int, bytes]:
+            captured["url"] = url
+            captured["body"] = _json.loads(body)
+            captured["headers"] = headers
+            return 200, _jev_ok_body()
+
+        monkeypatch.setattr(jev_gate, "_blocking_post", _fake_post)
+        result = await jev_gate.zapytaj_jev(
+            query="gdzie mieszka Emma",
+            memories="Emma mieszka w Oslo",
+            gateway_url="http://127.0.0.1:4001/typesafe/v1/systemone",
+            api_key="test-key",
+            model="jev-1.13.0",
+            timeout_ms=2000,
+            sekrety=[],
+        )
+        assert result.status == "OK"
+        body = captured["body"]
+        assert set(body.keys()) == {"state", "model", "questions"}
+        assert body["model"] == "jev-1.13.0"
+        assert set(body["questions"].keys()) == {
+            "odpowiada",
+            "sensowne",
+            "ta_domena",
+            "jakosc",
+        }
+        assert captured["headers"]["Authorization"] == "Bearer test-key"
+
+    async def test_jev_timeout_is_niedostepny_not_a_low_score(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from surreal_memory.engine import jev_gate
+
+        def _fake_post(
+            url: str, body: bytes, headers: dict[str, str], timeout_s: float
+        ) -> tuple[int, bytes]:
+            raise TimeoutError("timed out")
+
+        monkeypatch.setattr(jev_gate, "_blocking_post", _fake_post)
+        result = await jev_gate.zapytaj_jev(
+            query="q",
+            memories="m",
+            gateway_url="http://127.0.0.1:4001/typesafe/v1/systemone",
+            api_key="test-key",
+            model="jev-1.13.0",
+            timeout_ms=50,
+            sekrety=[],
+        )
+        assert result.status == "JEV_NIEDOSTEPNY"
+        assert result.odpowiada is None
+        assert result.sensowne is None
+        assert result.ta_domena is None
+        assert result.jakosc is None
+        assert result.jakosc_conf is None
+        assert result.tok is None
+        assert result.powod is not None
+
+    async def test_jev_403_is_odrzucil_with_named_reason(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from surreal_memory.engine import jev_gate
+
+        def _fake_post(
+            url: str, body: bytes, headers: dict[str, str], timeout_s: float
+        ) -> tuple[int, bytes]:
+            return 403, b"forbidden: prefixed model rejected"
+
+        monkeypatch.setattr(jev_gate, "_blocking_post", _fake_post)
+        result = await jev_gate.zapytaj_jev(
+            query="q",
+            memories="m",
+            gateway_url="http://127.0.0.1:4001/typesafe/v1/systemone",
+            api_key="test-key",
+            model="typesafe/jev-1.13.0",
+            timeout_ms=2000,
+            sekrety=[],
+        )
+        assert result.status == "JEV_ODRZUCIL"
+        assert result.powod is not None
+        assert "403" in result.powod
+        assert result.odpowiada is None
+
+    async def test_jev_missing_key_never_calls_network(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from surreal_memory.engine import jev_gate
+
+        wywolania = 0
+
+        def _fake_post(
+            url: str, body: bytes, headers: dict[str, str], timeout_s: float
+        ) -> tuple[int, bytes]:
+            nonlocal wywolania
+            wywolania += 1
+            return 200, _jev_ok_body()
+
+        monkeypatch.setattr(jev_gate, "_blocking_post", _fake_post)
+        result = await jev_gate.zapytaj_jev(
+            query="q",
+            memories="m",
+            gateway_url="http://127.0.0.1:4001/typesafe/v1/systemone",
+            api_key="",
+            model="jev-1.13.0",
+            timeout_ms=2000,
+            sekrety=[],
+        )
+        assert result.status == "JEV_NIEDOSTEPNY"
+        assert result.powod == "brak klucza"
+        assert wywolania == 0
+
+    async def test_jev_redacts_injected_secret(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from surreal_memory.engine import jev_gate
+
+        sekret = "sk-TESTOWY-NIE-JEST-PRAWDZIWY-0123456789"
+        captured: dict[str, Any] = {}
+
+        def _fake_post(
+            url: str, body: bytes, headers: dict[str, str], timeout_s: float
+        ) -> tuple[int, bytes]:
+            captured["body_text"] = body.decode("utf-8")
+            return 200, _jev_ok_body()
+
+        monkeypatch.setattr(jev_gate, "_blocking_post", _fake_post)
+        result = await jev_gate.zapytaj_jev(
+            query="q",
+            memories=f"leaked secret is {sekret} inside memories",
+            gateway_url="http://127.0.0.1:4001/typesafe/v1/systemone",
+            api_key="test-key",
+            model="jev-1.13.0",
+            timeout_ms=2000,
+            sekrety=[sekret],
+        )
+        assert sekret not in captured["body_text"]
+        assert result.zredagowano == 1
+
+    def test_sha256_pytan_is_stable(self) -> None:
+        from surreal_memory.engine.jev_pytania import PYTANIA, sha256_pytan
+
+        a = sha256_pytan()
+        b = sha256_pytan()
+        assert a == b
+        assert len(a) == 64
+
+        original = PYTANIA["odpowiada"]["instructions"]
+        try:
+            PYTANIA["odpowiada"]["instructions"] = original + " (zmienione dla testu)"
+            assert sha256_pytan() != a
+        finally:
+            PYTANIA["odpowiada"]["instructions"] = original
+
+
+class TestJevPipelineWiring:
+    """End-to-end over `obs_storage`, the same harness as
+    `TestObserveNeverReportsUnmeasuredAsNegative`/`TestLeksykaObserveSignal`
+    above -- drives the REAL `ReflexPipeline`, replacing only
+    `jev_gate._blocking_post` (never a real connection)."""
+
+    async def test_jev_off_makes_no_call(
+        self, obs_storage: Any, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from surreal_memory.engine import jev_gate
+        from surreal_memory.engine.retrieval import ReflexPipeline
+
+        _obs_jev_enabled(monkeypatch, jev_mode="off")
+        monkeypatch.setattr(
+            "surreal_memory.engine.reranker.rerank_activations",
+            _obs_fake_rerank(raw_top1=0.9, degraded_reason=None),
+        )
+        wywolania = 0
+
+        def _fake_post(
+            url: str, body: bytes, headers: dict[str, str], timeout_s: float
+        ) -> tuple[int, bytes]:
+            nonlocal wywolania
+            wywolania += 1
+            return 200, _jev_ok_body()
+
+        monkeypatch.setattr(jev_gate, "_blocking_post", _fake_post)
+        pipeline = ReflexPipeline(obs_storage, _obs_config(refusal_mode="observe"))
+        result = await pipeline.query(_OBS_QUERY)
+        assert wywolania == 0
+        sygnaly = result.metadata["odmowa_sygnaly"]
+        assert not any(k.startswith("jev_") for k in sygnaly)
+
+    async def test_jev_would_refuse_is_none_when_status_not_ok(
+        self, obs_storage: Any, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from surreal_memory.engine import jev_gate
+        from surreal_memory.engine.retrieval import ReflexPipeline
+
+        _obs_jev_enabled(monkeypatch, jev_mode="observe")
+        monkeypatch.setenv("SMEM_TEST_JEV_KEY", "test-key-value")
+        monkeypatch.setattr(
+            "surreal_memory.engine.reranker.rerank_activations",
+            _obs_fake_rerank(raw_top1=0.9, degraded_reason=None),
+        )
+
+        def _fake_post(
+            url: str, body: bytes, headers: dict[str, str], timeout_s: float
+        ) -> tuple[int, bytes]:
+            return 500, b"internal error"
+
+        monkeypatch.setattr(jev_gate, "_blocking_post", _fake_post)
+        pipeline = ReflexPipeline(obs_storage, _obs_config(refusal_mode="observe"))
+        result = await pipeline.query(_OBS_QUERY)
+        sygnaly = result.metadata["odmowa_sygnaly"]
+        assert sygnaly["jev_status"] == "JEV_ODRZUCIL", sygnaly
+        assert sygnaly["jev_would_refuse"] is None
+        assert sygnaly["jev_odpowiada"] is None
+        # recall must still answer normally -- observation never refuses.
+        assert result.synthesis_method != "insufficient_signal"
+
+
+class TestJevUnmeasuredIsNamed:
+    """Runner review of U3: "Jev was not measured" must carry the same key set
+    plus a NAMED `jev_powod` — never the absence of `jev_*` keys (which means
+    observation is OFF) and never a quiet `None` without a reason."""
+
+    async def test_early_exit_at_48_names_jev_as_never_called(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import dataclasses
+
+        from surreal_memory.core.fiber import Fiber
+        from surreal_memory.core.neuron import Neuron, NeuronType
+        from surreal_memory.engine.retrieval import ReflexPipeline
+        from surreal_memory.storage.memory_store import InMemoryStorage
+        from surreal_memory.unified_config import JevConfig, get_config
+
+        patched = dataclasses.replace(get_config(), jev=JevConfig(mode="observe"))
+        monkeypatch.setattr(
+            "surreal_memory.unified_config.get_config", lambda reload=False: patched
+        )
+        s = InMemoryStorage()
+        brain = Brain.create(name="jev_early_exit")
+        await s.save_brain(brain)
+        s.set_brain(brain.id)
+        n1 = Neuron.create(type=NeuronType.CONCEPT, content="Emma lives in Oslo Norway")
+        await s.add_neuron(n1)
+        await s.add_fiber(
+            Fiber.create(
+                neuron_ids={n1.id}, synapse_ids=set(), anchor_neuron_id=n1.id, summary=n1.content
+            )
+        )
+        pipeline = ReflexPipeline(s, _obs_config(refusal_mode="observe"))
+        # a query with no anchors at all -> gate 1 `no_anchors` short-circuits at 4.8
+        result = await pipeline.query("qwzlmnprt vxbdfghj")
+        assert result.synthesis_method == "insufficient_signal"
+        sygnaly = result.metadata["odmowa_sygnaly"]
+        assert sygnaly["jev_status"] == "JEV_NIEDOSTEPNY"
+        assert sygnaly["jev_would_refuse"] is None
+        assert "4.8" in sygnaly["jev_powod"]
+        await s.close()
+
+    async def test_measured_jev_carries_powod_none_and_failure_carries_reason(
+        self, obs_storage: Any, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import dataclasses
+
+        from surreal_memory.engine import jev_gate
+        from surreal_memory.engine.retrieval import ReflexPipeline
+        from surreal_memory.unified_config import JevConfig, RerankerConfig, get_config
+
+        monkeypatch.setattr(
+            "surreal_memory.engine.reranker.rerank_activations",
+            _obs_fake_rerank(raw_top1=0.9, degraded_reason=None),
+        )
+        # ONE patched config carrying BOTH seams: the reranker (so 4.9 runs and
+        # candidate contents exist) and jev observe. Building the jev patch from
+        # the ORIGINAL config would silently drop the reranker and turn this into
+        # a "no candidate contents" case — measured while writing this test.
+        patched = dataclasses.replace(
+            get_config(),
+            reranker=RerankerConfig(enabled=True, endpoint="http://fake-reranker.invalid/v1"),
+            jev=JevConfig(mode="observe", api_key_file=""),
+        )
+        monkeypatch.setattr(
+            "surreal_memory.unified_config.get_config", lambda reload=False: patched
+        )
+        monkeypatch.setenv("LITELLM_KEY_ROJ_JEV", "klucz-testowy-nieprawdziwy")
+        monkeypatch.setattr(jev_gate, "_blocking_post", lambda *a, **k: (403, b'{"error":"scope"}'))
+        pipeline = ReflexPipeline(obs_storage, _obs_config(refusal_mode="observe"))
+        result = await pipeline.query(_OBS_QUERY)
+        sygnaly = result.metadata["odmowa_sygnaly"]
+        assert sygnaly["jev_status"] == "JEV_ODRZUCIL", sygnaly
+        assert "403" in sygnaly["jev_powod"]
+        assert sygnaly["jev_would_refuse"] is None

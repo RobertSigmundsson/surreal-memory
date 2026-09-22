@@ -8,6 +8,7 @@ import dataclasses
 import heapq
 import logging
 import math
+import os
 import time
 from datetime import datetime
 from typing import TYPE_CHECKING, Any
@@ -21,6 +22,8 @@ from surreal_memory.engine.causal_traversal import (
     trace_causal_chain,
     trace_event_sequence,
 )
+from surreal_memory.engine.jev_gate import OdpowiedzJev, resolve_api_key, zapytaj_jev
+from surreal_memory.engine.jev_pytania import PROG_ODPOWIADA_STARTOWY, sha256_pytan
 from surreal_memory.engine.leksyka import tokeny_do_sprawdzenia
 from surreal_memory.engine.lifecycle import ReinforcementManager
 from surreal_memory.engine.query_expansion import expand_via_graph
@@ -613,6 +616,34 @@ class ReflexPipeline:
                 _leksyka_niezbadana_powod,
             ) = await self._leksyka_sygnal(query)
 
+        # W3 Jev signal (unit U3) -- declared here (before `_make_odmowa_sygnaly`
+        # closes over it) but only ever populated after 4.9, since it needs the
+        # reranked `activations`/`neuron_contents`. `None` means "jev.mode is not
+        # 'observe'" (key omitted entirely from `odmowa_sygnaly`, see the
+        # closure below) -- never confused with "the call ran and failed", which
+        # is `jev_status="JEV_NIEDOSTEPNY"`/`"JEV_ODRZUCIL"` inside a populated dict.
+        _jev_sygnaly: dict[str, Any] | None = None
+
+        def _jev_niedostepny(powod: str) -> dict[str, Any]:
+            # Runner review (U3): every "Jev was not measured" state carries the
+            # SAME key set as a measured one plus a NAMED reason. Absence of the
+            # `jev_*` keys means "jev.mode is off"; presence with
+            # JEV_NIEDOSTEPNY + `jev_powod` means "observation was on, but this
+            # query could not be scored" — the two must never look alike in the
+            # weekly report (cisza nie jest sukcesem).
+            return {
+                "jev_status": "JEV_NIEDOSTEPNY",
+                "jev_odpowiada": None,
+                "jev_sensowne": None,
+                "jev_ta_domena": None,
+                "jev_jakosc": None,
+                "jev_would_refuse": None,
+                "jev_ms": None,
+                "jev_zredagowano": 0,
+                "jev_pytania_sha": sha256_pytan(),
+                "jev_powod": powod,
+            }
+
         # 4.8 Sufficiency check: early exit if signal is too weak
         from surreal_memory.engine.sufficiency import check_sufficiency
 
@@ -657,7 +688,7 @@ class ReflexPipeline:
                 _w3_gate = "reranker_floor"
             else:
                 _w3_gate = ""
-            return {
+            _sygnaly = {
                 "w3_would_refuse": bool(_sufficiency.would_refuse or m4_would_refuse),
                 "w3_gate": _w3_gate,
                 "neuron_count": _sufficiency.metrics.neuron_count,
@@ -686,6 +717,13 @@ class ReflexPipeline:
                 "leksyka_zbadana": _leksyka_niezbadana_powod is None,
                 "leksyka_niezbadana_powod": _leksyka_niezbadana_powod,
             }
+            # W3 Jev signal (unit U3): keys exist ONLY when `jev.mode ==
+            # "observe"` (config-gated, independent of whether the call itself
+            # succeeded) -- `jev.mode == "off"` must leave `odmowa_sygnaly`
+            # with ZERO `jev_*` keys, not `jev_*` keys full of `None`.
+            if _jev_sygnaly is not None:
+                _sygnaly.update(_jev_sygnaly)
+            return _sygnaly
 
         if not _sufficiency.sufficient:
             _early_latency = (time.perf_counter() - start_time) * 1000
@@ -713,6 +751,14 @@ class ReflexPipeline:
                     **_embedding_anchor_meta,
                 },
             )
+            if self._config.refusal_mode == "observe":
+                from surreal_memory.unified_config import get_config as _get_app_config_48
+
+                if _get_app_config_48().jev.mode == "observe":
+                    # Jev is launched only after 4.9; a 4.8 short-circuit means it
+                    # was never called for this query. Say so — do not leave the
+                    # `jev_*` keys out as if observation were off.
+                    _jev_sygnaly = _jev_niedostepny("early exit at gate 4.8; Jev never called")
             _odmowa_sygnaly = _make_odmowa_sygnaly(
                 m4_would_refuse=False,
                 rerank_raw_top1=None,
@@ -759,6 +805,12 @@ class ReflexPipeline:
         def _capture_rerank_raw_top1(raw_score: float) -> None:
             nonlocal _rerank_raw_top1
             _rerank_raw_top1 = raw_score
+
+        # Populated below only when the reranker actually fetched candidate
+        # content (nid -> content); stays empty otherwise. Program
+        # smem-recall-trzy-warstwy unit U3 reuses this SAME fetch for the Jev
+        # signal (no second `get_neurons_batch` read) — see the block after 4.9b.
+        neuron_contents: dict[str, str] = {}
 
         _rr = _get_app_config().reranker
         if _rr.enabled and len(activations) > 1:
@@ -897,6 +949,58 @@ class ReflexPipeline:
                     logger.debug("Deferred write flush failed (non-critical)", exc_info=True)
             return _early_result
 
+        # Program smem-recall-trzy-warstwy, unit U3: Jev (TypeSafe System One)
+        # refusal-observability signal (fourth W3 layer, after reranker/leksyka/
+        # M4). Launched as an `asyncio.Task` HERE, right after 4.9/4.9b so it can
+        # reuse the reranked `activations` + `neuron_contents` (no second
+        # `get_neurons_batch` read) — and only `await`ed just before
+        # `_odmowa_sygnaly` is built near the end of this method (H6/K7): it
+        # runs CONCURRENTLY with steps 5-9 (fiber matching, subgraph extraction,
+        # answer reconstruction, `format_context`) instead of adding its own
+        # latency on top of them.
+        #
+        # 🛑 Gated on BOTH knobs explicitly, NOT just `jev.mode`: reaching this
+        # line does NOT imply `refusal_mode == "observe"` -- the 4.9b
+        # `if`/`elif` chain above only short-circuits into an early return for
+        # "off"/"enforce" when an operator has also set `reranker_refusal_floor`
+        # (default `None` = inert), so the common "off" default with no floor
+        # configured falls through to here untouched. Without this check Jev
+        # would fire on every "off" recall, contradicting the mandate that it
+        # is a strict opt-in observability layer.
+        _jev_cfg = _get_app_config().jev
+        _jev_task: asyncio.Task[OdpowiedzJev] | None = None
+        if self._config.refusal_mode == "observe" and _jev_cfg.mode == "observe":
+            _jev_top_nids = [
+                nid
+                for nid, _ in sorted(
+                    activations.items(), key=lambda x: x[1].activation_level, reverse=True
+                )
+                if nid in neuron_contents
+            ][: _jev_cfg.top_k]
+            if _jev_top_nids:
+                _jev_memories = "\n\n".join(neuron_contents[nid] for nid in _jev_top_nids)[
+                    : _jev_cfg.max_chars
+                ]
+                _jev_api_key = resolve_api_key(_jev_cfg.api_key_env, _jev_cfg.api_key_file)
+                _jev_sekrety = [v for name in _jev_cfg.redact_env if (v := os.environ.get(name))]
+                _jev_task = asyncio.create_task(
+                    zapytaj_jev(
+                        query=query,
+                        memories=_jev_memories,
+                        gateway_url=_jev_cfg.gateway_url,
+                        api_key=_jev_api_key,
+                        model=_jev_cfg.model,
+                        timeout_ms=_jev_cfg.timeout_ms,
+                        sekrety=_jev_sekrety,
+                    )
+                )
+            else:
+                # No candidates -- e.g. the reranker never ran for this query
+                # (disabled, or a single activation) -- without a NEW read there
+                # is nothing to send Jev. Named, not a silent skip.
+                logger.debug("Jev skipped: no candidate contents available")
+                _jev_sygnaly = _jev_niedostepny("no candidate contents; reranking never ran")
+
         # 5. Find matching fibers
         query_tokens = set(query.lower().split())
         fibers_matched = await self._find_matching_fibers(
@@ -1016,6 +1120,53 @@ class ReflexPipeline:
             _m4_unmeasured = "no raw cross-encoder top-1 score for this query"
         else:
             _m4_unmeasured = None
+
+        # Program smem-recall-trzy-warstwy, unit U3: `await` the Jev task
+        # created right after 4.9/4.9b -- this is the ONE point it can block,
+        # and only up to `timeout_ms` (+ a small safety margin in case the
+        # socket timeout inside `zapytaj_jev` ever fails to bound the thread) --
+        # everything since (steps 5-9: fiber matching, subgraph extraction,
+        # answer reconstruction, `format_context`) already ran concurrently
+        # with it (H6/K7).
+        if _jev_task is not None:
+            try:
+                _jev_odpowiedz = await asyncio.wait_for(
+                    _jev_task, timeout=(_jev_cfg.timeout_ms / 1000.0) + 0.25
+                )
+            except TimeoutError:
+                _jev_task.cancel()
+                _jev_odpowiedz = OdpowiedzJev(
+                    status="JEV_NIEDOSTEPNY",
+                    odpowiada=None,
+                    sensowne=None,
+                    ta_domena=None,
+                    jakosc=None,
+                    jakosc_conf=None,
+                    ms=float(_jev_cfg.timeout_ms),
+                    tok=None,
+                    zredagowano=0,
+                    powod="asyncio.wait_for exceeded the timeout_ms safety margin",
+                )
+            if _jev_odpowiedz.status == "OK" and _jev_odpowiedz.odpowiada is not None:
+                _jev_would_refuse: bool | None = _jev_odpowiedz.odpowiada < PROG_ODPOWIADA_STARTOWY
+            else:
+                # NEVER `False` when unmeasured -- "did not refuse" and
+                # "could not tell" must stay distinguishable (cisza nie jest
+                # sukcesem), same discipline as `m4_would_refuse`/`m4_measured`.
+                _jev_would_refuse = None
+            _jev_sygnaly = {
+                "jev_status": _jev_odpowiedz.status,
+                "jev_odpowiada": _jev_odpowiedz.odpowiada,
+                "jev_sensowne": _jev_odpowiedz.sensowne,
+                "jev_ta_domena": _jev_odpowiedz.ta_domena,
+                "jev_jakosc": _jev_odpowiedz.jakosc,
+                "jev_would_refuse": _jev_would_refuse,
+                "jev_ms": _jev_odpowiedz.ms,
+                "jev_zredagowano": _jev_odpowiedz.zredagowano,
+                "jev_pytania_sha": sha256_pytan(),
+                "jev_powod": _jev_odpowiedz.powod,
+            }
+
         _odmowa_sygnaly = _make_odmowa_sygnaly(
             m4_would_refuse=_m4_would_refuse,
             rerank_raw_top1=_rerank_raw_top1,

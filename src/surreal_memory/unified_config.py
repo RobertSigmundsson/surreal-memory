@@ -1888,6 +1888,73 @@ class WatcherConfig:
         )
 
 
+@dataclass(frozen=True)
+class JevConfig:
+    """Program smem-recall-trzy-warstwy, unit U3 — brama Jev (TypeSafe System
+    One) jako CZWARTY sygnał obserwacyjny po reranker/leksyka/M4, wpięty po
+    kroku 4.9 w `engine/retrieval.py`.
+
+    🛑 `mode`: tylko `"off"` (domyślny) i `"observe"` istnieją w tym
+    programie. `"enforce"` NIE ISTNIEJE — Jev nigdy nie odmawia recallu, tylko
+    obserwuje (identyczna dyscyplina jak `refusal_mode` w `BrainConfig`, ale
+    to jest OSOBNY przełącznik: obie flagi muszą być `"observe"`, żeby wpięcie
+    faktycznie zawołało bramę — patrz `engine/retrieval.py`).
+
+    Klucz API: `api_key_env` to NAZWA zmiennej środowiskowej, nigdy wartość —
+    wartość NIGDY nie trafia do configu ani do logu. Gdy proces (np. smem
+    sprzed rotacji SSOT) nie widzi zmiennej środowiskowej, `api_key_file`
+    (jedna linia, `strip()`) jest fallbackiem.
+    """
+
+    mode: str = "off"  # "off" | "observe" — "enforce" nie istnieje
+    gateway_url: str = "http://127.0.0.1:4001/typesafe/v1/systemone"
+    api_key_env: str = "LITELLM_KEY_ROJ_JEV"
+    api_key_file: str = ""
+    model: str = "jev-1.13.0"
+    timeout_ms: int = 2000
+    top_k: int = 10
+    max_chars: int = 12000
+    # Nazwy zmiennych środowiskowych, których WARTOŚCI mają być wycięte z
+    # `state` przed wysyłką (`engine/jev_gate.redaguj`) — wartości brane z
+    # `os.environ` po tych nazwach, nigdy z pliku sekretów bezpośrednio.
+    redact_env: tuple[str, ...] = (
+        "SURREALDB_PASS",
+        "LITELLM_KEY_ROJ_JEV",
+        "LITELLM_MASTER_KEY",
+        "LITELLM_GW_MASTER_KEY",
+        "TYPESAFE_JEV_API_KEY",
+        "BGE_M3_API_KEY",
+        "ANTHROPIC_OFFICIAL_KEY",
+    )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "mode": self.mode,
+            "gateway_url": self.gateway_url,
+            "api_key_env": self.api_key_env,
+            "api_key_file": self.api_key_file,
+            "model": self.model,
+            "timeout_ms": self.timeout_ms,
+            "top_k": self.top_k,
+            "max_chars": self.max_chars,
+            "redact_env": list(self.redact_env),
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> JevConfig:
+        return cls(
+            mode=str(data.get("mode", "off")),
+            gateway_url=str(data.get("gateway_url", cls.gateway_url)),
+            api_key_env=str(data.get("api_key_env", cls.api_key_env)),
+            api_key_file=str(data.get("api_key_file", "")),
+            model=str(data.get("model", cls.model)),
+            timeout_ms=int(data.get("timeout_ms", 2000)),
+            top_k=int(data.get("top_k", 10)),
+            max_chars=int(data.get("max_chars", 12000)),
+            redact_env=tuple(data.get("redact_env", cls.redact_env)),
+        )
+
+
 @dataclass
 class UnifiedConfig:
     """Unified configuration for Surreal-Memory.
@@ -1930,6 +1997,7 @@ class UnifiedConfig:
         "decay_telemetry",
         "prompt_recall",
         "reasoning_training",
+        "jev",
         "cli",
     )
 
@@ -2014,6 +2082,10 @@ class UnifiedConfig:
 
     # Per-prompt memory recall in the UserPromptSubmit hook (opt-in, off by default)
     prompt_recall: PromptRecallConfig = field(default_factory=PromptRecallConfig)
+
+    # Jev (TypeSafe System One) refusal-observability signal, program
+    # smem-recall-trzy-warstwy unit U3 (opt-in, off by default)
+    jev: JevConfig = field(default_factory=JevConfig)
 
     # CLI preferences
     json_output: bool = False
@@ -2116,6 +2188,7 @@ class UnifiedConfig:
             decay_telemetry=DecayTelemetryConfig.from_dict(data.get("decay_telemetry", {})),
             reasoning_training=_load_reasoning_settings(data.get("reasoning_training", {})),
             prompt_recall=PromptRecallConfig.from_dict(data.get("prompt_recall", {})),
+            jev=JevConfig.from_dict(data.get("jev", {})),
             json_output=data.get("cli", {}).get("json_output", False),
             default_depth=data.get("cli", {}).get("default_depth"),
             default_max_tokens=data.get("cli", {}).get("default_max_tokens", 500),
@@ -2396,6 +2469,21 @@ class UnifiedConfig:
             f"timeout_seconds = {self.prompt_recall.timeout_seconds}",
             "",
             *self._reasoning_toml_lines(),
+            "",
+            "# Jev (TypeSafe System One) refusal-observability signal (opt-in, off by",
+            '# default). mode: "off" | "observe" -- "enforce" does not exist in this',
+            "# program. api_key_env names the env var (never the value); api_key_file is",
+            "# a fallback path to a single-line secret file.",
+            "[jev]",
+            f'mode = "{_sanitize_toml_str(self.jev.mode)}"',
+            f'gateway_url = "{_sanitize_toml_url(self.jev.gateway_url)}"',
+            f'api_key_env = "{_sanitize_toml_str(self.jev.api_key_env)}"',
+            f'api_key_file = "{_sanitize_toml_str(self.jev.api_key_file)}"',
+            f'model = "{_sanitize_toml_str(self.jev.model)}"',
+            f"timeout_ms = {self.jev.timeout_ms}",
+            f"top_k = {self.jev.top_k}",
+            f"max_chars = {self.jev.max_chars}",
+            f"redact_env = [{', '.join(repr(r) for r in self.jev.redact_env)}]",
             "",
             "# CLI preferences",
             "[cli]",
