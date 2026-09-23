@@ -958,3 +958,105 @@ async def _persist_trace_safe(storage: Any, trace: Any) -> None:
         await storage.add_retrieval_trace(trace)
     except Exception:
         logger.debug("Retrieval trace persist failed (non-critical)", exc_info=True)
+
+
+async def materialize_memories(
+    storage: Any,
+    response: dict[str, Any],
+    result: Any,
+    *,
+    config: Any,
+    limit: int,
+    content_max_chars: int = 1200,
+) -> list[dict[str, Any]]:
+    """Read-only: the recalled fibers as ``[{id, neuron_id, type, content, score, rank}]``.
+
+    Order = ``response["fibers_matched"]`` (the post-filtered list MCP returns, rank 1-based).
+    ``score`` is the anchor's activation level from the pipeline (not a cosine similarity),
+    ``None`` when the pipeline did not record it. Content of an encrypted fiber is decrypted
+    exactly like exact mode. A fiber that cannot be read keeps its rank with empty content —
+    a missing memory stays visible instead of silently shifting the ranks below it.
+    """
+    fids = response.get("fibers_matched")
+    if not isinstance(fids, list):
+        return []
+    levels: dict[str, Any] = {}
+    meta = getattr(result, "metadata", None)
+    if isinstance(meta, dict) and isinstance(meta.get("activation_levels"), dict):
+        levels = meta["activation_levels"]
+    out: list[dict[str, Any]] = []
+    for rank, fid in enumerate(fids[: max(0, limit)], start=1):
+        item: dict[str, Any] = {
+            "id": str(fid),
+            "neuron_id": None,
+            "type": None,
+            "content": "",
+            "score": None,
+            "rank": rank,
+        }
+        fiber = await storage.get_fiber(fid)
+        if fiber is not None:
+            anchor_id = getattr(fiber, "anchor_neuron_id", None)
+            anchor = await storage.get_neuron(anchor_id) if anchor_id else None
+            content = (getattr(anchor, "content", None) if anchor else None) or (
+                getattr(fiber, "summary", None) or ""
+            )
+            if anchor is not None and (getattr(fiber, "metadata", None) or {}).get("encrypted"):
+                content = _decrypt_content(content, storage, config)
+            tm = await storage.get_typed_memory(fid)
+            mem_type = getattr(getattr(tm, "memory_type", None), "value", None) if tm else None
+            if mem_type is None and anchor is not None:
+                mem_type = getattr(getattr(anchor, "type", None), "value", None)
+            level = levels.get(anchor_id) if anchor_id else None
+            item.update(
+                neuron_id=anchor_id,
+                type=mem_type,
+                content=str(content)[:content_max_chars],
+                score=float(level) if isinstance(level, (int, float)) else None,
+            )
+        out.append(item)
+    return out
+
+
+def _decrypt_content(content: str, storage: Any, config: Any) -> str:
+    try:
+        from pathlib import Path
+
+        from surreal_memory.safety.encryption import MemoryEncryptor
+
+        keys_dir_str = getattr(config.encryption, "keys_dir", "")
+        keys_dir = Path(keys_dir_str) if keys_dir_str else (config.data_dir / "keys")
+        return str(MemoryEncryptor(keys_dir=keys_dir).decrypt(content, storage.brain_id or ""))
+    except Exception:
+        logger.debug("Decryption failed while materializing memories", exc_info=True)
+        return content
+
+
+def response_body(
+    outcome: RecallOutcome,
+    memories: list[dict[str, Any]],
+    *,
+    tor: str,
+    elapsed_ms: float,
+) -> dict[str, Any]:
+    """The body of ``POST /v1/recall`` — one mapping for the HTTP shim and an in-process caller."""
+    resp = outcome.response
+    res = outcome.result
+    synthesis = getattr(res, "synthesis_method", None) if res is not None else None
+    latency = getattr(res, "latency_ms", None) if res is not None else None
+    confidence = resp.get("confidence")
+    return {
+        "answer": resp.get("answer"),
+        "confidence": float(confidence) if isinstance(confidence, (int, float)) else 0.0,
+        "sufficient": outcome.path == "pipeline" and synthesis != "insufficient_signal",
+        "memories": memories,
+        "neurons_activated": int(resp.get("neurons_activated") or 0),
+        "trace_id": resp.get("trace_id"),
+        "trace_error": resp.get("trace_error"),
+        "elapsed_ms": round(float(elapsed_ms), 1),
+        "engine_latency_ms": float(latency) if isinstance(latency, (int, float)) else None,
+        "path": outcome.path,
+        "tor": tor,
+        "score_kind": "anchor_activation",
+        "rerank_degraded": bool(resp.get("rerank_degraded")),
+    }

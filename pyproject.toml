@@ -297,6 +297,7 @@ ignore_missing_imports = true
 module = [
     "surreal_memory.server.app",
     "surreal_memory.server.routes.*",
+    "surreal_memory.recall_http",
 ]
 disallow_untyped_decorators = false
 
