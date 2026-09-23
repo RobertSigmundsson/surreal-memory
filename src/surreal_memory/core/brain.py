@@ -89,6 +89,15 @@ class BrainConfig:
     graph_expansion_enabled: bool = True
     graph_expansion_max: int = 10
     graph_expansion_min_weight: float = 0.3
+    # Retrieval: minimum content length for a keyword anchor candidate.
+    # `find_neurons_ranked` orders keyword
+    # anchors by BM25, which is length-biased (b=0.75), so very short neurons score high on a
+    # single term match without carrying the context that makes an anchor useful. 25 characters
+    # is the measured value: it tied with the un-gated variant on the 49-pair golden and lost
+    # nothing, so it is cheap insurance rather than a tuned threshold. Configurable because it
+    # is an empirical number on one brain's content — another brain should be able to move it
+    # without a release. 0 disables the gate.
+    keyword_anchor_min_content_len: int = 25
     # Retrieval: fiber-level vector anchors — measured +5/49 golden hits, the only retriever that reaches a fiber
     # without going through one of its neurons as an anchor. Off by default: it needs
     # `scripts/backfill_fiber_vectors.py` to have populated `fiber.fiber_vec` first, and
