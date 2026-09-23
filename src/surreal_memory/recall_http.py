@@ -195,6 +195,7 @@ def create_app(
             }
             if trace_mode == "force":
                 args["trace"] = True
+            t_api = time.perf_counter()
             outcome = await recall_api.recall(
                 storage,
                 args,
@@ -211,9 +212,12 @@ def create_app(
                 code = 503 if msg == "No brain configured" else 422
                 counters["503" if code == 503 else "422"] += 1
                 return JSONResponse({"error": msg}, status_code=code)
+            api_ms = (time.perf_counter() - t_api) * 1000.0
+            t_mat = time.perf_counter()
             memories = await recall_api.materialize_memories(
                 storage, outcome.response, outcome.result, config=config, limit=req.limit
             )
+            mat_ms = (time.perf_counter() - t_mat) * 1000.0
         finally:
             sem.release()
         elapsed_ms = (time.perf_counter() - t0) * 1000.0
@@ -222,11 +226,14 @@ def create_app(
         if body["trace_error"]:
             logger.warning("recall-http: trace not persisted tor=%s", req.tor)
         logger.info(
-            "recall tor=%s agent=%s q=%s ms=%.0f path=%s trace=%s n_mem=%d",
+            "recall tor=%s agent=%s q=%s ms=%.0f engine=%.0f api=%.0f mat=%.0f path=%s trace=%s n_mem=%d",
             req.tor,
             req.agent_id,
             hashlib.sha256(req.query.encode("utf-8")).hexdigest()[:8],
             elapsed_ms,
+            body["engine_latency_ms"] or -1.0,
+            api_ms,
+            mat_ms,
             outcome.path,
             outcome.trace,
             len(memories),
