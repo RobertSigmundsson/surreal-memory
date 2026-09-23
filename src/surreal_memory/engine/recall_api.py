@@ -44,6 +44,7 @@ TraceStatus = Literal["sync", "sync_error", "background", "off", "skipped"]
 
 # Strong refs for background trace tasks when the caller does not hold its own set.
 _BACKGROUND_TRACE_TASKS: set[asyncio.Task[None]] = set()
+_WARM_TASKS: set[asyncio.Task[bool]] = set()
 
 
 class RecallExtras(Protocol):
@@ -370,6 +371,8 @@ async def recall(
                 pass
 
     permanent_only = bool(args.get("permanent_only", False))
+
+    _warm_reranker(config)
 
     from surreal_memory.engine.retrieval import ReflexPipeline
 
@@ -874,6 +877,32 @@ async def recall(
     )
 
     return RecallOutcome(response, result, "pipeline", trace_status, brain_id)
+
+
+def _warm_reranker(config: Any) -> None:
+    """Start opening the reranker connection now, ~1 s before the pipeline reaches reranking.
+
+    Only for a real http(s) endpoint with pooling on; the request/response of the rerank itself is
+    unchanged. Held by a strong reference; never raises.
+    """
+    try:
+        from surreal_memory.engine import reranker as _rr_mod
+
+        rr = getattr(config, "reranker", None)
+        endpoint = getattr(rr, "endpoint", None) if rr is not None else None
+        if not isinstance(endpoint, str) or not endpoint.strip():
+            endpoint = _rr_mod._rerank_endpoint()
+        if (
+            _rr_mod.KEEPALIVE_S <= 0
+            or getattr(rr, "enabled", False) is not True
+            or not endpoint.startswith(("http://", "https://"))
+        ):
+            return
+        task = asyncio.create_task(asyncio.to_thread(_rr_mod.rozgrzej, endpoint.strip()))
+        _WARM_TASKS.add(task)
+        task.add_done_callback(_WARM_TASKS.discard)
+    except Exception:
+        logger.debug("Reranker warm-up scheduling failed (non-critical)", exc_info=True)
 
 
 async def persist_trace(
