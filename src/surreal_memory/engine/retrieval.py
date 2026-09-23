@@ -14,7 +14,7 @@ from typing import TYPE_CHECKING, Any
 
 from surreal_memory.core.constants import GRAPH_ONLY_PLACEHOLDER
 from surreal_memory.core.fiber import Fiber
-from surreal_memory.core.neuron import NeuronType
+from surreal_memory.core.neuron import Neuron, NeuronType
 from surreal_memory.core.synapse import Synapse, SynapseType
 from surreal_memory.engine.activation import ActivationResult, SpreadingActivation
 from surreal_memory.engine.causal_traversal import (
@@ -50,6 +50,59 @@ __all__ = ["DepthLevel", "ReflexPipeline", "RetrievalResult"]
 logger = logging.getLogger(__name__)
 
 _UNSET = object()  # Sentinel for lazy-init cache
+
+# Semantic anchors: how many neighbours to ask the vector index for. Tombstones
+# and the similarity threshold both thin the result before top_k is taken, so
+# asking for exactly top_k would routinely come up short.
+EMBEDDING_ANCHOR_OVERFETCH = 3
+EMBEDDING_ANCHOR_MIN_LIMIT = 30
+#: One bounded retry when tombstones ate the anchor slots — never a loop.
+TOMBSTONE_RETRY_FACTOR = 4
+
+
+@dataclasses.dataclass(frozen=True)
+class EmbeddingAnchorOutcome:
+    """Anchor ids plus the provenance of how they were found.
+
+    ``source`` is the audit trail: ``knn`` (vector index), ``scan`` (the capped
+    id-ordered page), ``scan-fallback:<reason>``, ``none:<reason>`` or
+    ``disabled``. It reaches ``RetrievalResult.metadata`` so a degraded run is
+    visible in the answer, not only in the log.
+
+    ``query_vec`` carries the embedded query itself so that a second consumer in
+    the same ``query()`` — the fiber-vector retriever — reuses it instead of
+    paying for an identical round-trip to the embedder. It is kept out of
+    ``repr`` (a thousand-odd floats) and is never copied into
+    ``RetrievalResult.metadata``, which selects its fields one by one.
+    """
+
+    anchor_ids: list[str]
+    source: str
+    knn_rows: int = 0
+    tombstones: int = 0
+    above_threshold: int = 0
+    elapsed_ms: float = 0.0
+    query_vec: list[float] | None = dataclasses.field(default=None, repr=False)
+
+
+def _is_knn_result(rows: object) -> bool:
+    """True when ``rows`` really is a list of ``(Neuron, float)`` pairs.
+
+    ``hasattr`` cannot be used to decide whether a backend supports vector
+    search — an ``AsyncMock`` answers True to every attribute and returns a mock
+    — so the shape of the value is what gets checked.
+    """
+    if not isinstance(rows, list):
+        return False
+    return all(
+        isinstance(row, tuple)
+        and len(row) == 2
+        and isinstance(row[0], Neuron)
+        and isinstance(row[1], (int, float))
+        and not isinstance(row[1], bool)
+        for row in rows
+    )
+
 
 # Morphological expansion constants for query term expansion.
 _EXPANSION_SUFFIXES: tuple[str, ...] = (
@@ -192,6 +245,17 @@ class ReflexPipeline:
                 self._embedding_provider = None
         else:
             self._embedding_provider = embedding_provider
+        # Anchor mode is normalised here, not in BrainConfig.__post_init__: a
+        # raise there would make _deserialize_brain_config drop the whole stored
+        # config, so one bad key would reset every setting the brain has.
+        raw_mode = getattr(config, "embedding_anchor_mode", "auto")
+        mode = raw_mode.strip().lower() if isinstance(raw_mode, str) else None
+        if mode not in ("auto", "knn", "scan"):
+            if raw_mode not in (None, "auto"):
+                logger.warning("Unknown embedding_anchor_mode %r, using 'auto'", raw_mode)
+            mode = "auto"
+        self._embedding_anchor_mode = mode
+        self._knn_unsupported_logged = False
         self._activator = SpreadingActivation(storage, config)
         self._reflex_activator = ReflexActivation(storage, config)
 
@@ -348,9 +412,18 @@ class ReflexPipeline:
                 return fiber_result
 
         # 3. Find anchor neurons (time-first) with ranked results
-        anchor_sets, ranked_lists = await self._find_anchors_ranked(
+        anchor_sets, ranked_lists, embedding_outcome = await self._find_anchors_ranked(
             stimulus, exclude_ephemeral=exclude_ephemeral
         )
+        # Provenance of the semantic retriever travels with the result: a query
+        # answered from a fallback path must not look like a query answered from
+        # the index.
+        _embedding_anchor_meta = {
+            "embedding_anchor_source": embedding_outcome.source,
+            "embedding_anchor_count": len(embedding_outcome.anchor_ids),
+            "embedding_anchor_knn_rows": embedding_outcome.knn_rows,
+            "embedding_anchor_ms": round(embedding_outcome.elapsed_ms, 2),
+        }
 
         # 3.5 RRF score fusion: compute initial activation levels from multi-retriever ranks
         anchor_activations: dict[str, float] | None = None
@@ -525,6 +598,7 @@ class ReflexPipeline:
                     "sufficiency_gate": _sufficiency.gate,
                     "sufficiency_reason": _sufficiency.reason,
                     "sufficiency_confidence": _sufficiency.confidence,
+                    **_embedding_anchor_meta,
                 },
             )
             # Flush any pending writes even on early exit
@@ -706,6 +780,7 @@ class ReflexPipeline:
                 "disputed_ids": disputed_ids,
                 "sufficiency_gate": _sufficiency.gate,
                 "sufficiency_confidence": _sufficiency.confidence,
+                **_embedding_anchor_meta,
                 # None when reranking ran (or was disabled); a reason string when
                 # the reranker was enabled but did not actually rerank.
                 "rerank_degraded": _rerank_degraded,
@@ -1486,23 +1561,185 @@ class ReflexPipeline:
     async def _find_embedding_anchors(self, query: str, top_k: int = 10) -> list[str]:
         """Find anchor neurons via embedding similarity.
 
-        Embeds the query, then finds neurons whose stored embeddings
-        (in metadata['_embedding']) are above the similarity threshold.
+        Thin wrapper kept for callers that only need the ids; see
+        :meth:`_find_embedding_anchors_outcome` for the provenance of the result.
         """
+        outcome = await self._find_embedding_anchors_outcome(query, top_k=top_k)
+        return outcome.anchor_ids
+
+    async def _find_embedding_anchors_outcome(
+        self, query: str, top_k: int = 10
+    ) -> EmbeddingAnchorOutcome:
+        """Find anchor neurons via embedding similarity, reporting how.
+
+        Two paths. ``knn`` asks the storage backend's vector index for the
+        actual nearest neighbours of the query. ``scan`` reads one page of
+        ``find_neurons`` and scores it in Python — that page is ordered by id
+        and capped by the backend, so on a brain larger than the cap the
+        semantic retriever only ever sees its oldest slice. ``auto`` prefers
+        the index and falls back to the scan, saying so.
+
+        Every degradation is visible: ``source`` names the path taken and, for
+        a fallback, the reason. Silence would let a broken index look like a
+        brain with nothing to say.
+        """
+        started = time.perf_counter()
+        # Read from the closure by ``_finish`` below, so every outcome built after
+        # the embed call carries the vector — and the two built before it (no
+        # provider, embed failed) correctly carry ``None``.
+        query_vec: list[float] | None = None
+
+        def _finish(
+            anchor_ids: list[str],
+            source: str,
+            *,
+            knn_rows: int = 0,
+            tombstones: int = 0,
+            above_threshold: int = 0,
+        ) -> EmbeddingAnchorOutcome:
+            return EmbeddingAnchorOutcome(
+                anchor_ids=anchor_ids,
+                source=source,
+                knn_rows=knn_rows,
+                tombstones=tombstones,
+                above_threshold=above_threshold,
+                elapsed_ms=(time.perf_counter() - started) * 1000,
+                query_vec=query_vec,
+            )
+
         if self._embedding_provider is None:
-            return []
+            return _finish([], "disabled")
 
         try:
             query_vec = await self._embedding_provider.embed(query)
-        except Exception:
-            logger.debug("Embedding query failed (non-critical)", exc_info=True)
-            return []
+        except Exception as exc:
+            # The semantic retriever going dark is worth a line in the log: every
+            # query after this one silently loses its only meaning-based anchors.
+            logger.warning(
+                "Embedding the query failed, no semantic anchors for this query: %s",
+                type(exc).__name__,
+                exc_info=True,
+            )
+            return _finish([], f"none:embed-failed:{type(exc).__name__}")
 
+        mode = self._embedding_anchor_mode
+        if mode != "scan":
+            knn_result, reason = await self._embedding_anchors_via_knn(query_vec, top_k)
+            if knn_result is not None:
+                anchor_ids, above, tombstones, rows_seen = knn_result
+                return _finish(
+                    anchor_ids,
+                    "knn",
+                    knn_rows=rows_seen,
+                    tombstones=tombstones,
+                    above_threshold=above,
+                )
+            if mode == "knn":
+                # Strict mode never silently reads the wrong slice of the brain.
+                return _finish([], f"none:{reason}")
+            scan_ids, above = await self._embedding_anchors_via_scan(query_vec, top_k)
+            return _finish(scan_ids, f"scan-fallback:{reason}", above_threshold=above)
+
+        scan_ids, above = await self._embedding_anchors_via_scan(query_vec, top_k)
+        return _finish(scan_ids, "scan", above_threshold=above)
+
+    async def _embedding_anchors_via_knn(
+        self, query_vec: list[float], top_k: int
+    ) -> tuple[tuple[list[str], int, int, int] | None, str]:
+        """Anchor neurons from the backend's vector index.
+
+        Returns ``((anchor_ids, above_threshold, tombstones, rows_seen), "")`` on
+        success, or ``(None, reason)`` when the index could not be used. The
+        reason travels back as a value rather than on the instance: one pipeline
+        serves concurrent queries, so per-query state on ``self`` would race.
+        """
+        # Ask for more neighbours than needed: tombstones and the similarity
+        # threshold both thin the list before top_k is taken.
+        limit = max(EMBEDDING_ANCHOR_OVERFETCH * top_k, EMBEDDING_ANCHOR_MIN_LIMIT)
+
+        rows, reason = await self._knn_rows(query_vec, limit)
+        if rows is None:
+            return None, reason
+
+        anchor_ids, above, tombstones = self._rank_knn_rows(rows, top_k)
+        rows_seen = len(rows)
+        if tombstones > 0 and len(anchor_ids) < top_k:
+            # Tombstones share one placeholder vector brain-wide, so a query near
+            # that region can have them fill every slot. One wider retry, never a
+            # loop: the cost is bounded and the count stays visible either way.
+            wider, wider_reason = await self._knn_rows(query_vec, limit * TOMBSTONE_RETRY_FACTOR)
+            if wider is None:
+                return None, wider_reason
+            anchor_ids, above, tombstones = self._rank_knn_rows(wider, top_k)
+            rows_seen = len(wider)
+
+        return (anchor_ids, above, tombstones, rows_seen), ""
+
+    async def _knn_rows(
+        self, query_vec: list[float], limit: int
+    ) -> tuple[list[tuple[Neuron, float]] | None, str]:
+        """One validated KNN call. ``(None, reason)`` means the index is unusable."""
+        try:
+            rows = await self._storage.find_neurons_by_embedding(query_vec, limit=limit)
+        except NotImplementedError:
+            # A backend without a vector index is a static property of the
+            # deployment, not a per-query event: say it once, loudly, then keep
+            # it at debug so one misconfigured backend cannot flood the log.
+            if not self._knn_unsupported_logged:
+                self._knn_unsupported_logged = True
+                logger.warning(
+                    "%s has no vector index; semantic anchors fall back to scanning one "
+                    "page of neurons. Set embedding_anchor_mode='scan' to silence this.",
+                    type(self._storage).__name__,
+                )
+            else:
+                logger.debug("KNN unsupported by %s", type(self._storage).__name__)
+            return None, f"knn-unsupported:{type(self._storage).__name__}"
+        except ValueError as exc:
+            logger.warning("Vector index returned no usable distances: %s", exc)
+            return None, "knn-bad-distance"
+        except Exception as exc:
+            logger.warning("Vector index query failed: %s", type(exc).__name__, exc_info=True)
+            return None, f"knn-error:{type(exc).__name__}"
+
+        if not _is_knn_result(rows):
+            # A mock or a half-implemented backend answers with something that is
+            # not (neuron, similarity) pairs. Reading it would put garbage into
+            # the anchor set, so treat the shape itself as the failure.
+            logger.warning(
+                "Vector index returned %s instead of (neuron, similarity) pairs",
+                type(rows).__name__,
+            )
+            return None, f"knn-invalid-result:{type(rows).__name__}"
+        return rows, ""
+
+    def _rank_knn_rows(
+        self, rows: list[tuple[Neuron, float]], top_k: int
+    ) -> tuple[list[str], int, int]:
+        """(anchor ids, how many passed the threshold, how many tombstones were dropped)."""
+        threshold = self._config.embedding_similarity_threshold
+        tombstones = 0
+        scored: list[tuple[str, float]] = []
+        for neuron, similarity in rows:
+            if neuron.content == GRAPH_ONLY_PLACEHOLDER:
+                tombstones += 1
+                continue
+            if similarity >= threshold:
+                scored.append((neuron.id, similarity))
+        # The backend returns nearest-first, but sort explicitly so the contract
+        # holds for any backend implementing the method.
+        scored.sort(key=lambda pair: pair[1], reverse=True)
+        return [nid for nid, _ in scored[:top_k]], len(scored), tombstones
+
+    async def _embedding_anchors_via_scan(
+        self, query_vec: list[float], top_k: int
+    ) -> tuple[list[str], int]:
+        """Historical path: score one capped page of neurons in Python."""
         # Probe: check if any neurons have embeddings before scanning widely
         probe = await self._storage.find_neurons(limit=20)
         has_embeddings = any(n.metadata.get("_embedding") for n in probe)
         if not has_embeddings:
-            return []
+            return [], 0
 
         # Wide scan for neurons with stored embeddings (doc neurons
         # may be older than organic memories). Storage caps at 1000.
@@ -1522,7 +1759,7 @@ class ReflexPipeline:
                 embed_pairs.append((neuron.id, stored_embedding))
 
         if not embed_pairs:
-            return []
+            return [], 0
 
         async def _compute_sim(nid: str, stored: list[float]) -> tuple[str, float]:
             try:
@@ -1537,16 +1774,17 @@ class ReflexPipeline:
 
         # Sort by similarity descending, return top-K IDs
         scored.sort(key=lambda x: x[1], reverse=True)
-        return [nid for nid, _ in scored[:top_k]]
+        return [nid for nid, _ in scored[:top_k]], len(scored)
 
     async def _find_anchors_ranked(
         self, stimulus: Stimulus, *, exclude_ephemeral: bool = False
-    ) -> tuple[list[list[str]], list[list[RankedAnchor]]]:
+    ) -> tuple[list[list[str]], list[list[RankedAnchor]], EmbeddingAnchorOutcome]:
         """Find anchor neurons with ranked results for RRF fusion.
 
-        Returns both flat anchor_sets (for activation) and ranked lists
-        (for RRF score fusion). The ranked lists preserve retriever
-        identity and position so RRF can weight them appropriately.
+        Returns the flat anchor_sets (for activation), the ranked lists (for RRF
+        score fusion, preserving retriever identity and position) and how the
+        semantic retriever arrived at its anchors, so a degraded path is
+        reportable in the result rather than only in the log.
 
         Priority order:
         1. Time neurons (weight 1.0) - temporal context
@@ -1737,8 +1975,10 @@ class ReflexPipeline:
                 logger.debug("Fuzzy search failed (non-critical)", exc_info=True)
 
         # 4. EMBEDDING ANCHORS - parallel source (always, not just fallback)
+        embedding_outcome = EmbeddingAnchorOutcome(anchor_ids=[], source="disabled")
         if self._embedding_provider is not None:
-            embedding_anchors = await self._find_embedding_anchors(stimulus.raw_query)
+            embedding_outcome = await self._find_embedding_anchors_outcome(stimulus.raw_query)
+            embedding_anchors = embedding_outcome.anchor_ids
             if embedding_anchors:
                 anchor_sets.append(embedding_anchors)
                 ranked_lists.append(
@@ -1763,7 +2003,43 @@ class ReflexPipeline:
             except Exception:
                 logger.debug("Graph expansion failed (non-critical)", exc_info=True)
 
-        return anchor_sets, ranked_lists
+        # 6. FIBER VECTOR ANCHORS: the
+        # only retriever that reaches a fiber WITHOUT going through one of its neurons as an
+        # anchor first. Every other retriever above finds neurons, then fibers are found by
+        # `neuron_ids` membership (`_find_matching_fibers`) — a fiber whose every neuron misses
+        # every anchor is invisible no matter how well its `summary` matches the query. Measured
+        # on a copy of the production brain: +5/49 golden hits, zero regressions. Off by default
+        # (`fiber_vector_enabled`) — see `core/brain.py` for why enabling it is safe on a brain
+        # without a backfilled `fiber_vec`.
+        #
+        # The query vector comes from step 4, which embedded this very query a few lines above
+        # under the same guard (`self._embedding_provider is not None`) — so reusing it costs no
+        # coverage and saves the dominant expense of this step, a second round-trip to the
+        # embedder for a vector we already hold. `query_vec is None` means step 4 found no
+        # provider or its embed call failed; either way it already logged, and a fresh attempt
+        # here would only fail again.
+        if self._config.fiber_vector_enabled and embedding_outcome.query_vec is not None:
+            try:
+                fiber_hits = await self._storage.find_fibers_by_embedding(
+                    embedding_outcome.query_vec, limit=self._config.fiber_vector_top_n
+                )
+                fiber_anchor_ids = [
+                    f.anchor_neuron_id for f, _sim in fiber_hits if f.anchor_neuron_id
+                ]
+                if fiber_anchor_ids:
+                    anchor_sets.append(fiber_anchor_ids)
+                    ranked_lists.append(
+                        [
+                            RankedAnchor(neuron_id=nid, rank=i + 1, retriever="fiber_vector")
+                            for i, nid in enumerate(fiber_anchor_ids)
+                        ]
+                    )
+            except NotImplementedError:
+                logger.debug("Fiber vector search not supported by this backend (non-critical)")
+            except Exception:
+                logger.debug("Fiber vector anchor lookup failed (non-critical)", exc_info=True)
+
+        return anchor_sets, ranked_lists, embedding_outcome
 
     async def _find_matching_fibers(
         self,

@@ -89,6 +89,13 @@ class BrainConfig:
     graph_expansion_enabled: bool = True
     graph_expansion_max: int = 10
     graph_expansion_min_weight: float = 0.3
+    # Retrieval: fiber-level vector anchors — measured +5/49 golden hits, the only retriever that reaches a fiber
+    # without going through one of its neurons as an anchor. Off by default: it needs
+    # `scripts/backfill_fiber_vectors.py` to have populated `fiber.fiber_vec` first, and
+    # enabling it on a brain without that backfill contributes nothing (find_fibers_by_embedding
+    # simply returns no usable rows), so there is no silent behavior change on existing brains.
+    fiber_vector_enabled: bool = False
+    fiber_vector_top_n: int = 10
     # Retrieval: Activation strategy
     activation_strategy: str = "classic"  # "ppr" | "classic" | "reflex" | "hybrid" | "auto"
     ppr_damping: float = 0.15
@@ -185,6 +192,14 @@ class BrainConfig:
     # importance, so it gets its own weight and stays inert unless asked for.
     priority_weight: float = 0.2
     auto_priority_weight: float = 0.0
+    # How the semantic retriever picks anchor neurons.
+    # "scan" is the historical path: read the first `find_neurons` page and
+    # score it in Python. That page is ordered by id and capped, so on a brain
+    # larger than the cap the semantic retriever only ever sees its oldest
+    # slice. "knn" asks the backend's vector index for the actual nearest
+    # neighbours. "auto" uses the index when the backend has one and falls
+    # back to the scan otherwise, saying so in the retrieval metadata.
+    embedding_anchor_mode: str = "auto"
 
     def with_updates(self, **kwargs: Any) -> BrainConfig:
         """Create a new config with updated values."""
