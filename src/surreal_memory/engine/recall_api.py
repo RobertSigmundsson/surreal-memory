@@ -980,30 +980,41 @@ async def materialize_memories(
     fids = response.get("fibers_matched")
     if not isinstance(fids, list):
         return []
+    fids = [str(f) for f in fids[: max(0, limit)]]
     levels: dict[str, Any] = {}
     meta = getattr(result, "metadata", None)
     if isinstance(meta, dict) and isinstance(meta.get("activation_levels"), dict):
         levels = meta["activation_levels"]
+    # Three phases instead of 3 sequential reads per memory (measured 2026-09-23: ~660 ms per recall,
+    # 480 ms of it single get_neuron calls decoding 1024-D vectors): fibers concurrently (no by-id
+    # batch read exists), anchors and typed memories in one batch read each.
+    fibers = await asyncio.gather(*(storage.get_fiber(fid) for fid in fids))
+    anchor_ids = sorted(
+        {a for f in fibers if f is not None and (a := getattr(f, "anchor_neuron_id", None))}
+    )
+    anchors = await _neurons_by_id(storage, anchor_ids)
+    typed = await _typed_by_fiber(
+        storage, [fid for fid, f in zip(fids, fibers, strict=True) if f is not None]
+    )
     out: list[dict[str, Any]] = []
-    for rank, fid in enumerate(fids[: max(0, limit)], start=1):
+    for rank, (fid, fiber) in enumerate(zip(fids, fibers, strict=True), start=1):
         item: dict[str, Any] = {
-            "id": str(fid),
+            "id": fid,
             "neuron_id": None,
             "type": None,
             "content": "",
             "score": None,
             "rank": rank,
         }
-        fiber = await storage.get_fiber(fid)
         if fiber is not None:
             anchor_id = getattr(fiber, "anchor_neuron_id", None)
-            anchor = await storage.get_neuron(anchor_id) if anchor_id else None
+            anchor = anchors.get(anchor_id) if anchor_id else None
             content = (getattr(anchor, "content", None) if anchor else None) or (
                 getattr(fiber, "summary", None) or ""
             )
             if anchor is not None and (getattr(fiber, "metadata", None) or {}).get("encrypted"):
                 content = _decrypt_content(content, storage, config)
-            tm = await storage.get_typed_memory(fid)
+            tm = typed.get(fid)
             mem_type = getattr(getattr(tm, "memory_type", None), "value", None) if tm else None
             if mem_type is None and anchor is not None:
                 mem_type = getattr(getattr(anchor, "type", None), "value", None)
@@ -1016,6 +1027,26 @@ async def materialize_memories(
             )
         out.append(item)
     return out
+
+
+async def _neurons_by_id(storage: Any, ids: list[str]) -> dict[str, Any]:
+    if not ids:
+        return {}
+    batch = getattr(storage, "get_neurons_batch", None)
+    if batch is not None:
+        return dict(await batch(ids))
+    got = await asyncio.gather(*(storage.get_neuron(i) for i in ids))
+    return {i: n for i, n in zip(ids, got, strict=True) if n is not None}
+
+
+async def _typed_by_fiber(storage: Any, fids: list[str]) -> dict[str, Any]:
+    if not fids:
+        return {}
+    batch = getattr(storage, "get_typed_memories_batch", None)
+    if batch is not None:
+        return dict(await batch(fids))
+    got = await asyncio.gather(*(storage.get_typed_memory(f) for f in fids))
+    return {f: t for f, t in zip(fids, got, strict=True) if t is not None}
 
 
 def _decrypt_content(content: str, storage: Any, config: Any) -> str:
