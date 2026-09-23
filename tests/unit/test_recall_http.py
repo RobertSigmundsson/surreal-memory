@@ -310,3 +310,14 @@ def test_cli_registered_and_refuses_missing_key(monkeypatch: pytest.MonkeyPatch)
     assert runner.invoke(app, ["recall-http"]).exit_code == 78
     monkeypatch.setenv("SMEM_RECALL_HTTP_KEY", "short")
     assert runner.invoke(app, ["recall-http"]).exit_code == 78
+
+
+def test_cli_logging_emits_info_line_once() -> None:
+    import logging
+
+    from surreal_memory.cli.commands.recall_http import configure_logging
+
+    log = configure_logging()
+    configure_logging()  # idempotent: no duplicate handler
+    assert log.level == logging.INFO and log.propagate is False
+    assert sum(1 for h in log.handlers if getattr(h, "_recall_http", False)) == 1
