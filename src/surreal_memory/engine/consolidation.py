@@ -552,6 +552,9 @@ class ConsolidationReport:
         timed_out = self.extra.get("timed_out_strategies")
         if timed_out:
             lines.append(f"  Stages timed out: {', '.join(timed_out)}")
+        paused_stages = self.extra.get("paused_strategies")
+        if paused_stages:
+            lines.append(f"  Stages paused: {', '.join(paused_stages)}")
 
         backfilled = self.extra.get("maturations_backfilled")
         if backfilled:
@@ -820,6 +823,7 @@ class ConsolidationEngine:
         strategy_timeout = self._config.strategy_timeout_seconds
         total_timeout = self._config.total_timeout_seconds
         timed_out_strategies: list[str] = []
+        paused_strategies: list[str] = []
         failed_strategies: list[str] = []
         progress_messages: list[str] = []
         resume_message: str | None = None
@@ -944,7 +948,7 @@ class ConsolidationEngine:
                         if progress_session is not None:
                             await progress_session.complete_strategy(strategy.value)
                     except ConsolidationPausedError as exc:
-                        timed_out_strategies.append(strategy.value)
+                        paused_strategies.append(strategy.value)
                         if progress_session is not None:
                             try:
                                 await progress_session.pause()
@@ -1035,6 +1039,8 @@ class ConsolidationEngine:
 
             if timed_out_strategies:
                 report.extra["timed_out_strategies"] = list(dict.fromkeys(timed_out_strategies))
+            if paused_strategies:
+                report.extra["paused_strategies"] = list(dict.fromkeys(paused_strategies))
             if failed_strategies:
                 report.extra["failed_strategies"] = failed_strategies
 
@@ -2483,7 +2489,10 @@ class ConsolidationEngine:
             report.fibers_merged = fibers_merged
             report.fibers_created = fibers_created
             report.fibers_removed = fibers_removed
-            await _checkpoint("merge_scan", None, ())
+            plan = descriptor.get("plan")
+            if plan is not None:
+                plan["next_index"] += 1
+            await _checkpoint("merge_scan", plan, ())
             report.merge_details.append(
                 MergeDetail(
                     original_fiber_ids=tuple(source_ids),
@@ -2493,62 +2502,162 @@ class ConsolidationEngine:
                 )
             )
 
-        async def _candidate_groups(fibers: list[Fiber]) -> list[list[Fiber]]:
+        def _decode_plan(raw_cursor: Any) -> dict[str, Any]:
+            if not isinstance(raw_cursor, str):
+                raise RuntimeError("merge group manifest is missing")
+            try:
+                plan = json.loads(raw_cursor)
+            except (TypeError, ValueError) as exc:
+                raise RuntimeError("merge group manifest is malformed") from exc
+            if (
+                not isinstance(plan, dict)
+                or plan.get("version") != 2
+                or plan.get("kind") != "plan"
+                or not isinstance(plan.get("groups"), list)
+                or type(plan.get("next_index")) is not int
+                or not 0 <= plan["next_index"] <= len(plan["groups"])
+            ):
+                raise RuntimeError("merge group manifest is incompatible")
+            seen: set[str] = set()
+            for group in plan["groups"]:
+                if not isinstance(group, list) or len(group) < 2:
+                    raise RuntimeError("merge group manifest has an invalid group")
+                group_ids: list[str] = []
+                for member in group:
+                    if (
+                        not isinstance(member, list)
+                        or len(member) != 2
+                        or not isinstance(member[0], str)
+                        or not isinstance(member[1], str)
+                    ):
+                        raise RuntimeError("merge group manifest has an invalid member")
+                    group_ids.append(member[0])
+                if group_ids != sorted(set(group_ids)) or seen.intersection(group_ids):
+                    raise RuntimeError("merge group manifest has duplicate or unordered sources")
+                seen.update(group_ids)
+            return plan
+
+        async def _candidate_groups(
+            fibers: list[Fiber], scan_state: dict[str, Any] | None = None
+        ) -> list[list[Fiber]]:
             fiber_list = sorted(fibers, key=lambda item: item.id)
-            if len(fiber_list) < 2:
+            if len(fiber_list) < 2 and scan_state is None:
                 return []
+            snapshot_hash = _fingerprint([_fiber_fingerprint(fiber) for fiber in fiber_list])
             neuron_to_fibers: dict[str, set[int]] = {}
             for idx, fiber in enumerate(fiber_list):
                 if len(fiber.neuron_ids) > self._config.merge_max_fiber_size:
                     continue
-                for neuron_id in fiber.neuron_ids:
+                for neuron_id in sorted(fiber.neuron_ids):
                     neuron_to_fibers.setdefault(neuron_id, set()).add(idx)
+            postings = sorted(neuron_to_fibers)
+            uf = UnionFind(len(fiber_list))
+            posting_start = 0
+            pair_start = 0
+            pair_checks = 0
+            if scan_state is not None:
+                parents = scan_state.get("parents")
+                if (
+                    scan_state.get("version") != 2
+                    or scan_state.get("kind") != "scan"
+                    or scan_state.get("snapshot_hash") != snapshot_hash
+                    or not isinstance(parents, list)
+                    or len(parents) != len(fiber_list)
+                    or any(
+                        type(parent) is not int or parent < 0 or parent >= len(parents)
+                        for parent in parents
+                    )
+                    or type(scan_state.get("posting_index")) is not int
+                    or type(scan_state.get("pair_position")) is not int
+                    or type(scan_state.get("pair_checks")) is not int
+                ):
+                    raise RuntimeError(
+                        "merge candidate checkpoint is incompatible or its frozen fiber snapshot changed"
+                    )
+                posting_start = scan_state["posting_index"]
+                pair_start = scan_state["pair_position"]
+                pair_checks = scan_state["pair_checks"]
+                if not 0 <= posting_start <= len(postings) or pair_start < 0 or pair_checks < 0:
+                    raise RuntimeError("merge candidate checkpoint cursor is out of range")
+                posting_size = (
+                    min(100, len(neuron_to_fibers[postings[posting_start]]))
+                    if posting_start < len(postings)
+                    else 0
+                )
+                if pair_start > posting_size * (posting_size - 1) // 2:
+                    raise RuntimeError("merge candidate checkpoint pair position is out of range")
+                uf._parent = parents.copy()
 
-            candidate_pairs: set[tuple[int, int]] = set()
-            for indices in neuron_to_fibers.values():
+            async def save_scan(next_posting: int, next_pair: int) -> None:
+                await _checkpoint(
+                    "merge_candidate_scan",
+                    {
+                        "version": 2,
+                        "kind": "scan",
+                        "snapshot_hash": snapshot_hash,
+                        "posting_index": next_posting,
+                        "pair_position": next_pair,
+                        "pair_checks": pair_checks,
+                        "parents": uf._parent.copy(),
+                    },
+                )
+
+            if scan_state is None and not dry_run:
+                await save_scan(0, 0)
+            for posting_idx in range(posting_start, len(postings)):
+                neuron_id = postings[posting_idx]
+                indices = neuron_to_fibers[neuron_id]
                 if len(indices) > 100:
+                    pair_start = 0
+                    if (posting_idx + 1) % 1000 == 0 and not dry_run:
+                        await save_scan(posting_idx + 1, 0)
                     continue
                 indices_list = sorted(indices)
+                pair_position = 0
                 for i_pos in range(len(indices_list)):
                     for j_pos in range(i_pos + 1, len(indices_list)):
-                        candidate_pairs.add((indices_list[i_pos], indices_list[j_pos]))
-                if len(candidate_pairs) >= 50_000:
-                    break
-
-            uf = UnionFind(len(fiber_list))
-            for pair_number, (left, right) in enumerate(sorted(candidate_pairs), start=1):
-                if pair_number % 1000 == 0:
-                    # Let the strategy deadline and lease heartbeat run during large scans.
-                    await asyncio.sleep(0)
-                first = fiber_list[left]
-                second = fiber_list[right]
-                if first.metadata.get("_verbatim", False) != second.metadata.get(
-                    "_verbatim", False
-                ):
-                    continue
-                if any(
-                    fiber.metadata.get(marker)
-                    for fiber in (first, second)
-                    for marker in ("_habit_pattern", "_reasoning_pattern")
-                ):
-                    continue
-                if first.pinned or second.pinned:
-                    continue
-                union_size = len(first.neuron_ids | second.neuron_ids)
-                if union_size == 0:
-                    continue
-                jaccard = len(first.neuron_ids & second.neuron_ids) / union_size
-                if first.created_at and second.created_at:
-                    time_diff = abs((first.created_at - second.created_at).total_seconds())
-                else:
-                    time_diff = float("inf")
-                threshold = (
-                    self._config.merge_overlap_threshold * 0.6
-                    if time_diff < 3600
-                    else self._config.merge_overlap_threshold
-                )
-                if jaccard >= threshold:
-                    uf.union(left, right)
+                        if posting_idx == posting_start and pair_position < pair_start:
+                            pair_position += 1
+                            continue
+                        left, right = indices_list[i_pos], indices_list[j_pos]
+                        first = fiber_list[left]
+                        second = fiber_list[right]
+                        if (
+                            first.metadata.get("_verbatim", False)
+                            == second.metadata.get("_verbatim", False)
+                            and not any(
+                                fiber.metadata.get(marker)
+                                for fiber in (first, second)
+                                for marker in ("_habit_pattern", "_reasoning_pattern")
+                            )
+                            and not first.pinned
+                            and not second.pinned
+                        ):
+                            union_size = len(first.neuron_ids | second.neuron_ids)
+                            if union_size:
+                                jaccard = len(first.neuron_ids & second.neuron_ids) / union_size
+                                if first.created_at and second.created_at:
+                                    time_diff = abs(
+                                        (first.created_at - second.created_at).total_seconds()
+                                    )
+                                else:
+                                    time_diff = float("inf")
+                                threshold = (
+                                    self._config.merge_overlap_threshold * 0.6
+                                    if time_diff < 3600
+                                    else self._config.merge_overlap_threshold
+                                )
+                                if jaccard >= threshold:
+                                    uf.union(left, right)
+                        pair_checks += 1
+                        pair_position += 1
+                        if pair_checks % 1000 == 0:
+                            await asyncio.sleep(0)
+                            if not dry_run:
+                                await save_scan(posting_idx, pair_position)
+                pair_start = 0
+                if (posting_idx + 1) % 1000 == 0 and not dry_run:
+                    await save_scan(posting_idx + 1, 0)
 
             groups: list[list[Fiber]] = []
             for members in uf.groups().values():
@@ -2568,14 +2677,66 @@ class ConsolidationEngine:
         }
         if not dry_run and phase in resumable_phases:
             descriptor = _decode_descriptor(progress_state.get("cursor"))
+            if descriptor.get("plan") is not None:
+                unit_plan = _decode_plan(_encode_descriptor(descriptor["plan"]))
+                plan_members = unit_plan["groups"][unit_plan["next_index"]]
+                if [member[0] for member in plan_members] != descriptor["source_ids"]:
+                    raise RuntimeError(
+                        "merge pending unit does not match its frozen group manifest"
+                    )
             pending_ids = [str(value) for value in (progress_state.get("pending") or [])]
             if not pending_ids and phase != "merge_deleting_sources":
                 pending_ids = list(descriptor["source_ids"])
             await _finish_unit(descriptor, phase, pending_ids)
+            progress_state = self._strategy_progress_state()
+            phase = str(progress_state.get("phase") or "")
 
-        fibers = await self._storage.get_fibers(limit=10000)
-        groups = await _candidate_groups(list(fibers))
-        for member_fibers in groups:
+        plan: dict[str, Any] | None = None
+        if not dry_run and phase == "merge_scan" and progress_state.get("cursor"):
+            plan = _decode_plan(progress_state["cursor"])
+
+        groups: list[list[Fiber]] = []
+        if plan is None:
+            fibers = await self._all_fibers_paged(
+                created_before=getattr(self._progress_session, "reference_time", None)
+            )
+            scan_state: dict[str, Any] | None = None
+            if not dry_run and phase == "merge_candidate_scan":
+                raw_cursor = progress_state.get("cursor")
+                if not isinstance(raw_cursor, str):
+                    raise RuntimeError("merge candidate checkpoint cursor is missing")
+                try:
+                    scan_state = json.loads(raw_cursor)
+                except (TypeError, ValueError) as exc:
+                    raise RuntimeError("merge candidate checkpoint cursor is malformed") from exc
+                if not isinstance(scan_state, dict):
+                    raise RuntimeError("merge candidate checkpoint cursor is incompatible")
+            groups = await _candidate_groups(fibers, scan_state)
+            plan = {
+                "version": 2,
+                "kind": "plan",
+                "groups": [
+                    [[fiber.id, _fiber_fingerprint(fiber)] for fiber in group] for group in groups
+                ],
+                "next_index": 0,
+            }
+            if not dry_run:
+                # No source can be modified until the entire group plan is durable.
+                await _checkpoint("merge_scan", plan)
+
+        for group_index in range(plan["next_index"], len(plan["groups"])):
+            members = plan["groups"][group_index]
+            if dry_run:
+                member_fibers = groups[group_index]
+            else:
+                member_fibers = []
+                for fiber_id, signature in members:
+                    current = await self._storage.get_fiber(fiber_id)
+                    if current is None or _fiber_fingerprint(current) != signature:
+                        raise RuntimeError(
+                            f"merge planned source {fiber_id!r} changed before its work unit"
+                        )
+                    member_fibers.append(current)
             if dry_run:
                 source_ids = sorted(fiber.id for fiber in member_fibers)
                 descriptor_id = _fingerprint(source_ids)[:32]
@@ -2593,6 +2754,7 @@ class ConsolidationEngine:
                 continue
 
             descriptor = await _make_descriptor(member_fibers)
+            descriptor["plan"] = plan
             source_ids = list(descriptor["source_ids"])
             await _checkpoint("merge_pending", descriptor, source_ids)
             await _finish_unit(descriptor, "merge_pending", source_ids)
@@ -2620,6 +2782,35 @@ class ConsolidationEngine:
         except Exception:
             # Config is optional here: consolidation must still run on a bare install.
             return ConsolidationConfig()
+
+    async def _all_fibers_paged(self, *, created_before: datetime | None = None) -> list[Fiber]:
+        """Build a complete fiber census through bounded keyset reads.
+
+        Group-based strategies need all members at once, but no single storage
+        query may silently truncate the brain at a fixed top-N threshold.
+        """
+        get_page = getattr(self._storage, "get_fibers_after_id", None)
+        if get_page is None or not hasattr(type(self._storage), "get_fibers_after_id"):
+            # Legacy/mock storage adapters expose only the bounded list API.
+            # They must fail visibly if they hit its ceiling.
+            legacy_fibers = await self._storage.get_fibers(limit=10000)
+            if len(legacy_fibers) >= 10000:
+                raise RuntimeError("fiber census requires get_fibers_after_id for 10000+ fibers")
+            return list(legacy_fibers)
+        fibers: list[Fiber] = []
+        cursor: str | None = None
+        while True:
+            await self._check_progress_budget()
+            page = await get_page(cursor, limit=500, created_before=created_before)
+            if not page:
+                return fibers
+            if cursor is not None and page[0].id <= cursor:
+                raise RuntimeError("fiber keyset page did not advance")
+            fibers.extend(page)
+            cursor = page[-1].id
+            if len(page) < 500:
+                return fibers
+            await asyncio.sleep(0)
 
     async def _all_synapses_paged(self) -> list[Synapse]:
         """Every synapse in the brain, fetched in pages instead of one giant read.
@@ -2803,7 +2994,9 @@ class ConsolidationEngine:
         """
         import json
 
-        fibers = await self._storage.get_fibers(limit=10000)
+        fibers = await self._all_fibers_paged(
+            created_before=getattr(self._progress_session, "reference_time", None)
+        )
         if len(fibers) < self._config.summarize_min_cluster_size:
             return
 
@@ -2811,25 +3004,14 @@ class ConsolidationEngine:
         # the same cluster sequence after a process interruption.
         source_fibers = sorted(self._summarize_input_fibers(fibers), key=lambda f: f.id)
 
-        max_fibers_for_clustering = 1000
-        if len(source_fibers) > max_fibers_for_clustering:
-            report.extra["summarize_fibers_total"] = len(source_fibers)
-            report.extra["summarize_fibers_scanned"] = max_fibers_for_clustering
-            source_fibers = sorted(
-                source_fibers,
-                key=lambda f: (-f.salience, f.id),
-            )[:max_fibers_for_clustering]
-            source_fibers.sort(key=lambda f: f.id)
         if len(source_fibers) < self._config.summarize_min_cluster_size:
             return
 
         snapshot_fingerprint = options_fingerprint(
             {
-                "algorithm": "summarize-v1",
+                "algorithm": "summarize-v2",
                 "min_cluster_size": self._config.summarize_min_cluster_size,
                 "tag_overlap_threshold": self._config.summarize_tag_overlap_threshold,
-                "max_fibers": max_fibers_for_clustering,
-                "max_pairs": 50_000,
                 "source_fibers": [
                     {
                         "id": fiber.id,
@@ -2849,23 +3031,6 @@ class ConsolidationEngine:
             for tag in sorted(fiber.tags):
                 tag_to_fibers.setdefault(tag, set()).add(idx)
 
-        max_pairs = 50_000
-        candidate_pairs: set[tuple[int, int]] = set()
-        for tag in sorted(tag_to_fibers):
-            indices = tag_to_fibers[tag]
-            if len(indices) > 100:
-                continue
-            indices_list = sorted(indices)
-            for i_pos in range(len(indices_list)):
-                if len(candidate_pairs) >= max_pairs:
-                    break
-                for j_pos in range(i_pos + 1, len(indices_list)):
-                    if len(candidate_pairs) >= max_pairs:
-                        break
-                    candidate_pairs.add((indices_list[i_pos], indices_list[j_pos]))
-            if len(candidate_pairs) >= max_pairs:
-                break
-
         parent: dict[int, int] = {i: i for i in range(n)}
 
         def find(x: int) -> int:
@@ -2879,18 +3044,138 @@ class ConsolidationEngine:
             if ra != rb:
                 parent[ra] = rb
 
-        for pair_idx, (i, j) in enumerate(sorted(candidate_pairs)):
-            if pair_idx % 1000 == 0 and pair_idx > 0:
-                await asyncio.sleep(0)
-            tags_a = source_fibers[i].tags
-            tags_b = source_fibers[j].tags
-            intersection = len(tags_a & tags_b)
-            union_size = len(tags_a | tags_b)
-            if (
-                union_size > 0
-                and intersection / union_size >= self._config.summarize_tag_overlap_threshold
+        resumable = self._progress_session is not None and not dry_run
+        tags = sorted(tag_to_fibers)
+        pairs_examined = 0
+        next_tag = 0
+        pair_snapshot_serialized = ""
+
+        def cursor_for(cluster_key: str) -> str:
+            return f"summarize-v2|{snapshot_fingerprint}|{cluster_key}"
+
+        def pair_snapshot(tag_index: int) -> str:
+            return json.dumps(
+                {
+                    "kind": "summary_pairs",
+                    "version": 2,
+                    "fingerprint": snapshot_fingerprint,
+                    "next_tag": tag_index,
+                    "parent": {str(i): root for i, root in parent.items() if i != root},
+                    "pairs_examined": pairs_examined,
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+
+        if resumable:
+            state = self._strategy_progress_state()
+            saved_cursor = state.get("cursor")
+            saved_pending = state.get("pending")
+            if saved_cursor is None:
+                if saved_pending:
+                    raise ConsolidationProgressError(
+                        "summarize pending checkpoint has no compatible cursor"
+                    )
+                pair_snapshot_serialized = pair_snapshot(0)
+                await self._checkpoint_progress(
+                    "summarize_pairs",
+                    cursor=cursor_for("pairs:0"),
+                    pending=[pair_snapshot_serialized],
+                    counters={"summarize_pairs_examined": 0},
+                )
+                saved_cursor = cursor_for("pairs:0")
+                saved_pending = [pair_snapshot_serialized]
+            if not isinstance(saved_cursor, str):
+                raise ConsolidationProgressError("summarize cursor is malformed")
+            parts = saved_cursor.split("|", 2)
+            if len(parts) != 3 or parts[0] != "summarize-v2" or parts[1] != snapshot_fingerprint:
+                raise ConsolidationProgressError(
+                    "summarize inputs or algorithm changed; refusing to skip its checkpoint"
+                )
+            if not isinstance(saved_pending, (list, tuple)) or len(saved_pending) not in (1, 2):
+                raise ConsolidationProgressError("summarize pair state is missing or malformed")
+            try:
+                snapshot = json.loads(str(saved_pending[0]))
+                if (
+                    snapshot["kind"] != "summary_pairs"
+                    or snapshot["version"] != 2
+                    or snapshot["fingerprint"] != snapshot_fingerprint
+                ):
+                    raise ValueError("incompatible pair snapshot")
+                next_tag = int(snapshot["next_tag"])
+                pairs_examined = int(snapshot["pairs_examined"])
+                if not 0 <= next_tag <= len(tags) or pairs_examined < 0:
+                    raise ValueError("invalid pair cursor")
+                restored_parent = snapshot["parent"]
+                if not isinstance(restored_parent, dict):
+                    raise ValueError("invalid parent snapshot")
+                for raw_index, raw_root in restored_parent.items():
+                    index, root = int(raw_index), int(raw_root)
+                    if not 0 <= index < n or not 0 <= root < n:
+                        raise ValueError("invalid parent index")
+                    parent[index] = root
+                if parts[2].startswith("pairs:"):
+                    if len(saved_pending) != 1 or int(parts[2][6:]) != next_tag:
+                        raise ValueError("pair cursor does not match snapshot")
+                elif next_tag != len(tags):
+                    raise ValueError("cluster cursor requires complete pair scan")
+                else:
+                    next_tag = len(tags)
+            except (KeyError, TypeError, ValueError) as exc:
+                raise ConsolidationProgressError(
+                    "summarize pair checkpoint is malformed or incompatible"
+                ) from exc
+            pair_snapshot_serialized = str(saved_pending[0])
+
+        last_saved_pairs = pairs_examined
+        # Enumerate every policy-eligible pair without a global pair cap or
+        # materializing an unbounded set. A tag is the committed work unit;
+        # union state and its cursor are persisted together after each batch.
+        for tag_index in range(next_tag, len(tags)):
+            indices_list = sorted(tag_to_fibers[tags[tag_index]])
+            if len(indices_list) <= 100:
+                for i_pos, i in enumerate(indices_list):
+                    for j in indices_list[i_pos + 1 :]:
+                        if pairs_examined % 1000 == 0:
+                            await self._check_progress_budget()
+                            await asyncio.sleep(0)
+                        tags_a = source_fibers[i].tags
+                        tags_b = source_fibers[j].tags
+                        intersection = len(tags_a & tags_b)
+                        union_size = len(tags_a | tags_b)
+                        if (
+                            union_size > 0
+                            and intersection / union_size
+                            >= self._config.summarize_tag_overlap_threshold
+                        ):
+                            union(i, j)
+                        pairs_examined += 1
+            if resumable and (
+                (tag_index + 1) % 100 == 0 or pairs_examined - last_saved_pairs >= 20_000
             ):
-                union(i, j)
+                pair_snapshot_serialized = pair_snapshot(tag_index + 1)
+                await self._checkpoint_progress(
+                    "summarize_pairs",
+                    cursor=cursor_for(f"pairs:{tag_index + 1}"),
+                    pending=[pair_snapshot_serialized],
+                    counters={"summarize_pairs_examined": pairs_examined},
+                )
+                last_saved_pairs = pairs_examined
+
+        if resumable and str(self._strategy_progress_state().get("cursor", "")).split("|", 2)[
+            -1
+        ].startswith("pairs:"):
+            pair_snapshot_serialized = pair_snapshot(len(tags))
+            await self._checkpoint_progress(
+                "summarize_scan",
+                cursor=cursor_for(""),
+                pending=[pair_snapshot_serialized],
+                counters={
+                    "summarize_pairs_examined": pairs_examined,
+                    "summaries_created": 0,
+                    "summaries_skipped_existing": 0,
+                },
+            )
 
         grouped_members: dict[int, list[int]] = {}
         for i in range(n):
@@ -2905,42 +3190,20 @@ class ConsolidationEngine:
         cluster_work.sort(key=lambda item: item[0])
 
         existing_cluster_keys = self._existing_summary_cluster_keys(fibers)
-        resumable = self._progress_session is not None and not dry_run
         last_cluster_key = ""
         created_count = 0
         skipped_count = 0
-
-        def cursor_for(cluster_key: str) -> str:
-            return f"summarize-v1|{snapshot_fingerprint}|{cluster_key}"
 
         if resumable:
             state = self._strategy_progress_state()
             cursor_value = state.get("cursor")
             pending = state.get("pending")
-            if cursor_value is None:
-                if pending:
-                    raise ConsolidationProgressError(
-                        "summarize pending checkpoint has no compatible cursor"
-                    )
-                await self._checkpoint_progress(
-                    "summarize_scan",
-                    cursor=cursor_for(""),
-                    pending=[],
-                    counters={
-                        "summaries_created": 0,
-                        "summaries_skipped_existing": 0,
-                    },
-                )
-                state = self._strategy_progress_state()
-                cursor_value = state.get("cursor")
-                pending = state.get("pending")
-
             if not isinstance(cursor_value, str):
                 raise ConsolidationProgressError("summarize cursor is malformed")
             cursor_parts = cursor_value.split("|", 2)
             if (
                 len(cursor_parts) != 3
-                or cursor_parts[0] != "summarize-v1"
+                or cursor_parts[0] != "summarize-v2"
                 or cursor_parts[1] != snapshot_fingerprint
             ):
                 raise ConsolidationProgressError(
@@ -3030,10 +3293,10 @@ class ConsolidationEngine:
                 await apply_snapshot(snapshot)
                 return cluster_key
 
-            if pending:
-                if not isinstance(pending, (list, tuple)) or len(pending) != 1:
-                    raise ConsolidationProgressError("summarize pending checkpoint is malformed")
-                pending_cluster_key = await replay_pending(str(pending[0]))
+            if not isinstance(pending, (list, tuple)) or len(pending) not in (1, 2):
+                raise ConsolidationProgressError("summarize pending checkpoint is malformed")
+            if len(pending) == 2:
+                pending_cluster_key = await replay_pending(str(pending[1]))
                 if pending_cluster_key <= last_cluster_key:
                     raise ConsolidationProgressError(
                         "summarize pending unit is not after its committed cursor"
@@ -3044,8 +3307,9 @@ class ConsolidationEngine:
                 await self._checkpoint_progress(
                     "summarize_cluster",
                     cursor=cursor_for(last_cluster_key),
-                    pending=[],
+                    pending=[pair_snapshot_serialized],
                     counters={
+                        "summarize_pairs_examined": pairs_examined,
                         "summaries_created": created_count,
                         "summaries_skipped_existing": skipped_count,
                     },
@@ -3064,8 +3328,9 @@ class ConsolidationEngine:
                     await self._checkpoint_progress(
                         "summarize_cluster",
                         cursor=cursor_for(cluster_key),
-                        pending=[],
+                        pending=[pair_snapshot_serialized],
                         counters={
+                            "summarize_pairs_examined": pairs_examined,
                             "summaries_created": created_count,
                             "summaries_skipped_existing": skipped_count,
                         },
@@ -3176,8 +3441,9 @@ class ConsolidationEngine:
             await self._checkpoint_progress(
                 "summarize_pending",
                 cursor=cursor_for(last_cluster_key),
-                pending=[serialized],
+                pending=[pair_snapshot_serialized, serialized],
                 counters={
+                    "summarize_pairs_examined": pairs_examined,
                     "summaries_created": created_count,
                     "summaries_skipped_existing": skipped_count,
                 },
@@ -3189,8 +3455,9 @@ class ConsolidationEngine:
             await self._checkpoint_progress(
                 "summarize_cluster",
                 cursor=cursor_for(last_cluster_key),
-                pending=[],
+                pending=[pair_snapshot_serialized],
                 counters={
+                    "summarize_pairs_examined": pairs_examined,
                     "summaries_created": created_count,
                     "summaries_skipped_existing": skipped_count,
                 },
@@ -3297,7 +3564,9 @@ class ConsolidationEngine:
             )
 
         async def pattern_source_fingerprint() -> str:
-            source_fibers = await self._storage.get_fibers(limit=10000)
+            source_fibers = await self._all_fibers_paged(
+                created_before=getattr(self._progress_session, "reference_time", None)
+            )
             source_maturations = await self._storage.find_maturations()
             payload = {
                 "fibers": [
@@ -3599,7 +3868,9 @@ class ConsolidationEngine:
 
         maturations = await self._storage.find_maturations()
         maturation_map = {m.fiber_id: m for m in maturations}
-        fibers = await self._storage.get_fibers(limit=10000)
+        fibers = await self._all_fibers_paged(
+            created_before=getattr(self._progress_session, "reference_time", None)
+        )
         patterns, extraction_report = extract_patterns(
             fibers=fibers,
             maturations=maturation_map,
@@ -3768,18 +4039,13 @@ class ConsolidationEngine:
 
         generator = get_essence_generator(strategy)
 
-        max_backfill = 2000  # Safety cap to avoid runaway
-
-        # Keep the legacy adapter path simple: non-SurrealDB backends and dry
-        # runs do not write progress state. Dry-run must never mutate storage.
+        # Dry runs and legacy adapters do not mutate progress state.
         if self._progress_session is None or dry_run:
-            fibers = await self._storage.get_fibers(limit=1000)
+            fibers = await self._all_fibers_paged()
             candidates = [fiber for fiber in fibers if not fiber.essence]
 
             backfilled = 0
             for idx, fiber in enumerate(candidates):
-                if backfilled >= max_backfill:
-                    break
                 if idx % 50 == 0 and idx > 0:
                     await asyncio.sleep(0)
 
@@ -3816,15 +4082,6 @@ class ConsolidationEngine:
             report.essences_generated += backfilled
             return
 
-        # get_fibers is bounded by the storage API; sorting the returned window
-        # by the immutable fiber ID gives this strategy a stable work-unit order.
-        fibers = await self._storage.get_fibers(limit=1000)
-        fibers_by_id = {fiber.id: fiber for fiber in fibers}
-        candidates = sorted(
-            (fiber for fiber in fibers if not fiber.essence),
-            key=lambda fiber: fiber.id,
-        )
-
         state = self._strategy_progress_state()
         cursor_value = state.get("cursor")
         cursor = str(cursor_value) if cursor_value is not None else None
@@ -3847,14 +4104,9 @@ class ConsolidationEngine:
                 raise RuntimeError("invalid essence-backfill pending result") from exc
 
             await self._check_progress_budget()
-            pending_fiber = fibers_by_id.get(pending_fiber_id)
+            pending_fiber = await self._storage.get_fiber(pending_fiber_id)
             if pending_fiber is None:
-                # Do not discard a generated result if its fiber has fallen
-                # outside the storage window; the caller can safely retry after
-                # the storage view is corrected.
-                raise RuntimeError(
-                    f"pending essence fiber {pending_fiber_id!r} is not in the current fiber window"
-                )
+                raise RuntimeError(f"pending essence fiber {pending_fiber_id!r} is missing")
 
             # update_fiber writes the same value for this stable ID and essence.
             # If the previous process applied it before crashing, skip the write.
@@ -3870,17 +4122,89 @@ class ConsolidationEngine:
                 counters=counters,
             )
 
-        for idx, fiber in enumerate(candidates):
-            if backfilled >= max_backfill:
-                break
-            if cursor is not None and fiber.id <= cursor:
-                continue
-            if idx % 50 == 0 and idx > 0:
-                await asyncio.sleep(0)
+        page_cursor = cursor
+        page_size = 250
+        while True:
             await self._check_progress_budget()
+            get_page = getattr(self._storage, "get_fibers_after_id", None)
+            if get_page is None or not hasattr(type(self._storage), "get_fibers_after_id"):
+                legacy = await self._all_fibers_paged()
+                page = [
+                    fiber
+                    for fiber in sorted(legacy, key=lambda f: f.id)
+                    if page_cursor is None or fiber.id > page_cursor
+                ][:page_size]
+            else:
+                page = await get_page(
+                    page_cursor,
+                    limit=page_size,
+                    created_before=getattr(self._progress_session, "reference_time", None),
+                )
+            if not page:
+                break
+            if page_cursor is not None and page[0].id <= page_cursor:
+                raise RuntimeError("essence fiber keyset page did not advance")
+            for fiber in page:
+                await self._check_progress_budget()
+                if fiber.essence:
+                    cursor = fiber.id
+                    await self._checkpoint_progress(
+                        "essence_scan",
+                        cursor=cursor,
+                        pending=[],
+                        counters={"essences_generated": backfilled},
+                    )
+                    continue
 
-            anchor = await self._storage.get_neuron(fiber.anchor_neuron_id)
-            if not anchor or not anchor.content:
+                anchor = await self._storage.get_neuron(fiber.anchor_neuron_id)
+                if not anchor or not anchor.content:
+                    cursor = fiber.id
+                    await self._checkpoint_progress(
+                        "essence_scan",
+                        cursor=cursor,
+                        pending=[],
+                        counters={"essences_generated": backfilled},
+                    )
+                    continue
+
+                # Get priority from typed memory for cost guard
+                priority = 5
+                try:
+                    typed_mem = await self._storage.get_typed_memory(fiber.id)
+                    if (
+                        typed_mem
+                        and hasattr(typed_mem, "priority")
+                        and isinstance(typed_mem.priority, (int, float))
+                    ):
+                        priority = int(typed_mem.priority)
+                except Exception:
+                    pass
+
+                # If the process dies before this checkpoint, the external LLM call
+                # may repeat on resume; after it succeeds, resume uses the saved text.
+                essence = await generator.generate(anchor.content, priority=priority)
+                if essence:
+                    result = json.dumps(
+                        {"fiber_id": fiber.id, "essence": essence},
+                        ensure_ascii=False,
+                        separators=(",", ":"),
+                    )
+                    await self._checkpoint_progress(
+                        "essence_pending",
+                        cursor=cursor,
+                        pending=[result],
+                        counters={"essences_generated": backfilled},
+                    )
+                    # A crash between this write and the committed checkpoint is
+                    # replay-safe: resume observes the saved text and avoids a
+                    # duplicate write when the fiber already contains that essence.
+                    current_fiber = fiber
+                    if not current_fiber.essence:
+                        await self._storage.update_fiber(current_fiber.with_essence(essence))
+                    backfilled += 1
+
+                # Every fiber is a committed work unit, including skips and empty
+                # generator results, so the cursor can resume at the next stable ID.
                 cursor = fiber.id
                 await self._checkpoint_progress(
                     "essence_scan",
@@ -3888,53 +4212,10 @@ class ConsolidationEngine:
                     pending=[],
                     counters={"essences_generated": backfilled},
                 )
-                continue
 
-            # Get priority from typed memory for cost guard
-            priority = 5
-            try:
-                typed_mem = await self._storage.get_typed_memory(fiber.id)
-                if (
-                    typed_mem
-                    and hasattr(typed_mem, "priority")
-                    and isinstance(typed_mem.priority, (int, float))
-                ):
-                    priority = int(typed_mem.priority)
-            except Exception:
-                pass
-
-            # If the process dies before this checkpoint, the external LLM call
-            # may repeat on resume; after it succeeds, resume uses the saved text.
-            essence = await generator.generate(anchor.content, priority=priority)
-            if essence:
-                result = json.dumps(
-                    {"fiber_id": fiber.id, "essence": essence},
-                    ensure_ascii=False,
-                    separators=(",", ":"),
-                )
-                await self._checkpoint_progress(
-                    "essence_pending",
-                    cursor=cursor,
-                    pending=[result],
-                    counters={"essences_generated": backfilled},
-                )
-                # A crash between this write and the committed checkpoint is
-                # replay-safe: resume observes the saved text and avoids a
-                # duplicate write when the fiber already contains that essence.
-                current_fiber = fibers_by_id[fiber.id]
-                if not current_fiber.essence:
-                    await self._storage.update_fiber(current_fiber.with_essence(essence))
-                backfilled += 1
-
-            # Every fiber is a committed work unit, including skips and empty
-            # generator results, so the cursor can resume at the next stable ID.
-            cursor = fiber.id
-            await self._checkpoint_progress(
-                "essence_scan",
-                cursor=cursor,
-                pending=[],
-                counters={"essences_generated": backfilled},
-            )
+            page_cursor = page[-1].id
+            if len(page) < page_size:
+                break
 
         await self._checkpoint_progress(
             "essence_complete",
@@ -4252,7 +4533,9 @@ class ConsolidationEngine:
             }
             neurons = await self._storage.get_neurons_batch(sorted(neuron_ids))
             content_map = {neuron_id: neuron.content for neuron_id, neuron in neurons.items()}
-            fibers = sorted(await self._storage.get_fibers(limit=10000), key=lambda f: f.id)
+            fibers = await self._all_fibers_paged(
+                created_before=getattr(self._progress_session, "reference_time", None)
+            )
             existing_tags: set[str] = set()
             for fiber in fibers:
                 existing_tags |= fiber.tags
@@ -4353,7 +4636,9 @@ class ConsolidationEngine:
         async def source_fingerprint(excluded_ids: set[str]) -> str:
             causal = await self._storage.get_synapses(type=SynapseType.CAUSED_BY)
             related = await self._storage.get_synapses_paged(type=SynapseType.RELATED_TO)
-            fibers = await self._storage.get_fibers(limit=10000)
+            fibers = await self._all_fibers_paged(
+                created_before=getattr(self._progress_session, "reference_time", None)
+            )
             payload = {
                 "causal": [
                     encode_synapse(item)
@@ -6252,12 +6537,11 @@ class ConsolidationEngine:
         reference_time: datetime,
         dry_run: bool,
     ) -> None:
-        """Calculate heat scores and update lifecycle_state for all neurons.
+        """Update lifecycle state across the complete frozen neuron census.
 
-        Lifecycle scans use a stable record-ID keyset on stores that expose it.
-        Durable progress is saved only after each neuron has been handled, so a
-        resumed scan starts strictly after the last committed neuron. The
-        supplied reference_time remains fixed across the scan and any resume.
+        A changed neuron is revalidated and checkpointed immediately after its
+        idempotent write. Unchanged spans checkpoint once per keyset page, so a
+        steady-state scan does not incur a write or a singleton read per neuron.
         """
         import logging as _logging
 
@@ -6288,7 +6572,6 @@ class ConsolidationEngine:
         has_keyset = supports_storage_methods(self._storage, ("find_neurons_after_id",))
         fetch_by_ids: Any = getattr(self._storage, "find_neurons_by_ids", None)
         offset = 0
-        scanned = 0
         pending: list[str] = list(strategy_state.get("pending") or [])
 
         prefetched_states: dict[str, Any] | None = None
@@ -6316,15 +6599,7 @@ class ConsolidationEngine:
                 }
             return await self._storage.get_neuron_states_batch([neuron.id for neuron in neurons])
 
-        async def _process(neuron: Neuron, state_map: dict[str, Any]) -> bool:
-            nonlocal states_updated
-            # Refresh the candidate before applying a decision based on a page
-            # that may have become stale while earlier records were processed.
-            if callable(fetch_by_ids) and not dry_run:
-                fresh = await fetch_by_ids([neuron.id], include_embedding=False)
-                if not fresh:
-                    return True
-                neuron = fresh[0]
+        def _desired_state(neuron: Neuron, state_map: dict[str, Any]) -> str:
             neuron_state = state_map.get(neuron.id)
             last_accessed_at: datetime | None = (
                 neuron_state.last_activated if neuron_state is not None else None
@@ -6339,51 +6614,86 @@ class ConsolidationEngine:
                 config=config,
             )
             age_days = (reference_time - neuron.created_at).total_seconds() / 86400.0
-            new_state = determine_lifecycle_state(age_days, heat, config)
-            current_state = str(neuron.metadata.get("lifecycle_state", "active"))
-            if current_state == str(new_state):
-                return True
+            return str(determine_lifecycle_state(age_days, heat, config))
+
+        async def _process(
+            neuron: Neuron, state_map: dict[str, Any], *, refreshed: bool = False
+        ) -> tuple[bool, bool]:
+            nonlocal states_updated
+            new_state = _desired_state(neuron, state_map)
+            if str(neuron.metadata.get("lifecycle_state", "active")) == new_state:
+                return True, False
             if dry_run:
                 states_updated += 1
-                return True
+                return True, False
+
+            # Only potential writes need a refresh. Page candidates arrive
+            # pre-refreshed; pending IDs and legacy callers use this fallback.
+            if callable(fetch_by_ids) and not refreshed:
+                fresh = await fetch_by_ids([neuron.id], include_embedding=False)
+                if not fresh:
+                    return True, False
+                neuron = fresh[0]
+            if neuron.ephemeral or neuron.created_at > reference_time:
+                return True, False
+            new_state = _desired_state(neuron, state_map)
+            if str(neuron.metadata.get("lifecycle_state", "active")) == new_state:
+                return True, False
             try:
-                await self._storage.update_neuron_lifecycle(neuron.id, str(new_state))
+                await self._storage.update_neuron_lifecycle(neuron.id, new_state)
                 states_updated += 1
-                return True
+                return True, True
             except Exception:
                 _logger.error(
                     "Failed to update lifecycle_state for neuron %s", neuron.id, exc_info=True
                 )
-                return False
+                return False, False
+
+        async def _checkpoint() -> None:
+            if not dry_run:
+                await self._checkpoint_progress(
+                    "scan",
+                    cursor=str(cursor) if cursor is not None else None,
+                    pending=pending,
+                    counters={"lifecycle_states_updated": states_updated},
+                )
 
         try:
             if has_keyset:
-                # Failed updates from a previous attempt are revisited before the
-                # cursor scan; these IDs are explicit work, not offset progress.
+                # Pending failures are revisited before advancing the keyset.
+                # Keep unprocessed IDs durable at every successful write.
                 if pending:
                     if not callable(fetch_by_ids):
-                        pending_neurons = []
-                    else:
-                        pending_neurons = await fetch_by_ids(pending, include_embedding=False)
+                        raise RuntimeError("LIFECYCLE pending IDs require find_neurons_by_ids")
+                    pending_neurons = await fetch_by_ids(pending, include_embedding=False)
+                    pending_map = {neuron.id: neuron for neuron in pending_neurons}
                     state_map = await _states_for(pending_neurons)
-                    still_pending: list[str] = []
-                    for neuron in sorted(pending_neurons, key=lambda item: item.id):
-                        ok = await _process(neuron, state_map)
+                    previous_pending = pending
+                    pending = []
+                    for index, neuron_id in enumerate(previous_pending):
+                        neuron = pending_map.get(neuron_id)
+                        if neuron is None:
+                            continue  # Deleted since the previous run.
+                        ok, changed = await _process(neuron, state_map, refreshed=True)
                         if not ok:
-                            still_pending.append(neuron.id)
-                        elif not dry_run:
-                            await self._checkpoint_progress(
-                                "scan",
-                                cursor=str(cursor) if cursor is not None else None,
-                                pending=still_pending,
-                                counters={"lifecycle_states_updated": states_updated},
-                            )
-                    pending = still_pending
+                            pending.append(neuron_id)
+                        if changed:
+                            remaining = previous_pending[index + 1 :]
+                            saved_pending = pending
+                            pending = pending + remaining
+                            await _checkpoint()
+                            pending = saved_pending
+                    await _checkpoint()
+                    if pending:
+                        raise ConsolidationPausedError(
+                            f"LIFECYCLE: {len(pending)} neuron update(s) failed; "
+                            "the saved pending IDs will be retried"
+                        )
 
-                while scanned < 10000:
+                while True:
                     batch = await keyset_fetch(
                         str(cursor) if cursor is not None else None,
-                        limit=min(batch_size, 10000 - scanned),
+                        limit=batch_size,
                         created_before=reference_time,
                         ephemeral=False,
                         include_embedding=False,
@@ -6391,26 +6701,53 @@ class ConsolidationEngine:
                     if not batch:
                         break
                     state_map = await _states_for(batch)
+                    # Only potential writes need revalidation. Fetch those
+                    # records together instead of one round-trip per change.
+                    refreshed_map: dict[str, Neuron] | None = None
+                    if callable(fetch_by_ids) and not dry_run:
+                        candidate_ids = [
+                            neuron.id
+                            for neuron in batch
+                            if str(neuron.metadata.get("lifecycle_state", "active"))
+                            != _desired_state(neuron, state_map)
+                        ]
+                        if candidate_ids:
+                            refreshed_map = {
+                                neuron.id: neuron
+                                for neuron in await fetch_by_ids(
+                                    candidate_ids, include_embedding=False
+                                )
+                            }
                     for neuron in batch:
-                        ok = await _process(neuron, state_map)
+                        candidate = refreshed_map is not None and neuron.id in candidate_ids
+                        fresh_neuron = (
+                            refreshed_map.get(neuron.id)
+                            if refreshed_map is not None and candidate
+                            else neuron
+                        )
+                        if fresh_neuron is None:
+                            cursor = neuron.id  # Deleted after page fetch.
+                            continue
+                        ok, changed = await _process(
+                            fresh_neuron, state_map, refreshed=bool(candidate)
+                        )
                         cursor = neuron.id
-                        scanned += 1
                         if not ok:
                             pending.append(neuron.id)
-                        if not dry_run:
-                            await self._checkpoint_progress(
-                                "scan",
-                                cursor=str(cursor),
-                                pending=pending,
-                                counters={"lifecycle_states_updated": states_updated},
-                            )
+                        if changed:
+                            await _checkpoint()
+                    await _checkpoint()
                     if len(batch) < batch_size:
                         break
+                if pending:
+                    raise ConsolidationPausedError(
+                        f"LIFECYCLE: {len(pending)} neuron update(s) failed; "
+                        "the saved pending IDs will be retried"
+                    )
             else:
-                # Legacy in-memory/test backends have no keyset API and cannot
-                # participate in durable resume; retain their existing paging.
-                neurons: list[Neuron] = []
-                while len(neurons) < 10000:
+                # Legacy backends lack durable keyset resume; process all pages
+                # without retaining a capped collection of neurons in memory.
+                while True:
                     batch = await self._storage.find_neurons(
                         limit=batch_size,
                         offset=offset,
@@ -6419,13 +6756,14 @@ class ConsolidationEngine:
                     )
                     if not batch:
                         break
-                    neurons.extend(batch)
+                    state_map = await _states_for(batch)
+                    for neuron in batch:
+                        await _process(neuron, state_map)
                     offset += len(batch)
                     if len(batch) < batch_size:
                         break
-                state_map = await _states_for(neurons)
-                for neuron in neurons:
-                    await _process(neuron, state_map)
+        except ConsolidationPausedError:
+            raise
         except Exception:
             _logger.error("LIFECYCLE failed to fetch or process neurons", exc_info=True)
             raise
