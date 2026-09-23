@@ -23,6 +23,7 @@ import re
 from dataclasses import dataclass
 from datetime import datetime
 from typing import TYPE_CHECKING, Any, Final, Literal, Protocol
+from uuid import uuid4
 
 from surreal_memory.engine.hooks import HookEvent
 from surreal_memory.engine.retrieval import DepthLevel
@@ -40,7 +41,8 @@ TOR_PATTERN: Final = re.compile(r"^(?:mcp|http:[a-z0-9][a-z0-9-]{0,31})$")
 AGENT_ID_MAX: Final = 120
 
 RecallPath = Literal["error", "exact_fiber", "surface", "min_confidence", "pipeline"]
-TraceStatus = Literal["sync", "sync_error", "background", "off", "skipped"]
+TraceStatus = Literal["sync", "sync_error", "background", "off", "skipped", "deferred"]
+Skutki = Literal["inline", "odroczone"]
 
 # Strong refs for background trace tasks when the caller does not hold its own set.
 _BACKGROUND_TRACE_TASKS: set[asyncio.Task[None]] = set()
@@ -81,6 +83,9 @@ class RecallOutcome:
     path: RecallPath
     trace: TraceStatus
     brain_id: str | None
+    # skutki="odroczone": the post-answer side effects + trace, still running (hold a strong ref,
+    # await it before the NEXT recall — the barrier keeps the state sequence identical to inline).
+    pending: asyncio.Task[TraceStatus] | None = None
 
 
 async def _rebuild_context_for_fibers(
@@ -216,8 +221,16 @@ async def recall(
     hooks: HookRegistry | None = None,
     extras: RecallExtras | None = None,
     trace_tasks: set[asyncio.Task[None]] | None = None,
+    skutki: Skutki = "inline",
+    dekoracje: bool = True,
 ) -> RecallOutcome:
     """Query memories via spreading activation and persist the retrieval trace.
+
+    ``skutki="odroczone"`` answers first and runs the pipeline's post-answer side effects
+    (reinforcement, flush, reconsolidation, session, the Jev wait) and the trace in
+    ``RecallOutcome.pending``; the caller MUST await it before starting the next recall.
+    ``dekoracje=False`` skips response decorations a caller does not return (``sources``,
+    ``cognitive_chunks``); the post-filter always runs.
 
     Raises:
         ValueError: ``tor`` does not match :data:`TOR_PATTERN` or ``agent_id`` is longer
@@ -377,18 +390,23 @@ async def recall(
     from surreal_memory.engine.retrieval import ReflexPipeline
 
     pipeline = ReflexPipeline(storage, brain.config)
-    result = await pipeline.query(
-        query=effective_query,
-        depth=depth,
-        max_tokens=max_tokens,
-        reference_time=utcnow(),
-        valid_at=valid_at,
-        near=near,
-        tags=tags,
-        session_id=engine_session_id,
-        exclude_ephemeral=permanent_only,
-        reconsolidate=reconsolidate,
-    )
+    _query_args: dict[str, Any] = {
+        "query": effective_query,
+        "depth": depth,
+        "max_tokens": max_tokens,
+        "reference_time": utcnow(),
+        "valid_at": valid_at,
+        "near": near,
+        "tags": tags,
+        "session_id": engine_session_id,
+        "exclude_ephemeral": permanent_only,
+        "reconsolidate": reconsolidate,
+    }
+    _dokoncz: Any = None
+    if skutki == "odroczone":
+        result, _dokoncz = await pipeline.query_rozdzielone(**_query_args)
+    else:
+        result = await pipeline.query(**_query_args)
 
     # Passive auto-capture on long queries + eternal trigger: MCP-only (hak after_query)
     if extras is not None:
@@ -769,76 +787,77 @@ async def recall(
         except Exception:
             logger.debug("Expiry warning check failed", exc_info=True)
 
-    # Enrich results with source metadata from typed_memory.source
-    try:
-        if result.fibers_matched:
-            source_map: dict[str, dict[str, Any]] = {}
-            for fid in result.fibers_matched:
-                tm = await storage.get_typed_memory(fid)
-                if not tm or not tm.source or not tm.source.startswith("source:"):
-                    continue
-                src_id = tm.source[len("source:") :]
-                src = await storage.get_source(src_id)
-                if src:
-                    source_map[fid] = {
-                        "source_id": src.id,
-                        "name": src.name,
-                        "source_type": src.source_type.value,
-                        "version": src.version,
-                        "status": src.status.value,
-                        "trust": src.trust,
-                    }
-            if source_map:
-                response["sources"] = source_map
-    except Exception:
-        logger.debug("Source enrichment failed (non-critical)", exc_info=True)
-
-    # Cognitive chunking: group results when many fibers matched
-    fibers_count_for_chunking = (
-        len(result.fibers_matched)
-        if isinstance(result.fibers_matched, list)
-        else result.fibers_matched
-    )
-    if (
-        getattr(brain.config, "chunking_enabled", True)
-        and fibers_count_for_chunking
-        and fibers_count_for_chunking > 7
-    ):
+    if dekoracje:
+        # Enrich results with source metadata from typed_memory.source
         try:
-            from surreal_memory.engine.chunking import chunk_retrieval_results
-
-            chunk_neuron_ids = list(result.subgraph.neuron_ids) if result.subgraph else []
-            stored_levels = (result.metadata or {}).get("activation_levels", {})
-            chunk_activations = {nid: stored_levels.get(nid, 0.5) for nid in chunk_neuron_ids}
-            synapse_pairs: list[tuple[str, str, float]] = []
-            for nid in chunk_neuron_ids[:20]:
-                syns = await storage.get_synapses(source_id=nid)
-                for s in syns:
-                    synapse_pairs.append((s.source_id, s.target_id, s.weight))
-
-            max_chunks = (
-                int(getattr(brain.config, "max_chunks", 5))
-                if isinstance(getattr(brain.config, "max_chunks", 5), (int, float))
-                else 5
-            )
-            chunks = chunk_retrieval_results(
-                neuron_ids=chunk_neuron_ids,
-                activation_levels=chunk_activations,
-                synapse_pairs=synapse_pairs,
-                max_chunks=max_chunks,
-            )
-            if chunks:
-                response["cognitive_chunks"] = [
-                    {
-                        "label": c.label,
-                        "neuron_ids": list(c.neuron_ids),
-                        "coherence": c.coherence,
-                        "relevance": c.relevance,
-                    }
-                    for c in chunks
-                ]
+            if result.fibers_matched:
+                source_map: dict[str, dict[str, Any]] = {}
+                for fid in result.fibers_matched:
+                    tm = await storage.get_typed_memory(fid)
+                    if not tm or not tm.source or not tm.source.startswith("source:"):
+                        continue
+                    src_id = tm.source[len("source:") :]
+                    src = await storage.get_source(src_id)
+                    if src:
+                        source_map[fid] = {
+                            "source_id": src.id,
+                            "name": src.name,
+                            "source_type": src.source_type.value,
+                            "version": src.version,
+                            "status": src.status.value,
+                            "trust": src.trust,
+                        }
+                if source_map:
+                    response["sources"] = source_map
         except Exception:
-            logger.debug("Cognitive chunking failed (non-critical)", exc_info=True)
+            logger.debug("Source enrichment failed (non-critical)", exc_info=True)
+
+        # Cognitive chunking: group results when many fibers matched
+        fibers_count_for_chunking = (
+            len(result.fibers_matched)
+            if isinstance(result.fibers_matched, list)
+            else result.fibers_matched
+        )
+        if (
+            getattr(brain.config, "chunking_enabled", True)
+            and fibers_count_for_chunking
+            and fibers_count_for_chunking > 7
+        ):
+            try:
+                from surreal_memory.engine.chunking import chunk_retrieval_results
+
+                chunk_neuron_ids = list(result.subgraph.neuron_ids) if result.subgraph else []
+                stored_levels = (result.metadata or {}).get("activation_levels", {})
+                chunk_activations = {nid: stored_levels.get(nid, 0.5) for nid in chunk_neuron_ids}
+                synapse_pairs: list[tuple[str, str, float]] = []
+                for nid in chunk_neuron_ids[:20]:
+                    syns = await storage.get_synapses(source_id=nid)
+                    for s in syns:
+                        synapse_pairs.append((s.source_id, s.target_id, s.weight))
+
+                max_chunks = (
+                    int(getattr(brain.config, "max_chunks", 5))
+                    if isinstance(getattr(brain.config, "max_chunks", 5), (int, float))
+                    else 5
+                )
+                chunks = chunk_retrieval_results(
+                    neuron_ids=chunk_neuron_ids,
+                    activation_levels=chunk_activations,
+                    synapse_pairs=synapse_pairs,
+                    max_chunks=max_chunks,
+                )
+                if chunks:
+                    response["cognitive_chunks"] = [
+                        {
+                            "label": c.label,
+                            "neuron_ids": list(c.neuron_ids),
+                            "coherence": c.coherence,
+                            "relevance": c.relevance,
+                        }
+                        for c in chunks
+                    ]
+            except Exception:
+                logger.debug("Cognitive chunking failed (non-critical)", exc_info=True)
 
     # Session intelligence: attach topic context
     session_topics = (result.metadata or {}).get("session_topics")
@@ -862,6 +881,37 @@ async def recall(
             logger.debug("Uncertainty block build failed (non-critical)", exc_info=True)
 
     # U4: retrieval-trace telemetry (opt-in; off by default → true no-op).
+    if _dokoncz is not None:
+        trace_id = str(uuid4())
+        response["trace_id"] = trace_id
+        answered = result
+
+        async def _skutki_i_slad() -> TraceStatus:
+            final = await _dokoncz()
+            # Signals (Jev, refusal) live on the pipeline's result; the fiber list the caller
+            # was answered with is the post-filtered one.
+            view = _result_replace(final, fibers_matched=list(answered.fibers_matched))
+            status = await persist_trace(
+                {},
+                view,
+                query=query,
+                args={**args, "trace": True},
+                brain=brain,
+                mode=recall_mode,
+                storage=storage,
+                config=config,
+                tor=tor,
+                agent_id=agent_id,
+                trace_tasks=trace_tasks,
+                trace_id=trace_id,
+            )
+            if status != "sync":
+                raise RuntimeError(f"deferred trace not persisted: {status}")
+            return status
+
+        pending: asyncio.Task[TraceStatus] = asyncio.create_task(_skutki_i_slad())
+        return RecallOutcome(response, result, "pipeline", "deferred", brain_id, pending)
+
     trace_status = await persist_trace(
         response,
         result,
@@ -918,6 +968,7 @@ async def persist_trace(
     tor: str,
     agent_id: str | None,
     trace_tasks: set[asyncio.Task[None]] | None,
+    trace_id: str | None = None,
 ) -> TraceStatus:
     """Persist a compact RetrievalTrace for this recall, when enabled.
 
@@ -957,6 +1008,8 @@ async def persist_trace(
             tor=tor,
             agent_id=agent_id,
         )
+        if trace_id is not None:
+            trace = dataclasses.replace(trace, id=trace_id)
 
         if per_call:
             # Synchronous: the caller explicitly asked for the id back, so surface

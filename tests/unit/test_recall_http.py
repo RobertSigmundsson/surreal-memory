@@ -321,3 +321,86 @@ def test_cli_logging_emits_info_line_once() -> None:
     configure_logging()  # idempotent: no duplicate handler
     assert log.level == logging.INFO and log.propagate is False
     assert sum(1 for h in log.handlers if getattr(h, "_recall_http", False)) == 1
+
+
+@pytest.mark.asyncio
+async def test_odroczone_barrier_awaits_previous_side_effects_before_next_recall() -> None:
+    import asyncio
+
+    zdarzenia: list[str] = []
+
+    async def _skutki(i: int) -> str:
+        await asyncio.sleep(0.2)
+        zdarzenia.append(f"skutki-{i}")
+        return "sync"
+
+    licznik = {"n": 0}
+
+    async def _engine(storage: Any, args: dict[str, Any], **kw: Any) -> Any:
+        licznik["n"] += 1
+        i = licznik["n"]
+        zdarzenia.append(f"recall-{i}")
+        assert kw["skutki"] == "odroczone" and kw["dekoracje"] is False
+        out = _outcome()
+        return recall_api.RecallOutcome(
+            out.response, out.result, "pipeline", "deferred", "b1", asyncio.create_task(_skutki(i))
+        )
+
+    app = create_app(key=KEY, skutki="odroczone", bariera_s=5.0)
+
+    async def _storage() -> Any:
+        return _Storage()
+
+    with (
+        patch.object(recall_api, "recall", _engine),
+        patch("surreal_memory.unified_config.get_shared_storage", _storage),
+    ):
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://t"
+        ) as c:
+            r1 = await c.post("/v1/recall", json=BODY, headers=AUTH)
+            r2 = await c.post("/v1/recall", json=BODY, headers=AUTH)
+            for t in list(app.state.odroczone):
+                await t
+    assert r1.status_code == r2.status_code == 200
+    assert r1.json()["trace_status"] == "deferred"
+    assert zdarzenia == ["recall-1", "skutki-1", "recall-2", "skutki-2"]
+    assert app.state.counters["odroczone_ok"] == 2 and app.state.counters["bariera_timeout"] == 0
+
+
+@pytest.mark.asyncio
+async def test_bariera_zero_does_not_wait_negative_control() -> None:
+    import asyncio
+
+    zdarzenia: list[str] = []
+
+    async def _skutki() -> str:
+        await asyncio.sleep(0.3)
+        zdarzenia.append("skutki")
+        return "sync"
+
+    async def _engine(storage: Any, args: dict[str, Any], **kw: Any) -> Any:
+        zdarzenia.append("recall")
+        out = _outcome()
+        return recall_api.RecallOutcome(
+            out.response, out.result, "pipeline", "deferred", "b1", asyncio.create_task(_skutki())
+        )
+
+    app = create_app(key=KEY, skutki="odroczone", bariera_s=0.0)
+
+    async def _storage() -> Any:
+        return _Storage()
+
+    with (
+        patch.object(recall_api, "recall", _engine),
+        patch("surreal_memory.unified_config.get_shared_storage", _storage),
+    ):
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://t"
+        ) as c:
+            await c.post("/v1/recall", json=BODY, headers=AUTH)
+            await c.post("/v1/recall", json=BODY, headers=AUTH)
+            for t in list(app.state.odroczone):
+                await t
+    assert zdarzenia[:2] == ["recall", "recall"]  # without the barrier the 2nd recall overtakes
+    assert app.state.counters["bariera_timeout"] >= 1

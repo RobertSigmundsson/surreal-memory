@@ -10,6 +10,7 @@ import logging
 import math
 import os
 import time
+from collections.abc import Awaitable, Callable
 from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
@@ -222,6 +223,15 @@ def _priority_multiplier(metadata: dict[str, Any], weight: float, auto_weight: f
     return 1.0 + effective_weight * (priority - 5.0) / 5.0
 
 
+def _gotowe(result: RetrievalResult) -> Callable[[], Awaitable[RetrievalResult]]:
+    """``finish`` for fast paths and early exits: their side effects already ran."""
+
+    async def _finish() -> RetrievalResult:
+        return result
+
+    return _finish
+
+
 class ReflexPipeline:
     """
     Main retrieval engine - the "consciousness" of the memory system.
@@ -380,6 +390,54 @@ class ReflexPipeline:
         Returns:
             RetrievalResult with answer and context
         """
+        wynik, dokoncz = await self.query_rozdzielone(
+            query=query,
+            depth=depth,
+            max_tokens=max_tokens,
+            reference_time=reference_time,
+            valid_at=valid_at,
+            near=near,
+            tags=tags,
+            session_id=session_id,
+            exclude_ephemeral=exclude_ephemeral,
+            reconsolidate=reconsolidate,
+        )
+        return await dokoncz()
+
+    async def query_rozdzielone(
+        self,
+        query: str,
+        depth: DepthLevel | None = None,
+        max_tokens: int | None = None,
+        reference_time: datetime | None = None,
+        valid_at: datetime | None = None,
+        near: GeoFilter | None = None,
+        tags: set[str] | None = None,
+        session_id: str | None = None,
+        exclude_ephemeral: bool = False,
+        reconsolidate: bool = True,
+    ) -> tuple[RetrievalResult, Callable[[], Awaitable[RetrievalResult]]]:
+        """
+        Execute the retrieval pipeline, split into the ANSWER and its SIDE EFFECTS.
+
+        Returns ``(result, finish)``: ``result`` carries everything a caller needs to
+        answer (steps 1-7, ``latency_ms`` as before); ``await finish()`` runs the
+        post-answer work in exactly today's order (reinforcement, access time, the
+        Jev wait and refusal signals, priming, depth prior, workflow suggestions, the
+        deferred-write flush, reconsolidation, session) on the SAME result object and
+        returns it. Call ``finish`` exactly once. ``query()`` awaits it immediately,
+        so every existing caller sees no change. Fast paths and early exits return a
+        ``finish`` that does nothing more.
+
+        Args:
+            query: The query text
+            depth: Retrieval depth (auto-detect if None)
+            max_tokens: Maximum tokens in context
+            reference_time: Reference time for temporal parsing
+
+        Returns:
+            RetrievalResult with answer and context
+        """
         start_time = time.perf_counter()
 
         # Clear stale writes from any previous failed query
@@ -433,7 +491,7 @@ class ReflexPipeline:
                 stimulus, depth, reference_time, start_time
             )
             if temporal_result is not None:
-                return temporal_result
+                return temporal_result, _gotowe(temporal_result)
 
         # 2.8 Fiber summary tier — lightweight first-pass retrieval (also geo-bypassed).
         if near is None and self._config.fiber_summary_tier_enabled and depth != DepthLevel.INSTANT:
@@ -441,7 +499,7 @@ class ReflexPipeline:
                 stimulus, depth, max_tokens, start_time
             )
             if fiber_result is not None:
-                return fiber_result
+                return fiber_result, _gotowe(fiber_result)
 
         # 3. Find anchor neurons (time-first) with ranked results
         anchor_sets, ranked_lists, embedding_outcome = await self._find_anchors_ranked(
@@ -775,7 +833,7 @@ class ReflexPipeline:
                     await self._write_queue.flush(self._storage)
                 except Exception:
                     logger.debug("Deferred write flush failed (non-critical)", exc_info=True)
-            return _early_result
+            return _early_result, _gotowe(_early_result)
 
         # 4.9 Cross-encoder reranking (optional post-SA refinement).
         # Reranking is deployment/runtime config, NOT per-brain state — read it
@@ -947,7 +1005,7 @@ class ReflexPipeline:
                     await self._write_queue.flush(self._storage)
                 except Exception:
                     logger.debug("Deferred write flush failed (non-critical)", exc_info=True)
-            return _early_result
+            return _early_result, _gotowe(_early_result)
 
         # Program smem-recall-trzy-warstwy, unit U3: Jev (TypeSafe System One)
         # refusal-observability signal (fourth W3 layer, after reranker/leksyka/
@@ -1049,29 +1107,6 @@ class ReflexPipeline:
 
         latency_ms = (time.perf_counter() - start_time) * 1000
 
-        # 8. Reinforce accessed memories (deferred to after response)
-        if activations and reconstruction.confidence > 0.3:
-            try:
-                top_neuron_ids = [
-                    nid
-                    for nid, _ in heapq.nlargest(
-                        self._config.reinforcement_neuron_limit,
-                        activations.items(),
-                        key=lambda x: x[1].activation_level,
-                    )
-                ]
-                top_synapse_ids = subgraph.synapse_ids[:20] if subgraph.synapse_ids else None
-                await self._reinforcer.reinforce(self._storage, top_neuron_ids, top_synapse_ids)
-            except Exception:
-                logger.debug("Reinforcement failed (non-critical)", exc_info=True)
-
-        # 9. Track access time for lifecycle heat scoring (batch update, non-critical)
-        if activations:
-            try:
-                await self._storage.batch_update_last_accessed(list(activations.keys()))
-            except Exception:
-                logger.debug("batch_update_last_accessed failed (non-critical)", exc_info=True)
-
         result = RetrievalResult(
             answer=reconstruction.answer,
             confidence=reconstruction.confidence,
@@ -1107,229 +1142,262 @@ class ReflexPipeline:
             },
         )
 
-        # M4 (reranker_refusal_floor): the floor was configured but this query's
-        # reranking degraded, so the raw top-1 score cannot be trusted as a
-        # refusal signal — cisza nie jest sukcesem, the skip is named rather
-        # than silently doing nothing.
-        if _reranker_floor_skipped is not None:
-            result.metadata["reranker_floor_skipped"] = _reranker_floor_skipped
-
-        if _rerank_degraded is not None:
-            _m4_unmeasured = _rerank_degraded
-        elif _rerank_raw_top1 is None:
-            _m4_unmeasured = "no raw cross-encoder top-1 score for this query"
-        else:
-            _m4_unmeasured = None
-
-        # Program smem-recall-trzy-warstwy, unit U3: `await` the Jev task
-        # created right after 4.9/4.9b -- this is the ONE point it can block,
-        # and only up to `timeout_ms` (+ a small safety margin in case the
-        # socket timeout inside `zapytaj_jev` ever fails to bound the thread) --
-        # everything since (steps 5-9: fiber matching, subgraph extraction,
-        # answer reconstruction, `format_context`) already ran concurrently
-        # with it (H6/K7).
-        if _jev_task is not None:
-            try:
-                _jev_odpowiedz = await asyncio.wait_for(
-                    _jev_task, timeout=(_jev_cfg.timeout_ms / 1000.0) + 0.25
-                )
-            except TimeoutError:
-                _jev_task.cancel()
-                _jev_odpowiedz = OdpowiedzJev(
-                    status="JEV_NIEDOSTEPNY",
-                    odpowiada=None,
-                    sensowne=None,
-                    ta_domena=None,
-                    jakosc=None,
-                    jakosc_conf=None,
-                    ms=float(_jev_cfg.timeout_ms),
-                    tok=None,
-                    zredagowano=0,
-                    powod="asyncio.wait_for exceeded the timeout_ms safety margin",
-                )
-            if _jev_odpowiedz.status == "OK" and _jev_odpowiedz.odpowiada is not None:
-                _jev_would_refuse: bool | None = _jev_odpowiedz.odpowiada < PROG_ODPOWIADA_STARTOWY
-            else:
-                # NEVER `False` when unmeasured -- "did not refuse" and
-                # "could not tell" must stay distinguishable (cisza nie jest
-                # sukcesem), same discipline as `m4_would_refuse`/`m4_measured`.
-                _jev_would_refuse = None
-            _jev_sygnaly = {
-                "jev_status": _jev_odpowiedz.status,
-                "jev_odpowiada": _jev_odpowiedz.odpowiada,
-                "jev_sensowne": _jev_odpowiedz.sensowne,
-                "jev_ta_domena": _jev_odpowiedz.ta_domena,
-                "jev_jakosc": _jev_odpowiedz.jakosc,
-                "jev_would_refuse": _jev_would_refuse,
-                "jev_ms": _jev_odpowiedz.ms,
-                "jev_zredagowano": _jev_odpowiedz.zredagowano,
-                "jev_pytania_sha": sha256_pytan(),
-                "jev_powod": _jev_odpowiedz.powod,
-            }
-
-        _odmowa_sygnaly = _make_odmowa_sygnaly(
-            m4_would_refuse=_m4_would_refuse,
-            rerank_raw_top1=_rerank_raw_top1,
-            m4_unmeasured_reason=_m4_unmeasured,
-        )
-        if _odmowa_sygnaly is not None:
-            result.metadata["odmowa_sygnaly"] = _odmowa_sygnaly
-
-        # U2: surface trust/recency calibration when active (no-op at neutral defaults).
-        _tw = max(0.0, min(1.0, self._config.trust_weight))
-        _rw = max(0.0, min(1.0, self._config.recency_weight))
-        if _tw > 0.0 and self._last_trust_map:
-            result.metadata["trust_factors"] = dict(self._last_trust_map)
-            result.metadata["trust_weight"] = _tw
-        if _rw != 1.0:
-            result.metadata["recency_weight"] = _rw
-        if result.score_breakdown is not None and (_tw > 0.0 or _rw != 1.0):
-            _top_trust = (
-                self._last_trust_map.get(result.fibers_matched[0], self._config.trust_default)
-                if result.fibers_matched and self._last_trust_map
-                else 1.0
-            )
-            _trust_factor = (1.0 - _tw) + _tw * _top_trust if _tw > 0.0 else 1.0
-            result.score_breakdown = dataclasses.replace(
-                result.score_breakdown,
-                trust_factor=_trust_factor,
-                recency_factor=_rw,
-            )
-
-        # Update priming cache and metrics (non-critical)
-        if session_id and _priming_result is not None:
-            try:
-                from surreal_memory.engine.priming import record_priming_outcome
-
-                _act_cache = self._activation_caches.get(session_id)
-                _prim_metrics = self._priming_metrics.get(session_id)
-
-                # Update activation cache with this query's results
-                if _act_cache is not None:
-                    activation_levels = {
-                        nid: ar.activation_level for nid, ar in activations.items()
-                    }
-                    _act_cache.update_from_result(activation_levels)
-
-                # Record priming outcome (hit/miss)
-                if _prim_metrics is not None and _primed_neuron_ids:
-                    _result_nids = set(activations.keys())
-                    record_priming_outcome(_prim_metrics, _primed_neuron_ids, _result_nids)
-                    result.metadata["priming"] = {
-                        "neurons_primed": _priming_result.total_primed,
-                        "sources": _priming_result.source_counts,
-                        "hit_rate": round(_prim_metrics.hit_rate, 4),
-                        "aggressiveness": round(_prim_metrics.aggressiveness_multiplier, 2),
-                    }
-            except Exception:
-                logger.debug("Priming cache update failed (non-critical)", exc_info=True)
-
-        # Record adaptive depth outcome (non-critical)
-        if _depth_decision is not None:
-            result.metadata["depth_selection"] = {
-                "method": _depth_decision.method,
-                "reason": _depth_decision.reason,
-                "exploration": _depth_decision.exploration,
-            }
-            if self._adaptive_selector is not None:
+        async def _dokoncz() -> RetrievalResult:
+            # Post-answer work, verbatim and in today's order. `nonlocal`: the refusal-signal
+            # closure above reads `_jev_sygnaly` from this method's scope.
+            nonlocal _jev_sygnaly
+            # 8. Reinforce accessed memories (deferred to after response)
+            if activations and reconstruction.confidence > 0.3:
                 try:
-                    # Infer agent_used_result from priming hit rate:
-                    # If primed neurons appeared in result → agent is using the recall
-                    _agent_signal: bool | None = None
-                    if _primed_neuron_ids and activations:
+                    top_neuron_ids = [
+                        nid
+                        for nid, _ in heapq.nlargest(
+                            self._config.reinforcement_neuron_limit,
+                            activations.items(),
+                            key=lambda x: x[1].activation_level,
+                        )
+                    ]
+                    top_synapse_ids = subgraph.synapse_ids[:20] if subgraph.synapse_ids else None
+                    await self._reinforcer.reinforce(self._storage, top_neuron_ids, top_synapse_ids)
+                except Exception:
+                    logger.debug("Reinforcement failed (non-critical)", exc_info=True)
+
+            # 9. Track access time for lifecycle heat scoring (batch update, non-critical)
+            if activations:
+                try:
+                    await self._storage.batch_update_last_accessed(list(activations.keys()))
+                except Exception:
+                    logger.debug("batch_update_last_accessed failed (non-critical)", exc_info=True)
+
+            # M4 (reranker_refusal_floor): the floor was configured but this query's
+            # reranking degraded, so the raw top-1 score cannot be trusted as a
+            # refusal signal — cisza nie jest sukcesem, the skip is named rather
+            # than silently doing nothing.
+            if _reranker_floor_skipped is not None:
+                result.metadata["reranker_floor_skipped"] = _reranker_floor_skipped
+
+            if _rerank_degraded is not None:
+                _m4_unmeasured = _rerank_degraded
+            elif _rerank_raw_top1 is None:
+                _m4_unmeasured = "no raw cross-encoder top-1 score for this query"
+            else:
+                _m4_unmeasured = None
+
+            # Program smem-recall-trzy-warstwy, unit U3: `await` the Jev task
+            # created right after 4.9/4.9b -- this is the ONE point it can block,
+            # and only up to `timeout_ms` (+ a small safety margin in case the
+            # socket timeout inside `zapytaj_jev` ever fails to bound the thread) --
+            # everything since (steps 5-9: fiber matching, subgraph extraction,
+            # answer reconstruction, `format_context`) already ran concurrently
+            # with it (H6/K7).
+            if _jev_task is not None:
+                try:
+                    _jev_odpowiedz = await asyncio.wait_for(
+                        _jev_task, timeout=(_jev_cfg.timeout_ms / 1000.0) + 0.25
+                    )
+                except TimeoutError:
+                    _jev_task.cancel()
+                    _jev_odpowiedz = OdpowiedzJev(
+                        status="JEV_NIEDOSTEPNY",
+                        odpowiada=None,
+                        sensowne=None,
+                        ta_domena=None,
+                        jakosc=None,
+                        jakosc_conf=None,
+                        ms=float(_jev_cfg.timeout_ms),
+                        tok=None,
+                        zredagowano=0,
+                        powod="asyncio.wait_for exceeded the timeout_ms safety margin",
+                    )
+                if _jev_odpowiedz.status == "OK" and _jev_odpowiedz.odpowiada is not None:
+                    _jev_would_refuse: bool | None = (
+                        _jev_odpowiedz.odpowiada < PROG_ODPOWIADA_STARTOWY
+                    )
+                else:
+                    # NEVER `False` when unmeasured -- "did not refuse" and
+                    # "could not tell" must stay distinguishable (cisza nie jest
+                    # sukcesem), same discipline as `m4_would_refuse`/`m4_measured`.
+                    _jev_would_refuse = None
+                _jev_sygnaly = {
+                    "jev_status": _jev_odpowiedz.status,
+                    "jev_odpowiada": _jev_odpowiedz.odpowiada,
+                    "jev_sensowne": _jev_odpowiedz.sensowne,
+                    "jev_ta_domena": _jev_odpowiedz.ta_domena,
+                    "jev_jakosc": _jev_odpowiedz.jakosc,
+                    "jev_would_refuse": _jev_would_refuse,
+                    "jev_ms": _jev_odpowiedz.ms,
+                    "jev_zredagowano": _jev_odpowiedz.zredagowano,
+                    "jev_pytania_sha": sha256_pytan(),
+                    "jev_powod": _jev_odpowiedz.powod,
+                }
+
+            _odmowa_sygnaly = _make_odmowa_sygnaly(
+                m4_would_refuse=_m4_would_refuse,
+                rerank_raw_top1=_rerank_raw_top1,
+                m4_unmeasured_reason=_m4_unmeasured,
+            )
+            if _odmowa_sygnaly is not None:
+                result.metadata["odmowa_sygnaly"] = _odmowa_sygnaly
+
+            # U2: surface trust/recency calibration when active (no-op at neutral defaults).
+            _tw = max(0.0, min(1.0, self._config.trust_weight))
+            _rw = max(0.0, min(1.0, self._config.recency_weight))
+            if _tw > 0.0 and self._last_trust_map:
+                result.metadata["trust_factors"] = dict(self._last_trust_map)
+                result.metadata["trust_weight"] = _tw
+            if _rw != 1.0:
+                result.metadata["recency_weight"] = _rw
+            if result.score_breakdown is not None and (_tw > 0.0 or _rw != 1.0):
+                _top_trust = (
+                    self._last_trust_map.get(result.fibers_matched[0], self._config.trust_default)
+                    if result.fibers_matched and self._last_trust_map
+                    else 1.0
+                )
+                _trust_factor = (1.0 - _tw) + _tw * _top_trust if _tw > 0.0 else 1.0
+                result.score_breakdown = dataclasses.replace(
+                    result.score_breakdown,
+                    trust_factor=_trust_factor,
+                    recency_factor=_rw,
+                )
+
+            # Update priming cache and metrics (non-critical)
+            if session_id and _priming_result is not None:
+                try:
+                    from surreal_memory.engine.priming import record_priming_outcome
+
+                    _act_cache = self._activation_caches.get(session_id)
+                    _prim_metrics = self._priming_metrics.get(session_id)
+
+                    # Update activation cache with this query's results
+                    if _act_cache is not None:
+                        activation_levels = {
+                            nid: ar.activation_level for nid, ar in activations.items()
+                        }
+                        _act_cache.update_from_result(activation_levels)
+
+                    # Record priming outcome (hit/miss)
+                    if _prim_metrics is not None and _primed_neuron_ids:
                         _result_nids = set(activations.keys())
-                        _agent_signal = bool(_primed_neuron_ids & _result_nids)
-                    await self._adaptive_selector.record_outcome(
-                        stimulus=stimulus,
-                        depth_used=depth,
+                        record_priming_outcome(_prim_metrics, _primed_neuron_ids, _result_nids)
+                        result.metadata["priming"] = {
+                            "neurons_primed": _priming_result.total_primed,
+                            "sources": _priming_result.source_counts,
+                            "hit_rate": round(_prim_metrics.hit_rate, 4),
+                            "aggressiveness": round(_prim_metrics.aggressiveness_multiplier, 2),
+                        }
+                except Exception:
+                    logger.debug("Priming cache update failed (non-critical)", exc_info=True)
+
+            # Record adaptive depth outcome (non-critical)
+            if _depth_decision is not None:
+                result.metadata["depth_selection"] = {
+                    "method": _depth_decision.method,
+                    "reason": _depth_decision.reason,
+                    "exploration": _depth_decision.exploration,
+                }
+                if self._adaptive_selector is not None:
+                    try:
+                        # Infer agent_used_result from priming hit rate:
+                        # If primed neurons appeared in result → agent is using the recall
+                        _agent_signal: bool | None = None
+                        if _primed_neuron_ids and activations:
+                            _result_nids = set(activations.keys())
+                            _agent_signal = bool(_primed_neuron_ids & _result_nids)
+                        await self._adaptive_selector.record_outcome(
+                            stimulus=stimulus,
+                            depth_used=depth,
+                            confidence=reconstruction.confidence,
+                            fibers_matched=len(fibers_matched),
+                            agent_used_result=_agent_signal,
+                        )
+                    except Exception:
+                        logger.debug("Depth prior update failed (non-critical)", exc_info=True)
+
+            # Optionally attach workflow suggestions (non-critical)
+            try:
+                from surreal_memory.engine.workflow_suggest import suggest_next_action
+
+                suggestions = await suggest_next_action(
+                    self._storage,
+                    stimulus.intent.value,
+                    self._config,
+                )
+                if suggestions:
+                    result.metadata["workflow_suggestions"] = [
+                        {
+                            "action": s.action_type,
+                            "confidence": round(s.confidence, 4),
+                            "source_habit": s.source_habit,
+                        }
+                        for s in suggestions[:3]
+                    ]
+            except Exception:
+                logger.debug("Workflow suggestion failed (non-critical)", exc_info=True)
+
+            # Flush deferred writes (fiber conductivity, Hebbian strengthening)
+            if self._write_queue.pending_count > 0:
+                try:
+                    await self._write_queue.flush(self._storage)
+                except Exception:
+                    logger.debug("Deferred write flush failed (non-critical)", exc_info=True)
+
+            # Post-recall reconsolidation: recalled memories absorb current context.
+            # Per-call opt-out (False) makes recall a genuinely read-only probe for
+            # speculative callers; the per-brain reconsolidation_enabled switch stays
+            # the global source of truth (issue #198).
+            if (
+                reconsolidate
+                and getattr(self._config, "reconsolidation_enabled", True)
+                and fibers_matched
+            ):
+                try:
+                    from surreal_memory.engine.reconsolidation import reconsolidate_on_recall
+
+                    query_tags = set(stimulus.keywords) if stimulus.keywords else set()
+                    query_entities = (
+                        [e.text for e in stimulus.entities] if stimulus.entities else []
+                    )
+                    brain_id = getattr(self._storage, "_brain_id", "")
+                    for fiber in fibers_matched[:5]:  # top 5 only
+                        if fiber.anchor_neuron_id:
+                            await reconsolidate_on_recall(
+                                fiber_id=fiber.id,
+                                anchor_neuron_id=fiber.anchor_neuron_id,
+                                query_tags=query_tags,
+                                query_entities=query_entities,
+                                storage=self._storage,
+                                config=self._config,
+                                brain_id=brain_id,
+                            )
+                except Exception:
+                    logger.debug("Reconsolidation failed (non-critical)", exc_info=True)
+
+            # Record session query (non-critical)
+            if session_id:
+                try:
+                    from surreal_memory.engine.session_state import SessionManager
+
+                    session_mgr = SessionManager.get_instance()
+                    session = session_mgr.get_or_create(session_id)
+                    session.record_query(
+                        query=query,
+                        depth_used=depth.value,
                         confidence=reconstruction.confidence,
                         fibers_matched=len(fibers_matched),
-                        agent_used_result=_agent_signal,
+                        entities=[e.text for e in stimulus.entities] if stimulus.entities else [],
+                        keywords=list(stimulus.keywords) if stimulus.keywords else [],
                     )
+                    # Attach session context to result metadata
+                    top_topics = session.get_top_topics()
+                    if top_topics:
+                        result.metadata["session_topics"] = top_topics
+                        result.metadata["session_query_count"] = session.query_count
                 except Exception:
-                    logger.debug("Depth prior update failed (non-critical)", exc_info=True)
+                    logger.debug("Session recording failed (non-critical)", exc_info=True)
 
-        # Optionally attach workflow suggestions (non-critical)
-        try:
-            from surreal_memory.engine.workflow_suggest import suggest_next_action
+            return result
 
-            suggestions = await suggest_next_action(
-                self._storage,
-                stimulus.intent.value,
-                self._config,
-            )
-            if suggestions:
-                result.metadata["workflow_suggestions"] = [
-                    {
-                        "action": s.action_type,
-                        "confidence": round(s.confidence, 4),
-                        "source_habit": s.source_habit,
-                    }
-                    for s in suggestions[:3]
-                ]
-        except Exception:
-            logger.debug("Workflow suggestion failed (non-critical)", exc_info=True)
-
-        # Flush deferred writes (fiber conductivity, Hebbian strengthening)
-        if self._write_queue.pending_count > 0:
-            try:
-                await self._write_queue.flush(self._storage)
-            except Exception:
-                logger.debug("Deferred write flush failed (non-critical)", exc_info=True)
-
-        # Post-recall reconsolidation: recalled memories absorb current context.
-        # Per-call opt-out (False) makes recall a genuinely read-only probe for
-        # speculative callers; the per-brain reconsolidation_enabled switch stays
-        # the global source of truth (issue #198).
-        if (
-            reconsolidate
-            and getattr(self._config, "reconsolidation_enabled", True)
-            and fibers_matched
-        ):
-            try:
-                from surreal_memory.engine.reconsolidation import reconsolidate_on_recall
-
-                query_tags = set(stimulus.keywords) if stimulus.keywords else set()
-                query_entities = [e.text for e in stimulus.entities] if stimulus.entities else []
-                brain_id = getattr(self._storage, "_brain_id", "")
-                for fiber in fibers_matched[:5]:  # top 5 only
-                    if fiber.anchor_neuron_id:
-                        await reconsolidate_on_recall(
-                            fiber_id=fiber.id,
-                            anchor_neuron_id=fiber.anchor_neuron_id,
-                            query_tags=query_tags,
-                            query_entities=query_entities,
-                            storage=self._storage,
-                            config=self._config,
-                            brain_id=brain_id,
-                        )
-            except Exception:
-                logger.debug("Reconsolidation failed (non-critical)", exc_info=True)
-
-        # Record session query (non-critical)
-        if session_id:
-            try:
-                from surreal_memory.engine.session_state import SessionManager
-
-                session_mgr = SessionManager.get_instance()
-                session = session_mgr.get_or_create(session_id)
-                session.record_query(
-                    query=query,
-                    depth_used=depth.value,
-                    confidence=reconstruction.confidence,
-                    fibers_matched=len(fibers_matched),
-                    entities=[e.text for e in stimulus.entities] if stimulus.entities else [],
-                    keywords=list(stimulus.keywords) if stimulus.keywords else [],
-                )
-                # Attach session context to result metadata
-                top_topics = session.get_top_topics()
-                if top_topics:
-                    result.metadata["session_topics"] = top_topics
-                    result.metadata["session_query_count"] = session.query_count
-            except Exception:
-                logger.debug("Session recording failed (non-critical)", exc_info=True)
-
-        return result
+        return result, _dokoncz
 
     async def _leksyka_sygnal(self, query: str) -> tuple[bool | None, int, str | None]:
         """W3 lexical/gibberish signal (program smem-recall-trzy-warstwy, unit

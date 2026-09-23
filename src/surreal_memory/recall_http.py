@@ -34,6 +34,7 @@ from surreal_memory.engine import recall_api
 logger = logging.getLogger(__name__)
 
 TraceMode = Literal["force", "config"]
+Skutki = Literal["inline", "odroczone"]
 _OPEN_PATHS = frozenset({"/health"})
 
 
@@ -80,10 +81,20 @@ class RecallOut(BaseModel):
     tor: str
     score_kind: Literal["anchor_activation"]
     rerank_degraded: bool
+    trace_status: str = "sync"
 
 
 def _new_counters() -> dict[str, int]:
-    return {"ok": 0, "401": 0, "422": 0, "503": 0, "5xx": 0}
+    return {
+        "ok": 0,
+        "401": 0,
+        "422": 0,
+        "503": 0,
+        "5xx": 0,
+        "odroczone_ok": 0,
+        "odroczone_err": 0,
+        "bariera_timeout": 0,
+    }
 
 
 def create_app(
@@ -93,6 +104,8 @@ def create_app(
     queue_timeout_s: float = 2.0,
     trace_mode: TraceMode = "force",
     reconsolidate: bool = True,
+    skutki: Skutki = "inline",
+    bariera_s: float = 10.0,
 ) -> FastAPI:
     """Build the shim app. ``key`` is the bearer secret (never logged)."""
     if len(key) < 32:
@@ -100,11 +113,29 @@ def create_app(
     key_bytes = key.encode("utf-8")
     counters = _new_counters()
     trace_tasks: set[asyncio.Task[None]] = set()
+    # skutki="odroczone": post-answer side effects + trace of recalls already answered. The
+    # barrier awaits them before the next recall reads the brain, so the sequence of states is
+    # the one an inline caller produces (K2: shim ≡ MCP).
+    odroczone: set[asyncio.Task[Any]] = set()
     sem = asyncio.Semaphore(max_concurrency)
+
+    def _odroczone_koniec(task: asyncio.Task[Any]) -> None:
+        odroczone.discard(task)
+        if task.cancelled() or task.exception() is not None:
+            counters["odroczone_err"] += 1
+            exc = None if task.cancelled() else task.exception()
+            logger.warning(
+                "recall-http: odroczone skutki nie powiodly sie: %s",
+                type(exc).__name__ if exc else "cancelled",
+            )
+        else:
+            counters["odroczone_ok"] += 1
 
     @asynccontextmanager
     async def _lifespan(_app: FastAPI) -> AsyncIterator[None]:
         yield
+        if odroczone:
+            await asyncio.gather(*list(odroczone), return_exceptions=True)
         if trace_tasks:
             await asyncio.gather(*list(trace_tasks), return_exceptions=True)
 
@@ -117,6 +148,7 @@ def create_app(
     )
     app.state.counters = counters
     app.state.trace_tasks = trace_tasks
+    app.state.odroczone = odroczone
 
     @app.middleware("http")
     async def _bearer(
@@ -166,9 +198,16 @@ def create_app(
             brain = None
         if brain is None:
             return JSONResponse(
-                {"status": "storage_unavailable", "liczniki": dict(counters)}, status_code=503
+                {
+                    "status": "storage_unavailable",
+                    "liczniki": dict(counters),
+                    "oczekujace": len(odroczone),
+                },
+                status_code=503,
             )
-        return JSONResponse({"status": "ok", "liczniki": dict(counters)})
+        return JSONResponse(
+            {"status": "ok", "liczniki": dict(counters), "oczekujace": len(odroczone)}
+        )
 
     @app.post("/v1/recall", response_model=RecallOut)
     async def recall(req: RecallIn) -> Any:
@@ -183,7 +222,19 @@ def create_app(
             )
             return JSONResponse({"error": "busy"}, status_code=503)
         t0 = time.perf_counter()
+        bariera_ms = 0.0
         try:
+            if odroczone:
+                t_b = time.perf_counter()
+                _done, niedokonczone = await asyncio.wait(set(odroczone), timeout=bariera_s)
+                bariera_ms = (time.perf_counter() - t_b) * 1000.0
+                if niedokonczone:
+                    counters["bariera_timeout"] += 1
+                    logger.warning(
+                        "recall-http: bariera przekroczona (%d zadan skutkow po %.1fs)",
+                        len(niedokonczone),
+                        bariera_s,
+                    )
             storage = await get_shared_storage()
             config = get_config()
             args: dict[str, Any] = {
@@ -206,7 +257,12 @@ def create_app(
                 hooks=None,
                 extras=None,
                 trace_tasks=trace_tasks,
+                skutki=skutki,
+                dekoracje=skutki == "inline",
             )
+            if outcome.pending is not None:
+                odroczone.add(outcome.pending)
+                outcome.pending.add_done_callback(_odroczone_koniec)
             if outcome.path == "error":
                 msg = str(outcome.response.get("error", "error"))
                 code = 503 if msg == "No brain configured" else 422
@@ -222,11 +278,12 @@ def create_app(
             sem.release()
         elapsed_ms = (time.perf_counter() - t0) * 1000.0
         body = recall_api.response_body(outcome, memories, tor=req.tor, elapsed_ms=elapsed_ms)
+        body["trace_status"] = outcome.trace
         counters["ok"] += 1
         if body["trace_error"]:
             logger.warning("recall-http: trace not persisted tor=%s", req.tor)
         logger.info(
-            "recall tor=%s agent=%s q=%s ms=%.0f engine=%.0f api=%.0f mat=%.0f path=%s trace=%s n_mem=%d",
+            "recall tor=%s agent=%s q=%s ms=%.0f engine=%.0f api=%.0f mat=%.0f bariera=%.0f path=%s trace=%s n_mem=%d",
             req.tor,
             req.agent_id,
             hashlib.sha256(req.query.encode("utf-8")).hexdigest()[:8],
@@ -234,6 +291,7 @@ def create_app(
             body["engine_latency_ms"] or -1.0,
             api_ms,
             mat_ms,
+            bariera_ms,
             outcome.path,
             outcome.trace,
             len(memories),
