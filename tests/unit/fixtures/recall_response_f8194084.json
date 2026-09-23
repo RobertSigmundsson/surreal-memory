@@ -1,0 +1,757 @@
+{
+ "assoc_krotkie_z_sesja": {
+  "response": {
+   "answer": "Emma lives in Bergen. Bergen is rainy.",
+   "confidence": 0.8125,
+   "neurons_activated": 7,
+   "fibers_matched": [
+    "f-1",
+    "f-2"
+   ],
+   "depth_used": 1,
+   "tokens_used": 11,
+   "score_breakdown": {
+    "base_activation": 0.6123,
+    "intersection_boost": 0.1,
+    "freshness_boost": 0.05,
+    "frequency_boost": 0.02,
+    "trust_factor": 1.0,
+    "recency_factor": 1.0
+   },
+   "has_conflicts": true,
+   "conflict_count": 1,
+   "session_topics": [
+    "emma"
+   ],
+   "session_query_count": 3,
+   "maintenance_hint": "hint-x",
+   "pending_alerts": 1
+  },
+  "response_key_order": [
+   "answer",
+   "confidence",
+   "neurons_activated",
+   "fibers_matched",
+   "depth_used",
+   "tokens_used",
+   "score_breakdown",
+   "has_conflicts",
+   "conflict_count",
+   "session_topics",
+   "session_query_count",
+   "maintenance_hint",
+   "pending_alerts"
+  ],
+  "calls": [
+   "storage.get_brain:test-brain",
+   "mcp.active_session:",
+   "hooks.emit:pre_recall",
+   "mcp.surface_depth:gdzie mieszka emma",
+   "pipeline.query",
+   "mcp.eternal:gdzie mieszka emma",
+   "storage.get_typed_memory:f-1",
+   "storage.get_typed_memory:f-2",
+   "storage.get_typed_memory:f-1",
+   "storage.get_typed_memory:f-2",
+   "mcp.record_tool_action:recall",
+   "mcp.check_maintenance:",
+   "mcp.maint_hint:PULSE",
+   "mcp.update_hint:",
+   "hooks.emit:post_recall",
+   "storage.other:find_neurons",
+   "storage.other:find_neurons",
+   "storage.other:find_neurons",
+   "mcp.onboarding:",
+   "mcp.alerts:"
+  ],
+  "pipeline_query": [
+   {
+    "depth": 1,
+    "exclude_ephemeral": false,
+    "max_tokens": 500,
+    "near": null,
+    "query": "gdzie mieszka emma [context: feat-a, task-b]",
+    "reconsolidate": true,
+    "reference_time": "<now>",
+    "session_id": "mcp-<id(server)>",
+    "tags": null,
+    "valid_at": null
+   }
+  ],
+  "trace": null
+ },
+ "assoc_dlugie_passive_depth": {
+  "response": {
+   "answer": "Emma lives in Bergen. Bergen is rainy.",
+   "confidence": 0.8125,
+   "neurons_activated": 7,
+   "fibers_matched": [
+    "f-1",
+    "f-2"
+   ],
+   "depth_used": 1,
+   "tokens_used": 11,
+   "score_breakdown": {
+    "base_activation": 0.6123,
+    "intersection_boost": 0.1,
+    "freshness_boost": 0.05,
+    "frequency_boost": 0.02,
+    "trust_factor": 1.0,
+    "recency_factor": 1.0
+   },
+   "has_conflicts": true,
+   "conflict_count": 1,
+   "session_topics": [
+    "emma"
+   ],
+   "session_query_count": 3,
+   "maintenance_hint": "hint-x",
+   "pending_alerts": 1
+  },
+  "response_key_order": [
+   "answer",
+   "confidence",
+   "neurons_activated",
+   "fibers_matched",
+   "depth_used",
+   "tokens_used",
+   "score_breakdown",
+   "has_conflicts",
+   "conflict_count",
+   "session_topics",
+   "session_query_count",
+   "maintenance_hint",
+   "pending_alerts"
+  ],
+  "calls": [
+   "storage.get_brain:test-brain",
+   "mcp.active_session:",
+   "hooks.emit:pre_recall",
+   "pipeline.query",
+   "mcp.passive_capture:gdzie teraz mieszka Emma i czy nadal pracuje w tym samym miejscu w Bergen",
+   "mcp.eternal:gdzie teraz mieszka Emma i czy nadal pracuje w tym samym miejscu w Bergen",
+   "storage.get_typed_memory:f-1",
+   "storage.get_typed_memory:f-2",
+   "storage.get_typed_memory:f-1",
+   "storage.get_typed_memory:f-2",
+   "mcp.record_tool_action:recall",
+   "mcp.check_maintenance:",
+   "mcp.maint_hint:PULSE",
+   "mcp.update_hint:",
+   "hooks.emit:post_recall",
+   "storage.other:find_neurons",
+   "storage.other:find_neurons",
+   "storage.other:find_neurons",
+   "storage.other:find_neurons",
+   "storage.other:find_neurons",
+   "mcp.onboarding:",
+   "mcp.alerts:"
+  ],
+  "pipeline_query": [
+   {
+    "depth": 2,
+    "exclude_ephemeral": false,
+    "max_tokens": 500,
+    "near": null,
+    "query": "gdzie teraz mieszka Emma i czy nadal pracuje w tym samym miejscu w Bergen",
+    "reconsolidate": true,
+    "reference_time": "<now>",
+    "session_id": "mcp-<id(server)>",
+    "tags": null,
+    "valid_at": null
+   }
+  ],
+  "trace": null
+ },
+ "exact": {
+  "response": {
+   "mode": "exact",
+   "memories": [
+    {
+     "fiber_id": "f-1",
+     "content": "Emma lives in Bergen.",
+     "memory_type": null,
+     "priority": null,
+     "tags": [],
+     "created_at": "2026-09-01T10:00:00"
+    },
+    {
+     "fiber_id": "f-2",
+     "content": "Bergen is rainy.",
+     "memory_type": null,
+     "priority": null,
+     "tags": [],
+     "created_at": "2026-09-03T10:00:00",
+     "structure": "s"
+    }
+   ],
+   "confidence": 0.8125,
+   "neurons_activated": 7,
+   "fibers_matched": [
+    "f-1",
+    "f-2"
+   ],
+   "depth_used": 1,
+   "score_breakdown": {
+    "base_activation": 0.6123,
+    "intersection_boost": 0.1,
+    "freshness_boost": 0.05,
+    "frequency_boost": 0.02,
+    "trust_factor": 1.0,
+    "recency_factor": 1.0
+   },
+   "has_conflicts": true,
+   "conflict_count": 1,
+   "session_topics": [
+    "emma"
+   ],
+   "session_query_count": 3,
+   "maintenance_hint": "hint-x",
+   "pending_alerts": 1
+  },
+  "response_key_order": [
+   "mode",
+   "memories",
+   "confidence",
+   "neurons_activated",
+   "fibers_matched",
+   "depth_used",
+   "score_breakdown",
+   "has_conflicts",
+   "conflict_count",
+   "session_topics",
+   "session_query_count",
+   "maintenance_hint",
+   "pending_alerts"
+  ],
+  "calls": [
+   "storage.get_brain:test-brain",
+   "mcp.active_session:",
+   "hooks.emit:pre_recall",
+   "mcp.surface_depth:emma",
+   "pipeline.query",
+   "mcp.eternal:emma",
+   "storage.get_typed_memory:f-1",
+   "storage.get_typed_memory:f-2",
+   "storage.get_fiber:f-1",
+   "storage.get_neuron:n-1",
+   "storage.get_typed_memory:f-1",
+   "storage.get_synapses:None:[('target_id', 'n-1')]",
+   "storage.get_fiber:f-2",
+   "storage.get_neuron:n-2",
+   "storage.get_typed_memory:f-2",
+   "storage.get_synapses:None:[('target_id', 'n-2')]",
+   "storage.get_typed_memory:f-1",
+   "storage.get_typed_memory:f-2",
+   "mcp.record_tool_action:recall",
+   "mcp.check_maintenance:",
+   "mcp.maint_hint:PULSE",
+   "mcp.update_hint:",
+   "hooks.emit:post_recall",
+   "storage.other:find_neurons",
+   "mcp.onboarding:",
+   "mcp.alerts:"
+  ],
+  "pipeline_query": [
+   {
+    "depth": 1,
+    "exclude_ephemeral": false,
+    "max_tokens": 500,
+    "near": null,
+    "query": "emma",
+    "reconsolidate": true,
+    "reference_time": "<now>",
+    "session_id": "mcp-<id(server)>",
+    "tags": null,
+    "valid_at": null
+   }
+  ],
+  "trace": null
+ },
+ "budzet": {
+  "response": {
+   "answer": "Emma lives in Bergen. Bergen is rainy.",
+   "confidence": 0.8125,
+   "neurons_activated": 7,
+   "fibers_matched": [
+    "f-1",
+    "f-2"
+   ],
+   "depth_used": 1,
+   "tokens_used": 11,
+   "score_breakdown": {
+    "base_activation": 0.6123,
+    "intersection_boost": 0.1,
+    "freshness_boost": 0.05,
+    "frequency_boost": 0.02,
+    "trust_factor": 1.0,
+    "recency_factor": 1.0
+   },
+   "has_conflicts": true,
+   "conflict_count": 1,
+   "session_topics": [
+    "emma"
+   ],
+   "session_query_count": 3,
+   "maintenance_hint": "hint-x",
+   "pending_alerts": 1
+  },
+  "response_key_order": [
+   "answer",
+   "confidence",
+   "neurons_activated",
+   "fibers_matched",
+   "depth_used",
+   "tokens_used",
+   "score_breakdown",
+   "has_conflicts",
+   "conflict_count",
+   "session_topics",
+   "session_query_count",
+   "maintenance_hint",
+   "pending_alerts"
+  ],
+  "calls": [
+   "storage.get_brain:test-brain",
+   "mcp.active_session:",
+   "hooks.emit:pre_recall",
+   "mcp.surface_depth:emma bergen",
+   "pipeline.query",
+   "mcp.eternal:emma bergen",
+   "storage.get_fiber:f-1",
+   "storage.get_fiber:f-2",
+   "storage.get_typed_memory:f-1",
+   "storage.get_typed_memory:f-2",
+   "storage.get_typed_memory:f-1",
+   "storage.get_typed_memory:f-2",
+   "mcp.record_tool_action:recall",
+   "mcp.check_maintenance:",
+   "mcp.maint_hint:PULSE",
+   "mcp.update_hint:",
+   "hooks.emit:post_recall",
+   "storage.other:find_neurons",
+   "storage.other:find_neurons",
+   "storage.other:find_neurons",
+   "mcp.onboarding:",
+   "mcp.alerts:"
+  ],
+  "pipeline_query": [
+   {
+    "depth": 1,
+    "exclude_ephemeral": false,
+    "max_tokens": 500,
+    "near": null,
+    "query": "emma bergen",
+    "reconsolidate": true,
+    "reference_time": "<now>",
+    "session_id": "mcp-<id(server)>",
+    "tags": null,
+    "valid_at": null
+   }
+  ],
+  "trace": null
+ },
+ "recent_uncertainty_conflicts": {
+  "response": {
+   "answer": "## Relevant Memories\n\n- summary two\n- summary one\n\n## Related Information\n",
+   "confidence": 0.8125,
+   "neurons_activated": 7,
+   "fibers_matched": [
+    "f-1",
+    "f-2"
+   ],
+   "depth_used": 1,
+   "tokens_used": 11,
+   "score_breakdown": {
+    "base_activation": 0.6123,
+    "intersection_boost": 0.1,
+    "freshness_boost": 0.05,
+    "frequency_boost": 0.02,
+    "trust_factor": 1.0,
+    "recency_factor": 1.0
+   },
+   "has_conflicts": true,
+   "conflict_count": 1,
+   "conflicts": [
+    {
+     "existing_neuron_id": "n-9",
+     "content": "Emma lived in Oslo.",
+     "status": "superseded"
+    }
+   ],
+   "session_topics": [
+    "emma"
+   ],
+   "session_query_count": 3,
+   "maintenance_hint": "hint-x",
+   "pending_alerts": 1,
+   "uncertainty": {
+    "level": "high",
+    "counts": {
+     "contradictions": 1,
+     "superseded": 0,
+     "low_confidence": 0,
+     "expiring": 0,
+     "drift_clusters": 0
+    },
+    "contradictions": [
+     {
+      "neuron_id": "n-9",
+      "content": "Emma lived in Oslo."
+     }
+    ],
+    "superseded": [],
+    "low_confidence": null,
+    "expiring": [],
+    "drift_clusters": []
+   }
+  },
+  "response_key_order": [
+   "answer",
+   "confidence",
+   "neurons_activated",
+   "fibers_matched",
+   "depth_used",
+   "tokens_used",
+   "score_breakdown",
+   "has_conflicts",
+   "conflict_count",
+   "conflicts",
+   "session_topics",
+   "session_query_count",
+   "maintenance_hint",
+   "pending_alerts",
+   "uncertainty"
+  ],
+  "calls": [
+   "storage.get_brain:test-brain",
+   "mcp.active_session:",
+   "hooks.emit:pre_recall",
+   "mcp.surface_depth:emma",
+   "pipeline.query",
+   "mcp.eternal:emma",
+   "storage.get_typed_memory:f-1",
+   "storage.get_typed_memory:f-2",
+   "storage.get_fiber:f-1",
+   "storage.get_fiber:f-2",
+   "storage.get_fiber:f-2",
+   "storage.get_fiber:f-1",
+   "storage.get_neurons_batch:",
+   "storage.get_neurons_batch:n-9",
+   "storage.get_expiring:f-1,f-2:5",
+   "storage.get_typed_memory:f-1",
+   "storage.get_typed_memory:f-2",
+   "mcp.record_tool_action:recall",
+   "mcp.check_maintenance:",
+   "mcp.maint_hint:PULSE",
+   "mcp.update_hint:",
+   "hooks.emit:post_recall",
+   "storage.other:find_neurons",
+   "mcp.onboarding:",
+   "mcp.alerts:",
+   "storage.get_neurons_batch:n-9",
+   "storage.other:get_typed_memories_batch",
+   "storage.get_expiring:f-1,f-2:14",
+   "storage.other:get_drift_clusters"
+  ],
+  "pipeline_query": [
+   {
+    "depth": 1,
+    "exclude_ephemeral": false,
+    "max_tokens": 500,
+    "near": null,
+    "query": "emma",
+    "reconsolidate": true,
+    "reference_time": "<now>",
+    "session_id": "mcp-<id(server)>",
+    "tags": null,
+    "valid_at": null
+   }
+  ],
+  "trace": null
+ },
+ "trace_per_call": {
+  "response": {
+   "answer": "Emma lives in Bergen. Bergen is rainy.",
+   "confidence": 0.8125,
+   "neurons_activated": 7,
+   "fibers_matched": [
+    "f-1",
+    "f-2"
+   ],
+   "depth_used": 1,
+   "tokens_used": 11,
+   "score_breakdown": {
+    "base_activation": 0.6123,
+    "intersection_boost": 0.1,
+    "freshness_boost": 0.05,
+    "frequency_boost": 0.02,
+    "trust_factor": 1.0,
+    "recency_factor": 1.0
+   },
+   "has_conflicts": true,
+   "conflict_count": 1,
+   "session_topics": [
+    "emma"
+   ],
+   "session_query_count": 3,
+   "maintenance_hint": "hint-x",
+   "pending_alerts": 1,
+   "trace_id": "<trace-id>"
+  },
+  "response_key_order": [
+   "answer",
+   "confidence",
+   "neurons_activated",
+   "fibers_matched",
+   "depth_used",
+   "tokens_used",
+   "score_breakdown",
+   "has_conflicts",
+   "conflict_count",
+   "session_topics",
+   "session_query_count",
+   "maintenance_hint",
+   "pending_alerts",
+   "trace_id"
+  ],
+  "calls": [
+   "storage.get_brain:test-brain",
+   "mcp.active_session:",
+   "hooks.emit:pre_recall",
+   "mcp.surface_depth:emma",
+   "pipeline.query",
+   "mcp.eternal:emma",
+   "storage.get_typed_memory:f-1",
+   "storage.get_typed_memory:f-2",
+   "storage.get_typed_memory:f-1",
+   "storage.get_typed_memory:f-2",
+   "mcp.record_tool_action:recall",
+   "mcp.check_maintenance:",
+   "mcp.maint_hint:PULSE",
+   "mcp.update_hint:",
+   "hooks.emit:post_recall",
+   "storage.other:find_neurons",
+   "mcp.onboarding:",
+   "mcp.alerts:",
+   "storage.add_retrieval_trace"
+  ],
+  "pipeline_query": [
+   {
+    "depth": 1,
+    "exclude_ephemeral": false,
+    "max_tokens": 500,
+    "near": null,
+    "query": "emma",
+    "reconsolidate": true,
+    "reference_time": "<now>",
+    "session_id": "mcp-<id(server)>",
+    "tags": null,
+    "valid_at": null
+   }
+  ],
+  "trace": {
+   "query": "emma",
+   "mode": "associative",
+   "fiber_ids": [
+    "f-1",
+    "f-2"
+   ],
+   "confidence": 0.8125,
+   "session_id": null,
+   "filters": {
+    "mode": "associative"
+   },
+   "config_snapshot": {
+    "trust_weight": 0.0,
+    "recency_weight": 1.0,
+    "trace_sample_rate": 1.0
+   },
+   "brain_id": "test-brain"
+  }
+ },
+ "min_confidence": {
+  "response": {
+   "answer": null,
+   "message": "No memories found with confidence >= 0.99",
+   "confidence": 0.8125
+  },
+  "response_key_order": [
+   "answer",
+   "message",
+   "confidence"
+  ],
+  "calls": [
+   "storage.get_brain:test-brain",
+   "mcp.active_session:",
+   "hooks.emit:pre_recall",
+   "mcp.surface_depth:emma",
+   "pipeline.query",
+   "mcp.eternal:emma"
+  ],
+  "pipeline_query": [
+   {
+    "depth": 1,
+    "exclude_ephemeral": false,
+    "max_tokens": 500,
+    "near": null,
+    "query": "emma",
+    "reconsolidate": true,
+    "reference_time": "<now>",
+    "session_id": "mcp-<id(server)>",
+    "tags": null,
+    "valid_at": null
+   }
+  ],
+  "trace": null
+ },
+ "surface_sufficient": {
+  "response": {
+   "answer": "S"
+  },
+  "response_key_order": [
+   "answer"
+  ],
+  "calls": [
+   "storage.get_brain:test-brain",
+   "mcp.active_session:",
+   "hooks.emit:pre_recall",
+   "mcp.surface_depth:emma"
+  ],
+  "pipeline_query": [],
+  "trace": null
+ },
+ "surface_depth_override": {
+  "response": {
+   "answer": "Emma lives in Bergen. Bergen is rainy.",
+   "confidence": 0.8125,
+   "neurons_activated": 7,
+   "fibers_matched": [
+    "f-1",
+    "f-2"
+   ],
+   "depth_used": 1,
+   "tokens_used": 11,
+   "score_breakdown": {
+    "base_activation": 0.6123,
+    "intersection_boost": 0.1,
+    "freshness_boost": 0.05,
+    "frequency_boost": 0.02,
+    "trust_factor": 1.0,
+    "recency_factor": 1.0
+   },
+   "has_conflicts": true,
+   "conflict_count": 1,
+   "session_topics": [
+    "emma"
+   ],
+   "session_query_count": 3,
+   "maintenance_hint": "hint-x",
+   "pending_alerts": 1
+  },
+  "response_key_order": [
+   "answer",
+   "confidence",
+   "neurons_activated",
+   "fibers_matched",
+   "depth_used",
+   "tokens_used",
+   "score_breakdown",
+   "has_conflicts",
+   "conflict_count",
+   "session_topics",
+   "session_query_count",
+   "maintenance_hint",
+   "pending_alerts"
+  ],
+  "calls": [
+   "storage.get_brain:test-brain",
+   "mcp.active_session:",
+   "hooks.emit:pre_recall",
+   "mcp.surface_depth:emma",
+   "pipeline.query",
+   "mcp.eternal:emma",
+   "storage.get_typed_memory:f-1",
+   "storage.get_typed_memory:f-2",
+   "storage.get_typed_memory:f-1",
+   "storage.get_typed_memory:f-2",
+   "mcp.record_tool_action:recall",
+   "mcp.check_maintenance:",
+   "mcp.maint_hint:PULSE",
+   "mcp.update_hint:",
+   "hooks.emit:post_recall",
+   "storage.other:find_neurons",
+   "mcp.onboarding:",
+   "mcp.alerts:"
+  ],
+  "pipeline_query": [
+   {
+    "depth": 3,
+    "exclude_ephemeral": false,
+    "max_tokens": 500,
+    "near": null,
+    "query": "emma",
+    "reconsolidate": true,
+    "reference_time": "<now>",
+    "session_id": "mcp-<id(server)>",
+    "tags": null,
+    "valid_at": null
+   }
+  ],
+  "trace": null
+ },
+ "exact_fiber": {
+  "response": {
+   "answer": "Emma lives in Bergen.",
+   "fiber_id": "f-1",
+   "summary": "summary one",
+   "tags": [
+    "a",
+    "b"
+   ],
+   "confidence": 1.0,
+   "recall_type": "exact_fiber"
+  },
+  "response_key_order": [
+   "answer",
+   "fiber_id",
+   "summary",
+   "tags",
+   "confidence",
+   "recall_type"
+  ],
+  "calls": [
+   "storage.get_brain:test-brain",
+   "storage.get_fiber:f-1",
+   "storage.get_neuron:n-1"
+  ],
+  "pipeline_query": [],
+  "trace": null
+ },
+ "error_query": {
+  "response": {
+   "error": "query is required and must be a string"
+  },
+  "response_key_order": [
+   "error"
+  ],
+  "calls": [
+   "storage.get_brain:test-brain"
+  ],
+  "pipeline_query": [],
+  "trace": null
+ },
+ "error_depth": {
+  "response": {
+   "error": "Invalid depth level: 9. Must be 0-3."
+  },
+  "response_key_order": [
+   "error"
+  ],
+  "calls": [
+   "storage.get_brain:test-brain"
+  ],
+  "pipeline_query": [],
+  "trace": null
+ }
+}
