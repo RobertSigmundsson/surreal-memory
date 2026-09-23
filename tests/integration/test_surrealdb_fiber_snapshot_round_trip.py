@@ -41,6 +41,7 @@ pytestmark = [
 # ("naive for consistency across codebase"), so a tz-aware seed could never
 # compare equal and the test would be pinning the convention, not the round trip.
 _T0 = datetime(2026, 3, 4, 5, 6, 7)
+_VECTOR = [0.6, 0.8, 0.0, 0.0]
 
 
 def _new_store() -> SurrealDBStorage:
@@ -50,6 +51,7 @@ def _new_store() -> SurrealDBStorage:
         password=SURREALDB_PASS,
         namespace=SURREALDB_NS,
         database="it_" + uuid.uuid4().hex[:12],
+        embedding_dim=4,
     )
 
 
@@ -162,6 +164,23 @@ async def test_every_persisted_fiber_field_survives_export_then_import(
     assert loaded.compression_tier == 2
 
 
+async def test_storage_only_fiber_vector_survives_export_then_import(
+    store: SurrealDBStorage, target: SurrealDBStorage
+) -> None:
+    original = await _seed_rich_fiber(store)
+    await store.update_fiber_embeddings([(original.id, _VECTOR)])
+
+    snapshot = await store.export_brain(store._get_brain_id())
+    (fiber_record,) = [f for f in snapshot.fibers if f["id"] == original.id]
+    assert fiber_record["fiber_vec"] == _VECTOR
+
+    await target.import_brain(snapshot, target_brain_id="vector-restore-" + uuid.uuid4().hex[:8])
+    matches = await target.find_fibers_by_embedding(_VECTOR, limit=1)
+    assert len(matches) == 1
+    assert matches[0][0].id == original.id
+    assert matches[0][1] == pytest.approx(1.0)
+
+
 async def test_snapshot_carries_the_fields_rather_than_the_reader_guessing(
     store: SurrealDBStorage,
 ) -> None:
@@ -176,6 +195,7 @@ async def test_snapshot_carries_the_fields_rather_than_the_reader_guessing(
         "auto_tags",
         "agent_tags",
         "metadata",
+        "fiber_vec",
         "frequency",
         "coherence",
         "compression_tier",
