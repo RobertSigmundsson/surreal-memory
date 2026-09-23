@@ -23,6 +23,8 @@ _PAYLOAD_KEYS = (
     "filters",
     "config_snapshot",
     "signals",
+    "tor",
+    "agent_id",
     "trace_version",
 )
 

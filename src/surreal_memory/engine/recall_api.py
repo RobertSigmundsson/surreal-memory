@@ -1,0 +1,960 @@
+"""Recall + retrieval trace in ONE engine call, shared by every caller path ("tor").
+
+tor: ``"mcp"`` (``RecallHandler``) | ``"http:<role>"`` (the ``recall_http`` shim that hermes
+pods call) | later ``"inproc:<role>"``. The body was moved verbatim from
+``mcp/recall_handler.py`` (``RecallHandler._recall`` minus cross-brain, and
+``_maybe_persist_trace``); side effects that belong to an MCP session (active-session
+context, knowledge-surface routing, passive capture, maintenance/onboarding hints) are
+delegated to :class:`RecallExtras` at their original positions, so the MCP path keeps the
+same order of effects and the same response. ``extras=None`` = engine-only recall.
+
+``tor`` and ``agent_id`` are keyword parameters, never read from ``args`` — a client of the
+MCP tool cannot spoof which path a trace came from.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import dataclasses
+import logging
+import os
+import random
+import re
+from dataclasses import dataclass
+from datetime import datetime
+from typing import TYPE_CHECKING, Any, Final, Literal, Protocol
+
+from surreal_memory.engine.hooks import HookEvent
+from surreal_memory.engine.retrieval import DepthLevel
+from surreal_memory.utils.timeutils import utcnow
+
+if TYPE_CHECKING:
+    from surreal_memory.engine.hooks import HookRegistry
+    from surreal_memory.storage.base import NeuralStorage
+    from surreal_memory.unified_config import UnifiedConfig
+
+logger = logging.getLogger(__name__)
+
+TOR_MCP: Final = "mcp"
+TOR_PATTERN: Final = re.compile(r"^(?:mcp|http:[a-z0-9][a-z0-9-]{0,31})$")
+AGENT_ID_MAX: Final = 120
+
+RecallPath = Literal["error", "exact_fiber", "surface", "min_confidence", "pipeline"]
+TraceStatus = Literal["sync", "sync_error", "background", "off", "skipped"]
+
+# Strong refs for background trace tasks when the caller does not hold its own set.
+_BACKGROUND_TRACE_TASKS: set[asyncio.Task[None]] = set()
+
+
+class RecallExtras(Protocol):
+    """MCP-only recall side effects. ``None`` => engine-only recall (HTTP shim, in-proc)."""
+
+    async def active_session(self, storage: NeuralStorage) -> dict[str, Any] | None: ...
+
+    def surface_depth(self, query: str) -> tuple[dict[str, Any] | None, int | None]: ...
+
+    async def after_query(self, query: str) -> None: ...
+
+    async def decorate(
+        self,
+        response: dict[str, Any],
+        result: Any,
+        query: str,
+        brain: Any,
+        storage: NeuralStorage,
+    ) -> None: ...
+
+
+@dataclass(frozen=True)
+class RecallOutcome:
+    """What one recall produced, for every tor.
+
+    ``response`` is exactly the MCP response dict (same keys, same order). ``result`` is the
+    engine ``RetrievalResult`` (``None`` on paths that never ran the pipeline). ``trace`` names
+    what happened to the retrieval trace — ``"skipped"`` for paths that write none, so a
+    missing trace is visible, not silent.
+    """
+
+    response: dict[str, Any]
+    result: Any
+    path: RecallPath
+    trace: TraceStatus
+    brain_id: str | None
+
+
+async def _rebuild_context_for_fibers(
+    result: Any,
+    fiber_ids: list[str],
+    storage: Any,
+    *,
+    max_tokens: int,
+    brain_id: str,
+    clean_for_prompt: bool,
+) -> Any:
+    """Rebuild ``result.context`` from ``fiber_ids`` via ``format_context``.
+
+    Used after post-filtering drops fibers (e.g. a soft-forgotten memory) so the
+    answer prose reflects the surviving set instead of the pre-filter one. Falls
+    back to the original result on any issue. Pure w.r.t. the DB (read-only).
+    """
+    from surreal_memory.engine.activation import ActivationResult
+    from surreal_memory.engine.retrieval_context import format_context
+
+    fibers_ordered: list[Any] = []
+    for fid in fiber_ids:
+        fiber = await storage.get_fiber(fid)
+        if fiber:
+            fibers_ordered.append(fiber)
+    if not fibers_ordered:
+        return result
+
+    acts: dict[str, ActivationResult] = {}
+    for co in getattr(result, "co_activations", []) or []:
+        for nid in co.neuron_ids:
+            acts.setdefault(
+                nid,
+                ActivationResult(
+                    neuron_id=nid,
+                    activation_level=co.binding_strength,
+                    hop_distance=0,
+                    path=[nid],
+                    source_anchor=nid,
+                ),
+            )
+
+    new_ctx, _ = await format_context(
+        storage=storage,
+        activations=acts,
+        fibers=fibers_ordered,
+        max_tokens=max_tokens,
+        brain_id=brain_id,
+        clean_for_prompt=clean_for_prompt,
+    )
+    if new_ctx:
+        return _result_replace(result, context=new_ctx)
+    return result
+
+
+async def _rerank_by_recency(fiber_ids: list[str], storage: Any) -> list[str]:
+    """Re-order fiber IDs by recency (newest first).
+
+    Sort key per fiber: ``time_end`` if set, else ``created_at``. Fibers that
+    can't be fetched fall to the end with a naive-UTC epoch sentinel (project
+    uses naive UTC throughout).
+
+    Pure helper — no side effects, safe to call multiple times.
+    """
+    from datetime import datetime as _dt
+
+    epoch = _dt.min  # noqa: DTZ901 — naive-UTC sentinel matches project datetime contract
+
+    async def _ts(fid: str) -> _dt:
+        try:
+            fiber = await storage.get_fiber(fid)
+        except Exception:
+            return epoch
+        if fiber is None:
+            return epoch
+        end = getattr(fiber, "time_end", None)
+        if isinstance(end, _dt):
+            return end
+        created = getattr(fiber, "created_at", None)
+        if isinstance(created, _dt):
+            return created
+        return epoch
+
+    pairs = [(fid, await _ts(fid)) for fid in fiber_ids]
+    pairs.sort(key=lambda p: p[1], reverse=True)
+    return [p[0] for p in pairs]
+
+
+def _result_replace(result: Any, **fields: Any) -> Any:
+    """Return ``result`` with the given fields replaced.
+
+    Production ``RetrievalResult`` is a (mutable) dataclass with no ``_replace``;
+    test doubles are namedtuples or MagicMocks that DO expose ``_replace``. Handle
+    all three so post-filter mutations — dropping fibers (expiry / trust / tier /
+    supersession) AND rebuilding ``context`` so the answer prose reflects the
+    surviving set — take effect on the real result object, not only on
+    namedtuple/mock ones.
+    """
+    if dataclasses.is_dataclass(result) and not isinstance(result, type):
+        try:
+            return dataclasses.replace(result, **fields)
+        except Exception:  # pragma: no cover - defensive
+            logger.debug("dataclasses.replace failed on result", exc_info=True)
+    replace = getattr(result, "_replace", None)
+    if callable(replace):
+        try:
+            return replace(**fields)
+        except Exception:  # pragma: no cover - defensive
+            logger.debug("_replace failed on result", exc_info=True)
+    return result
+
+
+def _superseded_hard_filter_enabled() -> bool:
+    """Whether valid_until-set (superseded) facts are hard-filtered from recall.
+
+    This is the ONE intended default-behaviour change of v2.9.0. Escape hatch: set
+    SURREAL_MEMORY_DISABLE_SUPERSEDED_FILTER to a truthy value to DISABLE the hard
+    filter, in which case superseded facts still surface but are demoted 0.25x via
+    their old anchor's ``_superseded`` neuron metadata (the second line of defence).
+    """
+    raw = os.getenv("SURREAL_MEMORY_DISABLE_SUPERSEDED_FILTER", "").strip().lower()
+    return raw not in ("1", "true", "yes", "on")
+
+
+async def recall(
+    storage: NeuralStorage,
+    args: dict[str, Any],
+    *,
+    config: UnifiedConfig,
+    tor: str,
+    engine_session_id: str,
+    agent_id: str | None = None,
+    hooks: HookRegistry | None = None,
+    extras: RecallExtras | None = None,
+    trace_tasks: set[asyncio.Task[None]] | None = None,
+) -> RecallOutcome:
+    """Query memories via spreading activation and persist the retrieval trace.
+
+    Raises:
+        ValueError: ``tor`` does not match :data:`TOR_PATTERN` or ``agent_id`` is longer
+            than :data:`AGENT_ID_MAX` (programming error of the caller, not user input).
+    """
+    if not TOR_PATTERN.match(tor):
+        raise ValueError(f"invalid tor: {tor!r}")
+    if agent_id is not None and len(agent_id) > AGENT_ID_MAX:
+        raise ValueError(f"agent_id longer than {AGENT_ID_MAX}")
+
+    from surreal_memory.mcp.constants import MAX_TOKEN_BUDGET
+    from surreal_memory.mcp.tool_handler_utils import (
+        _build_citation_audit,
+        _parse_tags,
+        _require_brain_id,
+    )
+
+    def _out(response: dict[str, Any], path: RecallPath, res: Any = None) -> RecallOutcome:
+        return RecallOutcome(response, res, path, "skipped", getattr(storage, "brain_id", None))
+
+    try:
+        brain_id = _require_brain_id(storage)
+    except ValueError:
+        logger.error("No brain configured for recall")
+        return _out({"error": "No brain configured"}, "error")
+    brain = await storage.get_brain(brain_id)
+    if not brain:
+        return _out({"error": "No brain configured"}, "error")
+
+    query = args.get("query")
+    if not query or not isinstance(query, str):
+        return _out({"error": "query is required and must be a string"}, "error")
+
+    # Ghost recall key: exact fiber lookup via "fiber:{id}" or "recall:fiber:{id}"
+    fiber_key = None
+    if query.startswith("recall:fiber:"):
+        fiber_key = query[len("recall:fiber:") :]
+    elif query.startswith("fiber:"):
+        fiber_key = query[len("fiber:") :]
+
+    if fiber_key:
+        fiber_key = fiber_key.strip()
+        if not fiber_key:
+            return _out({"error": "Invalid recall key: empty fiber ID"}, "error")
+        fiber = await storage.get_fiber(fiber_key)
+        if not fiber:
+            return _out({"error": f"No fiber found with ID: {fiber_key}"}, "error")
+        anchor = (
+            await storage.get_neuron(fiber.anchor_neuron_id) if fiber.anchor_neuron_id else None
+        )
+        content = (anchor.content if anchor else None) or fiber.summary or ""
+        fiber_tags = sorted(fiber.tags)[:5]
+        return _out(
+            {
+                "answer": content,
+                "fiber_id": fiber.id,
+                "summary": fiber.summary,
+                "tags": fiber_tags,
+                "confidence": 1.0,
+                "recall_type": "exact_fiber",
+            },
+            "exact_fiber",
+        )
+
+    try:
+        depth = DepthLevel(args.get("depth", 1))
+    except ValueError:
+        return _out({"error": f"Invalid depth level: {args.get('depth')}. Must be 0-3."}, "error")
+    max_tokens = min(args.get("max_tokens", 500), 10_000)
+    min_confidence = args.get("min_confidence", 0.0)
+    recall_mode = args.get("mode", "associative")
+    if recall_mode not in ("associative", "exact"):
+        return _out(
+            {"error": f"Invalid mode: {recall_mode}. Must be 'associative' or 'exact'."}, "error"
+        )
+    tags = _parse_tags(args)
+    include_citations = args.get("include_citations", True)
+    clean_for_prompt = bool(args.get("clean_for_prompt", False))
+    reconsolidate = args.get("reconsolidate", True)
+    if not isinstance(reconsolidate, bool):
+        return _out({"error": "reconsolidate must be a boolean"}, "error")
+    min_trust: float | None = None
+    raw_min_trust = args.get("min_trust")
+    if raw_min_trust is not None:
+        try:
+            min_trust = float(raw_min_trust)
+        except (TypeError, ValueError):
+            return _out({"error": f"Invalid min_trust: {raw_min_trust}"}, "error")
+
+    # Inject session context for richer recall on vague queries
+    effective_query = query
+    try:
+        session = await extras.active_session(storage) if extras is not None else None
+        if session and isinstance(session, dict):
+            session_terms: list[str] = []
+            feature = session.get("feature", "")
+            task = session.get("task", "")
+            if isinstance(feature, str) and feature:
+                session_terms.append(feature)
+            if isinstance(task, str) and task:
+                session_terms.append(task)
+            if session_terms and len(query.split()) < 8:
+                effective_query = f"{query} [context: {', '.join(session_terms)}]"
+    except Exception:
+        logger.debug("Session context injection failed", exc_info=True)
+
+    # Parse optional temporal filter
+    valid_at = None
+    if "valid_at" in args:
+        try:
+            valid_at = datetime.fromisoformat(args["valid_at"])
+            # Convert to UTC before stripping timezone
+            if valid_at.tzinfo is not None:
+                from datetime import UTC
+
+                valid_at = valid_at.astimezone(UTC).replace(tzinfo=None)
+        except (ValueError, TypeError):
+            return _out({"error": f"Invalid valid_at datetime: {args['valid_at']}"}, "error")
+
+    # U8: parse optional geospatial filter (near = {lat, lon, radius_m}). A hard
+    # filter like valid_at — fibers outside the radius (or without a location) drop.
+    near = None
+    if "near" in args:
+        from surreal_memory.utils.geo import parse_geo_filter
+
+        try:
+            near = parse_geo_filter(args["near"])
+        except (ValueError, TypeError) as exc:
+            return _out({"error": f"Invalid near filter: {exc}"}, "error")
+
+    # U3: superseded facts (valid_until set) are hard-filtered from recall by
+    # default; opt back in per-call with include_superseded=true.
+    include_superseded = bool(args.get("include_superseded", False))
+
+    if hooks is not None:
+        await hooks.emit(HookEvent.PRE_RECALL, {"query": query, "depth": depth.value})
+
+    # Surface depth routing: SUFFICIENT → answer from surface, skip brain.db.
+    # Skipped when a fiber-level hard filter is active (`near` — U8, or `valid_at` —
+    # point-in-time): the surface answer never touches fibers, so it would bypass the
+    # filter and return current/unscoped state. Same fast-path-bypass class as the
+    # temporal/fiber-summary guards in ReflexPipeline.query.
+    if extras is not None and not args.get("depth") and near is None and valid_at is None:
+        surface_response, depth_override = extras.surface_depth(query)
+        if surface_response is not None:
+            return _out(surface_response, "surface")
+        if depth_override is not None:
+            try:
+                depth = DepthLevel(depth_override)
+            except ValueError:
+                pass
+
+    permanent_only = bool(args.get("permanent_only", False))
+
+    from surreal_memory.engine.retrieval import ReflexPipeline
+
+    pipeline = ReflexPipeline(storage, brain.config)
+    result = await pipeline.query(
+        query=effective_query,
+        depth=depth,
+        max_tokens=max_tokens,
+        reference_time=utcnow(),
+        valid_at=valid_at,
+        near=near,
+        tags=tags,
+        session_id=engine_session_id,
+        exclude_ephemeral=permanent_only,
+        reconsolidate=reconsolidate,
+    )
+
+    # Passive auto-capture on long queries + eternal trigger: MCP-only (hak after_query)
+    if extras is not None:
+        await extras.after_query(query)
+
+    # Budget-aware context re-formatting (opt-in via recall_token_budget param)
+    budget_stats: dict[str, Any] | None = None
+    raw_recall_budget = args.get("recall_token_budget")
+    if raw_recall_budget is not None and result.fibers_matched:
+        try:
+            recall_budget = min(int(raw_recall_budget), MAX_TOKEN_BUDGET)
+            from surreal_memory.engine.retrieval_context import format_context_budgeted
+            from surreal_memory.engine.token_budget import BudgetConfig
+
+            budget_cfg = BudgetConfig(
+                system_overhead_tokens=config.budget.system_overhead,
+                per_fiber_overhead=config.budget.per_fiber_overhead,
+            )
+
+            # Fetch fiber objects for matched fibers
+            candidate_fibers = []
+            for fid in result.fibers_matched:
+                f = await storage.get_fiber(fid)
+                if f:
+                    candidate_fibers.append(f)
+
+            # Build a minimal activations map from co_activations and neurons
+            from surreal_memory.engine.activation import ActivationResult
+
+            dummy_activations: dict[str, ActivationResult] = {}
+            for co in result.co_activations:
+                for nid in co.neuron_ids:
+                    if nid not in dummy_activations:
+                        dummy_activations[nid] = ActivationResult(
+                            neuron_id=nid,
+                            activation_level=co.binding_strength,
+                            hop_distance=0,
+                            path=[nid],
+                            source_anchor=nid,
+                        )
+
+            if candidate_fibers:
+                # Get encryptor if encryption is enabled
+                encryptor_obj = None
+                try:
+                    if config.encryption.enabled:
+                        from pathlib import Path as _Path
+
+                        from surreal_memory.safety.encryption import MemoryEncryptor
+
+                        keys_dir_str = getattr(config.encryption, "keys_dir", "")
+                        keys_dir = (
+                            _Path(keys_dir_str) if keys_dir_str else (config.data_dir / "keys")
+                        )
+                        encryptor_obj = MemoryEncryptor(keys_dir=keys_dir)
+                except Exception:
+                    pass
+
+                budgeted_ctx, _, allocation = await format_context_budgeted(
+                    storage=storage,
+                    activations=dummy_activations,
+                    fibers=candidate_fibers,
+                    max_tokens=recall_budget,
+                    encryptor=encryptor_obj,
+                    brain_id=brain_id,
+                    budget_config=budget_cfg,
+                    clean_for_prompt=clean_for_prompt,
+                )
+
+                from dataclasses import replace as _dc_replace
+
+                from surreal_memory.engine.token_budget import format_budget_report
+
+                budget_stats = format_budget_report(allocation)
+                # Replace the pipeline-generated context with budget-aware context
+                result = _dc_replace(result, context=budgeted_ctx)
+        except Exception:
+            logger.debug(
+                "Budget-aware recall failed (non-critical), using standard context",
+                exc_info=True,
+            )
+
+    if result.confidence < min_confidence:
+        return _out(
+            {
+                "answer": None,
+                "message": f"No memories found with confidence >= {min_confidence}",
+                "confidence": result.confidence,
+            },
+            "min_confidence",
+            result,
+        )
+
+    # Post-filter by trust_score and/or tier (single pass to avoid redundant DB lookups).
+    # Tier semantics: fibers without a typed_memory row are treated as "warm" (the default).
+    # - tier="warm" → includes un-typed fibers (they default to warm)
+    # - tier="hot"/"cold" → excludes un-typed fibers (only explicit tier matches)
+    recall_tier = args.get("tier")
+    if recall_tier is not None:
+        recall_tier = str(recall_tier).lower().strip()
+    # Always post-filter when there are matches so soft-forgotten (expired)
+    # memories are excluded from recall immediately — without waiting for
+    # consolidation cleanup (issue #36). Trust/tier filters piggyback on the
+    # same single pass. ``fibers_matched`` is a ``list[str]`` in production
+    # (RetrievalResult); guard defensively so a non-list value can never make
+    # ``list()``/iteration raise and abort recall.
+    superseded_excluded = 0
+    needs_post_filter = isinstance(result.fibers_matched, list) and bool(result.fibers_matched)
+    if needs_post_filter:
+        original_matched = list(result.fibers_matched)
+        try:
+            passing_ids: set[str] = set()
+            for fid in result.fibers_matched:
+                tm = await storage.get_typed_memory(fid)
+
+                # Expiry filter (soft-forget): a memory whose typed_memory is
+                # past its expires_at must not surface in recall, even before
+                # consolidation deletes it (issue #36). ``is_expired`` is a
+                # bool property; compare with ``is True`` so only a genuine
+                # expiry drops the fiber (never a truthy non-bool).
+                if tm is not None and getattr(tm, "is_expired", False) is True:
+                    continue
+
+                # Supersession / point-in-time filter (U3). tm is already fetched
+                # in this pass, so this adds ZERO extra storage reads.
+                if tm is not None:
+                    if valid_at is not None:
+                        # point-in-time: keep only facts that were valid then
+                        # ("where did Emma live before?").
+                        if not tm.is_valid_at(valid_at):
+                            superseded_excluded += 1
+                            continue
+                    elif (
+                        isinstance(tm.valid_until, datetime)
+                        and not include_superseded
+                        and _superseded_hard_filter_enabled()
+                    ):
+                        # default: hard-filter superseded facts (the one intended
+                        # default-behaviour change). Escape hatch keeps them (demoted).
+                        superseded_excluded += 1
+                        continue
+
+                # Trust filter
+                if min_trust is not None:
+                    if tm is not None and tm.trust_score is not None:
+                        if tm.trust_score < min_trust:
+                            continue
+
+                # Tier filter
+                if recall_tier:
+                    if tm is None:
+                        if recall_tier != "warm":
+                            continue
+                    elif getattr(tm, "tier", "warm") != recall_tier:
+                        continue
+
+                passing_ids.add(fid)
+
+            filtered_fibers = [f for f in original_matched if f in passing_ids]
+            # Only rewrite the result when the filter actually dropped a
+            # fiber; leaving it untouched otherwise keeps the original result
+            # object intact (avoids needless copies / mock corruption).
+            if len(filtered_fibers) < len(original_matched):
+                result = _result_replace(result, fibers_matched=filtered_fibers)
+        except Exception:
+            logger.debug("Post-filter (trust/tier) failed (non-critical)", exc_info=True)
+
+        # If the filter dropped anything (e.g. a soft-forgotten memory) and no
+        # later stage rebuilds the answer text, regenerate context now so the
+        # excluded memory can't linger in the returned prose (issue #36).
+        fibers_were_dropped = len(result.fibers_matched) < len(original_matched)
+        will_rebuild_later = bool(args.get("prefer_recent")) or (
+            args.get("recall_token_budget") is not None
+        )
+        if fibers_were_dropped and recall_mode != "exact" and not will_rebuild_later:
+            try:
+                result = await _rebuild_context_for_fibers(
+                    result,
+                    list(result.fibers_matched),
+                    storage,
+                    max_tokens=max_tokens,
+                    brain_id=brain_id,
+                    clean_for_prompt=clean_for_prompt,
+                )
+            except Exception:
+                logger.debug("Context rebuild after filter failed", exc_info=True)
+
+    # Optional prefer_recent re-rank (agent-ergonomics).
+    # Reorders surviving fibers newest-first AND rebuilds result.context so
+    # the answer text reflects the new order. Useful for "current state"
+    # queries where freshness matters more than activation strength.
+    prefer_recent_active = bool(args.get("prefer_recent", False)) and bool(result.fibers_matched)
+    if prefer_recent_active:
+        try:
+            reranked = await _rerank_by_recency(list(result.fibers_matched), storage)
+            if hasattr(result, "_replace"):
+                result = result._replace(fibers_matched=reranked)
+
+            # Rebuild context only when no budget pass is coming (the budget
+            # path handles its own ordering). Skip exact mode (no context).
+            budget_will_rebuild = args.get("recall_token_budget") is not None
+            if not budget_will_rebuild and recall_mode != "exact":
+                fibers_ordered: list[Any] = []
+                for fid in reranked:
+                    f = await storage.get_fiber(fid)
+                    if f:
+                        fibers_ordered.append(f)
+                if fibers_ordered:
+                    from surreal_memory.engine.activation import ActivationResult
+                    from surreal_memory.engine.retrieval_context import format_context
+
+                    acts: dict[str, ActivationResult] = {}
+                    for co in result.co_activations:
+                        for nid in co.neuron_ids:
+                            acts.setdefault(
+                                nid,
+                                ActivationResult(
+                                    neuron_id=nid,
+                                    activation_level=co.binding_strength,
+                                    hop_distance=0,
+                                    path=[nid],
+                                    source_anchor=nid,
+                                ),
+                            )
+                    new_ctx, _ = await format_context(
+                        storage=storage,
+                        activations=acts,
+                        fibers=fibers_ordered,
+                        max_tokens=max_tokens,
+                        brain_id=brain_id,
+                        clean_for_prompt=clean_for_prompt,
+                    )
+                    if new_ctx:
+                        result = _result_replace(result, context=new_ctx)
+        except Exception:
+            logger.debug("prefer_recent rerank failed, keeping default order", exc_info=True)
+
+    # Exact mode: return raw neuron contents without truncation
+    if recall_mode == "exact" and result.fibers_matched:
+        exact_items: list[dict[str, Any]] = []
+        for fid in result.fibers_matched:
+            fiber = await storage.get_fiber(fid)
+            if not fiber:
+                continue
+            anchor = await storage.get_neuron(fiber.anchor_neuron_id)
+            if not anchor:
+                continue
+            content = anchor.content
+            # Decrypt if needed
+            if fiber.metadata.get("encrypted"):
+                try:
+                    from pathlib import Path
+
+                    from surreal_memory.safety.encryption import MemoryEncryptor
+
+                    keys_dir_str = getattr(config.encryption, "keys_dir", "")
+                    keys_dir = Path(keys_dir_str) if keys_dir_str else (config.data_dir / "keys")
+                    encryptor = MemoryEncryptor(keys_dir=keys_dir)
+                    bid = storage.brain_id or ""
+                    content = encryptor.decrypt(content, bid)
+                except Exception:
+                    logger.debug("Decryption failed in exact recall", exc_info=True)
+            tm = await storage.get_typed_memory(fid)
+            item: dict[str, Any] = {
+                "fiber_id": fid,
+                "content": content,
+                "memory_type": tm.memory_type.value if tm else None,
+                "priority": tm.priority.value if tm else None,
+                "tags": list(tm.tags) if tm and tm.tags else [],
+                "created_at": fiber.created_at.isoformat() if fiber.created_at else None,
+            }
+            # U3: validity / supersession lineage for the caller.
+            if tm is not None:
+                if tm.valid_from is not None:
+                    item["valid_from"] = tm.valid_from.isoformat()
+                if tm.valid_until is not None:
+                    item["valid_until"] = tm.valid_until.isoformat()
+                if tm.superseded_by is not None:
+                    item["superseded_by"] = tm.superseded_by
+            # Include structure metadata if present
+            structure = anchor.metadata.get("_structure") if anchor.metadata else None
+            if structure:
+                item["structure"] = structure
+
+            # Citation + audit trail (Phase 4)
+            citation_audit = await _build_citation_audit(storage, anchor.id, include_citations)
+            if citation_audit.get("citation"):
+                item["citation"] = citation_audit["citation"]
+            if citation_audit.get("audit"):
+                item["audit"] = citation_audit["audit"]
+
+            exact_items.append(item)
+
+        response: dict[str, Any] = {
+            "mode": "exact",
+            "memories": exact_items,
+            "confidence": result.confidence,
+            "neurons_activated": result.neurons_activated,
+            "fibers_matched": result.fibers_matched,
+            "depth_used": result.depth_used.value,
+        }
+    else:
+        response = {
+            "answer": result.context or "No relevant memories found.",
+            "confidence": result.confidence,
+            "neurons_activated": result.neurons_activated,
+            "fibers_matched": result.fibers_matched,
+            "depth_used": result.depth_used.value,
+            "tokens_used": result.tokens_used,
+        }
+
+    if budget_stats is not None:
+        response["budget_stats"] = budget_stats
+
+    # U3: how many hits were dropped by the supersession / point-in-time filter.
+    if superseded_excluded:
+        response["superseded_excluded_count"] = superseded_excluded
+
+    if result.score_breakdown is not None:
+        response["score_breakdown"] = {
+            "base_activation": round(result.score_breakdown.base_activation, 4),
+            "intersection_boost": round(result.score_breakdown.intersection_boost, 4),
+            "freshness_boost": round(result.score_breakdown.freshness_boost, 4),
+            "frequency_boost": round(result.score_breakdown.frequency_boost, 4),
+            "trust_factor": round(result.score_breakdown.trust_factor, 4),
+            "recency_factor": round(result.score_breakdown.recency_factor, 4),
+        }
+
+    # Surface reranking degradation: when the reranker is enabled but did not
+    # actually run, the results are raw spreading-activation ordering and look
+    # exactly like reranked ones. Reporting it prevents silent quality loss.
+    rerank_degraded = (result.metadata or {}).get("rerank_degraded")
+    if rerank_degraded:
+        response["rerank_degraded"] = True
+        response["rerank_degraded_reason"] = str(rerank_degraded)
+        response["warning"] = (
+            f"Results were NOT reranked (reranker enabled but unavailable): {rerank_degraded}"
+        )
+
+    # Surface conflict info from retrieval
+    disputed_ids: list[str] = (result.metadata or {}).get("disputed_ids", [])
+    if disputed_ids:
+        response["has_conflicts"] = True
+        response["conflict_count"] = len(disputed_ids)
+
+        # Full conflict details only when opt-in
+        if args.get("include_conflicts"):
+            neurons_map = await storage.get_neurons_batch(disputed_ids)
+            response["conflicts"] = [
+                {
+                    "existing_neuron_id": nid,
+                    "content": n.content[:200] if n else "",
+                    "status": "superseded" if n and n.metadata.get("_superseded") else "disputed",
+                }
+                for nid, n in neurons_map.items()
+                if n is not None
+            ]
+
+    # Expiry warnings (opt-in)
+    warn_expiry_days = args.get("warn_expiry_days")
+    if warn_expiry_days is not None and result.fibers_matched:
+        try:
+            expiring = await storage.get_expiring_memories_for_fibers(
+                fiber_ids=result.fibers_matched,
+                within_days=int(warn_expiry_days),
+            )
+            if expiring:
+                response["expiry_warnings"] = [
+                    {
+                        "fiber_id": tm.fiber_id,
+                        "memory_type": tm.memory_type.value,
+                        "days_until_expiry": tm.days_until_expiry,
+                        "priority": tm.priority.value,
+                        "suggestion": "Re-store this memory if still relevant, or set a new expires_days.",
+                    }
+                    for tm in expiring
+                ]
+        except Exception:
+            logger.debug("Expiry warning check failed", exc_info=True)
+
+    # Enrich results with source metadata from typed_memory.source
+    try:
+        if result.fibers_matched:
+            source_map: dict[str, dict[str, Any]] = {}
+            for fid in result.fibers_matched:
+                tm = await storage.get_typed_memory(fid)
+                if not tm or not tm.source or not tm.source.startswith("source:"):
+                    continue
+                src_id = tm.source[len("source:") :]
+                src = await storage.get_source(src_id)
+                if src:
+                    source_map[fid] = {
+                        "source_id": src.id,
+                        "name": src.name,
+                        "source_type": src.source_type.value,
+                        "version": src.version,
+                        "status": src.status.value,
+                        "trust": src.trust,
+                    }
+            if source_map:
+                response["sources"] = source_map
+    except Exception:
+        logger.debug("Source enrichment failed (non-critical)", exc_info=True)
+
+    # Cognitive chunking: group results when many fibers matched
+    fibers_count_for_chunking = (
+        len(result.fibers_matched)
+        if isinstance(result.fibers_matched, list)
+        else result.fibers_matched
+    )
+    if (
+        getattr(brain.config, "chunking_enabled", True)
+        and fibers_count_for_chunking
+        and fibers_count_for_chunking > 7
+    ):
+        try:
+            from surreal_memory.engine.chunking import chunk_retrieval_results
+
+            chunk_neuron_ids = list(result.subgraph.neuron_ids) if result.subgraph else []
+            stored_levels = (result.metadata or {}).get("activation_levels", {})
+            chunk_activations = {nid: stored_levels.get(nid, 0.5) for nid in chunk_neuron_ids}
+            synapse_pairs: list[tuple[str, str, float]] = []
+            for nid in chunk_neuron_ids[:20]:
+                syns = await storage.get_synapses(source_id=nid)
+                for s in syns:
+                    synapse_pairs.append((s.source_id, s.target_id, s.weight))
+
+            max_chunks = (
+                int(getattr(brain.config, "max_chunks", 5))
+                if isinstance(getattr(brain.config, "max_chunks", 5), (int, float))
+                else 5
+            )
+            chunks = chunk_retrieval_results(
+                neuron_ids=chunk_neuron_ids,
+                activation_levels=chunk_activations,
+                synapse_pairs=synapse_pairs,
+                max_chunks=max_chunks,
+            )
+            if chunks:
+                response["cognitive_chunks"] = [
+                    {
+                        "label": c.label,
+                        "neuron_ids": list(c.neuron_ids),
+                        "coherence": c.coherence,
+                        "relevance": c.relevance,
+                    }
+                    for c in chunks
+                ]
+        except Exception:
+            logger.debug("Cognitive chunking failed (non-critical)", exc_info=True)
+
+    # Session intelligence: attach topic context
+    session_topics = (result.metadata or {}).get("session_topics")
+    if session_topics:
+        response["session_topics"] = session_topics
+        response["session_query_count"] = (result.metadata or {}).get("session_query_count", 0)
+
+    if extras is not None:
+        await extras.decorate(response, result, query, brain, storage)
+
+    # U5: opt-in uncertainty block (additive; existing has_conflicts/include_conflicts
+    # untouched). Only attached when there is an actual uncertainty signal.
+    if args.get("include_uncertainty"):
+        try:
+            from surreal_memory.engine.uncertainty_report import build_uncertainty_block
+
+            block = await build_uncertainty_block(storage, result, brain.config)
+            if block is not None:
+                response["uncertainty"] = block
+        except Exception:
+            logger.debug("Uncertainty block build failed (non-critical)", exc_info=True)
+
+    # U4: retrieval-trace telemetry (opt-in; off by default → true no-op).
+    trace_status = await persist_trace(
+        response,
+        result,
+        query=query,
+        args=args,
+        brain=brain,
+        mode=recall_mode,
+        storage=storage,
+        config=config,
+        tor=tor,
+        agent_id=agent_id,
+        trace_tasks=trace_tasks,
+    )
+
+    return RecallOutcome(response, result, "pipeline", trace_status, brain_id)
+
+
+async def persist_trace(
+    response: dict[str, Any],
+    result: Any,
+    *,
+    query: str,
+    args: dict[str, Any],
+    brain: Any,
+    mode: str,
+    storage: Any,
+    config: Any,
+    tor: str,
+    agent_id: str | None,
+    trace_tasks: set[asyncio.Task[None]] | None,
+) -> TraceStatus:
+    """Persist a compact RetrievalTrace for this recall, when enabled.
+
+    Neutral default (trace.enabled=false) → fully skipped: no build, no task,
+    no storage call. ``trace=true`` per-call forces one trace and returns its
+    ``trace_id`` in the response WITHOUT flipping the global config (persisted
+    synchronously since the caller asked for the id). Config-enabled sampling
+    fires-and-forgets via a strong-ref'd task. Never raises — telemetry must
+    not break recall.
+    """
+    try:
+        trace_cfg = getattr(config, "trace", None)
+        per_call = bool(args.get("trace", False))
+        if trace_cfg is None:
+            return "off"
+        if not per_call:
+            if not trace_cfg.enabled:
+                return "off"
+            if trace_cfg.sample_rate < 1.0 and random.random() >= trace_cfg.sample_rate:
+                return "off"
+
+        from surreal_memory.engine.trace_builder import build_retrieval_trace
+
+        config_snapshot = {
+            "trust_weight": getattr(brain.config, "trust_weight", 0.0),
+            "recency_weight": getattr(brain.config, "recency_weight", 1.0),
+            "trace_sample_rate": trace_cfg.sample_rate,
+        }
+        trace = build_retrieval_trace(
+            result,
+            query=query,
+            brain_id=str(getattr(storage, "brain_id", None) or getattr(brain, "id", "") or ""),
+            mode=mode,
+            args=args,
+            config_snapshot=config_snapshot,
+            session_id=args.get("session_id"),
+            tor=tor,
+            agent_id=agent_id,
+        )
+
+        if per_call:
+            # Synchronous: the caller explicitly asked for the id back, so surface
+            # a persistence failure to them rather than swallowing it silently.
+            try:
+                await storage.add_retrieval_trace(trace)
+                response["trace_id"] = trace.id
+            except Exception:
+                logger.debug("Per-call retrieval trace persist failed", exc_info=True)
+                response["trace_error"] = "trace requested but could not be persisted"
+                return "sync_error"
+            return "sync"
+        else:
+            # Fire-and-forget with a strong reference (avoids GC of the task).
+            tasks = trace_tasks if trace_tasks is not None else _BACKGROUND_TRACE_TASKS
+            task = asyncio.create_task(_persist_trace_safe(storage, trace))
+            tasks.add(task)
+            task.add_done_callback(tasks.discard)
+            return "background"
+    except Exception:
+        logger.debug("Retrieval trace scheduling failed (non-critical)", exc_info=True)
+    return "off"
+
+
+async def _persist_trace_safe(storage: Any, trace: Any) -> None:
+    """Persist one trace, swallowing errors (background telemetry task)."""
+    try:
+        await storage.add_retrieval_trace(trace)
+    except Exception:
+        logger.debug("Retrieval trace persist failed (non-critical)", exc_info=True)
