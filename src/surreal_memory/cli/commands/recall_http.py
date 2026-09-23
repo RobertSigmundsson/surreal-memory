@@ -2,12 +2,30 @@
 
 from __future__ import annotations
 
+import logging
 import os
 from typing import Annotated
 
 import typer
 
 KEY_ENV = "SMEM_RECALL_HTTP_KEY"
+
+
+def configure_logging() -> logging.Logger:
+    """One INFO line per recall (tor, agent, query sha8, ms, path, trace) to stderr/journal.
+
+    The root logger stays at WARNING under uvicorn, so without this the per-request line —
+    the only record of shim-side latency per caller path — would never be emitted.
+    """
+    log = logging.getLogger("surreal_memory.recall_http")
+    if not any(getattr(h, "_recall_http", False) for h in log.handlers):
+        handler = logging.StreamHandler()
+        handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s"))
+        handler._recall_http = True  # type: ignore[attr-defined]
+        log.addHandler(handler)
+    log.setLevel(logging.INFO)
+    log.propagate = False
+    return log
 
 
 def recall_http(
@@ -49,6 +67,8 @@ def recall_http(
         raise typer.Exit(1)
 
     from surreal_memory.recall_http import create_app
+
+    configure_logging()
 
     app = create_app(
         key=key,
