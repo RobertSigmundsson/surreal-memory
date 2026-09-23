@@ -55,6 +55,17 @@ def _check_cross_encoder() -> bool:
 KEEPALIVE_S: float = float(os.environ.get("SURREAL_MEMORY_RERANK_KEEPALIVE_S", "0") or 0.0)
 _LOCK_TIMEOUT_S = 1.0
 
+# --- Response cache of a LiteLLM reranker ------------------------------------------------------
+# A LiteLLM /rerank endpoint caches responses: an identical body comes back with the same response
+# id in ~210 ms instead of ~400 ms (measured 2026-09-23). Timing runs that repeat a query set (A/B of
+# two code versions) would then time the cache, not the code. NO_CACHE=1 asks LiteLLM to skip it
+# ({"cache": {"no-cache": true}}); default 0 sends today's body unchanged. Scores are unaffected.
+NO_CACHE: bool = os.environ.get("SURREAL_MEMORY_RERANK_NO_CACHE", "").strip() in (
+    "1",
+    "true",
+    "yes",
+)
+
 
 class _Pooled:
     __slots__ = ("conn", "used_at")
@@ -329,9 +340,10 @@ class HttpReranker:
         ).strip()
 
     def _raw_scores(self, query: str, documents: list[str]) -> list[float]:
-        payload = json.dumps({"model": self._model, "query": query, "documents": documents}).encode(
-            "utf-8"
-        )
+        body: dict[str, Any] = {"model": self._model, "query": query, "documents": documents}
+        if NO_CACHE:
+            body["cache"] = {"no-cache": True}
+        payload = json.dumps(body).encode("utf-8")
         headers = {"Content-Type": "application/json"}
         if self._api_key:
             headers["Authorization"] = f"Bearer {self._api_key}"
