@@ -244,3 +244,41 @@ async def test_materialize_on_non_pipeline_response_is_empty() -> None:
         )
         == []
     )
+
+
+@pytest.mark.asyncio
+async def test_materialize_uses_one_batch_read_for_anchors_and_types() -> None:
+    calls: list[str] = []
+
+    class _Batch:
+        brain_id = "b1"
+
+        async def get_fiber(self, fid: str) -> Any:
+            calls.append("get_fiber")
+            return SimpleNamespace(anchor_neuron_id="n-" + fid, summary="s", metadata={})
+
+        async def get_neurons_batch(self, ids: list[str]) -> dict[str, Any]:
+            calls.append(f"neurons_batch:{len(ids)}")
+            return {
+                i: SimpleNamespace(content="c-" + i, type=SimpleNamespace(value="fact"))
+                for i in ids
+            }
+
+        async def get_typed_memories_batch(self, fids: list[str]) -> dict[str, Any]:
+            calls.append(f"typed_batch:{len(fids)}")
+            return {}
+
+        async def get_neuron(self, _nid: str) -> Any:
+            raise AssertionError("single get_neuron must not be used when a batch read exists")
+
+    res = SimpleNamespace(metadata={"activation_levels": {"n-f-2": 0.5}})
+    mem = await recall_api.materialize_memories(
+        _Batch(), {"fibers_matched": ["f-1", "f-2", "f-3"]}, res, config=_config(), limit=10
+    )
+    assert calls.count("get_fiber") == 3
+    assert "neurons_batch:3" in calls and "typed_batch:3" in calls
+    assert [(m["id"], m["rank"], m["content"], m["score"]) for m in mem] == [
+        ("f-1", 1, "c-n-f-1", None),
+        ("f-2", 2, "c-n-f-2", 0.5),
+        ("f-3", 3, "c-n-f-3", None),
+    ]
