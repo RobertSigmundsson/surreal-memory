@@ -10,10 +10,14 @@ Install: pip install surreal-memory[reranker]
 
 from __future__ import annotations
 
+import http.client
 import json
 import logging
 import os
 import re
+import threading
+import time
+import urllib.parse
 import urllib.request
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -39,6 +43,132 @@ def _check_cross_encoder() -> bool:
         except ImportError:
             _CROSS_ENCODER_AVAILABLE = False
     return _CROSS_ENCODER_AVAILABLE
+
+
+# --- Connection reuse for the HTTP reranker ---------------------------------------------------
+# Every rerank used to open a new connection. Through the SSH tunnel to the reranker box that costs
+# ~225 ms (measured 2026-09-23: new connection ttfb 300-580 ms, reused within <=3 s 102-303 ms);
+# the server (uvicorn) closes an idle connection after 5 s. KEEPALIVE_S (< 5, e.g. 4) bounds reuse; 0 (default) turns
+# pooling off and restores the one-connection-per-call path unchanged. Same request, same response:
+# ranking is unaffected by construction.
+KEEPALIVE_S: float = float(os.environ.get("SURREAL_MEMORY_RERANK_KEEPALIVE_S", "0") or 0.0)
+_LOCK_TIMEOUT_S = 1.0
+
+
+class _Pooled:
+    __slots__ = ("conn", "used_at")
+
+    def __init__(self, conn: http.client.HTTPConnection, used_at: float) -> None:
+        self.conn = conn
+        self.used_at = used_at
+
+
+_POOL: dict[str, _Pooled] = {}
+_POOL_LOCKS: dict[str, threading.Lock] = {}
+_POOL_GUARD = threading.Lock()
+POOL_STATS: dict[str, int] = {
+    "reused": 0,
+    "opened": 0,
+    "reconnect": 0,
+    "warm_ok": 0,
+    "warm_fail": 0,
+}
+
+
+def _endpoint_lock(endpoint: str) -> threading.Lock:
+    with _POOL_GUARD:
+        return _POOL_LOCKS.setdefault(endpoint, threading.Lock())
+
+
+def _new_conn(endpoint: str, timeout: float) -> http.client.HTTPConnection:
+    u = urllib.parse.urlsplit(endpoint)
+    cls = http.client.HTTPSConnection if u.scheme == "https" else http.client.HTTPConnection
+    POOL_STATS["opened"] += 1
+    return cls(u.hostname or "127.0.0.1", u.port, timeout=timeout)
+
+
+def _base_path(endpoint: str) -> str:
+    return urllib.parse.urlsplit(endpoint).path.rstrip("/")
+
+
+def _pooled_request(
+    endpoint: str,
+    method: str,
+    path: str,
+    body: bytes | None,
+    headers: dict[str, str],
+    timeout: float,
+) -> tuple[int, bytes]:
+    """One request on the endpoint's pooled connection (caller holds the endpoint lock).
+
+    A reused connection that the server already closed is reopened ONCE (counted as
+    `reconnect`, not as a degradation); a failure on a fresh connection propagates as before.
+    """
+    now = time.monotonic()
+    pooled = _POOL.get(endpoint)
+    reused = pooled is not None and (now - pooled.used_at) < KEEPALIVE_S
+    if pooled is not None and not reused:
+        pooled.conn.close()
+        _POOL.pop(endpoint, None)
+    conn = pooled.conn if (pooled is not None and reused) else _new_conn(endpoint, timeout)
+    for attempt in (0, 1):
+        try:
+            conn.timeout = timeout
+            conn.request(method, _base_path(endpoint) + path, body=body, headers=headers)
+            resp = conn.getresponse()
+            data = resp.read()
+            _POOL[endpoint] = _Pooled(conn, time.monotonic())
+            if reused and attempt == 0:
+                POOL_STATS["reused"] += 1
+            return resp.status, data
+        except (
+            http.client.RemoteDisconnected,
+            ConnectionResetError,
+            BrokenPipeError,
+            http.client.CannotSendRequest,
+        ):
+            conn.close()
+            _POOL.pop(endpoint, None)
+            if not (reused and attempt == 0):
+                raise
+            POOL_STATS["reconnect"] += 1
+            conn = _new_conn(endpoint, timeout)
+        except Exception:
+            conn.close()
+            _POOL.pop(endpoint, None)
+            raise
+    raise RuntimeError("unreachable")  # pragma: no cover
+
+
+def rozgrzej(endpoint: str, *, timeout: float = 5.0) -> bool:
+    """Open (or keep) the pooled connection with a cheap GET <endpoint>/health before a recall needs it.
+
+    Never raises; returns whether a response arrived. Skips when pooling is off or a fresh pooled
+    connection already exists.
+    """
+    if (
+        KEEPALIVE_S <= 0
+        or not isinstance(endpoint, str)
+        or not endpoint.startswith(("http://", "https://"))
+    ):
+        return False
+    endpoint = endpoint.rstrip("/")
+    lock = _endpoint_lock(endpoint)
+    if not lock.acquire(timeout=0.2):
+        return False
+    try:
+        pooled = _POOL.get(endpoint)
+        if pooled is not None and (time.monotonic() - pooled.used_at) < KEEPALIVE_S:
+            return True
+        _pooled_request(endpoint, "GET", "/health", None, {}, timeout)
+        POOL_STATS["warm_ok"] += 1
+        return True
+    except Exception:
+        POOL_STATS["warm_fail"] += 1
+        logger.debug("Reranker warm-up failed (non-critical)", exc_info=True)
+        return False
+    finally:
+        lock.release()
 
 
 def _rerank_endpoint() -> str:
@@ -204,14 +334,7 @@ class HttpReranker:
         headers = {"Content-Type": "application/json"}
         if self._api_key:
             headers["Authorization"] = f"Bearer {self._api_key}"
-        req = urllib.request.Request(  # noqa: S310 - fixed local rerank endpoint
-            f"{self._endpoint}/rerank",
-            data=payload,
-            headers=headers,
-            method="POST",
-        )
-        with urllib.request.urlopen(req, timeout=self._timeout) as resp:  # noqa: S310
-            data = json.loads(resp.read().decode("utf-8"))
+        data = json.loads(self._post_rerank(payload, headers).decode("utf-8"))
         # Accept both the OpenAI-compatible field (`relevance_score`, llamastash) and
         # the BGE-M3 service field (`score`).
         by_index = {
@@ -219,6 +342,27 @@ class HttpReranker:
             for r in data.get("results", [])
         }
         return [by_index.get(i, float("-inf")) for i in range(len(documents))]
+
+    def _post_rerank(self, payload: bytes, headers: dict[str, str]) -> bytes:
+        lock = _endpoint_lock(self._endpoint) if KEEPALIVE_S > 0 else None
+        if lock is not None and lock.acquire(timeout=_LOCK_TIMEOUT_S):
+            try:
+                status, body = _pooled_request(
+                    self._endpoint, "POST", "/rerank", payload, headers, self._timeout
+                )
+            finally:
+                lock.release()
+            if status >= 400:
+                raise RuntimeError(f"reranker HTTP {status}")
+            return body
+        req = urllib.request.Request(  # noqa: S310 - fixed local rerank endpoint
+            f"{self._endpoint}/rerank",
+            data=payload,
+            headers=headers,
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=self._timeout) as resp:  # noqa: S310
+            return bytes(resp.read())
 
     def rerank(
         self,
