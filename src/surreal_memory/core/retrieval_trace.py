@@ -19,6 +19,8 @@ _MAX_QUERY_LEN = 500
 _MAX_IDS = 10
 _MAX_SIGNALS = 24
 _MAX_SIGNAL_STR_LEN = 120
+_MAX_TOR_LEN = 40
+_MAX_AGENT_ID_LEN = 120
 
 
 def _parse_dt(value: Any) -> datetime | None:
@@ -58,6 +60,11 @@ class RetrievalTrace:
             smem-recall-trzy-warstwy) — a flat, bounded dict of scalars
             (at most 24 keys; see __post_init__), empty unless the brain's
             `refusal_mode` was "observe" for this recall.
+        tor: Which caller path ran the recall ("mcp", "http:<role>", ...).
+            Empty string = written before this field existed (never read as
+            "mcp" — an unknown path stays visibly unknown).
+        agent_id: Identity of the caller on that path (MCP client name, or the
+            hermes pod / gateway agent id for the HTTP shim); None if unknown.
         trace_version: Schema version of this trace record. Default 2
             (this field exists); rows written before `signals` existed have
             no `trace_version` at all in storage — `from_dict` reads those
@@ -80,6 +87,8 @@ class RetrievalTrace:
     filters: dict[str, Any] = field(default_factory=dict)
     config_snapshot: dict[str, Any] = field(default_factory=dict)
     signals: dict[str, Any] = field(default_factory=dict)
+    tor: str = ""
+    agent_id: str | None = None
     trace_version: int = 2
     created_at: datetime = field(default_factory=utcnow)
 
@@ -105,6 +114,10 @@ class RetrievalTrace:
                 # Non-scalar values (lists, dicts, ...) are silently dropped here,
                 # never serialised into the trace.
             object.__setattr__(self, "signals", _bounded)
+        if len(self.tor) > _MAX_TOR_LEN:
+            object.__setattr__(self, "tor", self.tor[:_MAX_TOR_LEN])
+        if self.agent_id is not None and len(self.agent_id) > _MAX_AGENT_ID_LEN:
+            object.__setattr__(self, "agent_id", self.agent_id[:_MAX_AGENT_ID_LEN])
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize to a JSON-friendly dict (lists, ISO datetime)."""
@@ -124,6 +137,8 @@ class RetrievalTrace:
             "filters": dict(self.filters),
             "config_snapshot": dict(self.config_snapshot),
             "signals": dict(self.signals),
+            "tor": self.tor,
+            "agent_id": self.agent_id,
             "trace_version": self.trace_version,
             "created_at": self.created_at.isoformat(),
         }
@@ -146,6 +161,8 @@ class RetrievalTrace:
             "filters": dict(data.get("filters") or {}),
             "config_snapshot": dict(data.get("config_snapshot") or {}),
             "signals": dict(data.get("signals") or {}),
+            "tor": str(data.get("tor") or ""),
+            "agent_id": (str(data["agent_id"]) if data.get("agent_id") else None),
             "trace_version": int(data.get("trace_version", 1) or 1),
         }
         if data.get("id"):

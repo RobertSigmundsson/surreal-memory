@@ -72,6 +72,8 @@ def build_retrieval_trace(
     args: dict[str, Any] | None = None,
     config_snapshot: dict[str, Any] | None = None,
     session_id: str | None = None,
+    tor: str = "",
+    agent_id: str | None = None,
 ) -> RetrievalTrace:
     """Assemble a RetrievalTrace from a recall ``result`` + its arguments.
 
@@ -126,4 +128,6 @@ def build_retrieval_trace(
         filters=_extract_filters(args, mode),
         config_snapshot=dict(config_snapshot or {}),
         signals=signals,
+        tor=tor,
+        agent_id=agent_id,
     )
