@@ -60,6 +60,15 @@ EMBEDDING_ANCHOR_MIN_LIMIT = 30
 TOMBSTONE_RETRY_FACTOR = 4
 
 
+def _has_embedding_anchor(ranked_lists: list[list[RankedAnchor]]) -> bool:
+    """Return whether a semantic vector retriever supplied any anchors."""
+    return any(
+        anchor.retriever in {"embedding", "fiber_vector"}
+        for ranked_list in ranked_lists
+        for anchor in ranked_list
+    )
+
+
 @dataclasses.dataclass(frozen=True)
 class EmbeddingAnchorOutcome:
     """Anchor ids plus the provenance of how they were found.
@@ -428,11 +437,7 @@ class ReflexPipeline:
         # P1 fix (SMEM-MEMORY-QUALITY): capture embedding-anchor provenance here, while
         # ranked_lists still carries per-retriever identity, so reconstruct_answer() can
         # avoid inflating confidence for queries with zero embedding corroboration.
-        has_embedding_anchor = any(
-            anchor.retriever == "embedding"
-            for ranked_list in ranked_lists
-            for anchor in ranked_list
-        )
+        has_embedding_anchor = _has_embedding_anchor(ranked_lists)
 
         # 3.5 RRF score fusion: compute initial activation levels from multi-retriever ranks
         anchor_activations: dict[str, float] | None = None

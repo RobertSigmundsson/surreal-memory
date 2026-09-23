@@ -271,6 +271,24 @@ class TestReconstructAnswer:
         assert result.score_breakdown.intersection_boost > 0
 
     @pytest.mark.asyncio
+    async def test_ungrounded_query_keeps_confidence_discount(self) -> None:
+        """Queries without vector anchors retain the proportional confidence discount."""
+        storage = _make_mock_storage()
+        activations = {"n1": _make_activation("n1", 0.9)}
+
+        result = await reconstruct_answer(
+            storage,
+            activations,
+            intersections=["n1"],
+            fibers=[],
+            has_embedding_anchor=False,
+        )
+
+        assert result.score_breakdown is not None
+        assert result.score_breakdown.embedding_grounded is False
+        assert result.score_breakdown.raw_total == pytest.approx(0.63)
+
+    @pytest.mark.asyncio
     async def test_max_contributing_respected(self) -> None:
         """max_contributing should limit multi-neuron count."""
         neurons = {f"n{i}": _make_neuron(f"n{i}", f"content-{i}") for i in range(10)}
