@@ -207,3 +207,40 @@ async def test_trace_off_by_config_reports_off() -> None:
 async def test_reconsolidate_flag_passes_to_pipeline() -> None:
     _, seen = await _call({"query": "q", "reconsolidate": False})
     assert seen[0]["reconsolidate"] is False
+
+
+@pytest.mark.asyncio
+async def test_materialize_keeps_rank_of_unreadable_fiber() -> None:
+    class _St:
+        brain_id = "b1"
+
+        async def get_fiber(self, fid: str) -> Any:
+            return (
+                None
+                if fid == "f-2"
+                else SimpleNamespace(anchor_neuron_id="n-" + fid, summary="s", metadata={})
+            )
+
+        async def get_neuron(self, nid: str) -> Any:
+            return SimpleNamespace(content="c-" + nid, type=SimpleNamespace(value="fact"))
+
+        async def get_typed_memory(self, _fid: str) -> Any:
+            return None
+
+    res = SimpleNamespace(metadata={"activation_levels": {"n-f-1": 0.9}})
+    mem = await recall_api.materialize_memories(
+        _St(), {"fibers_matched": ["f-1", "f-2", "f-3"]}, res, config=_config(), limit=10
+    )
+    assert [(m["id"], m["rank"]) for m in mem] == [("f-1", 1), ("f-2", 2), ("f-3", 3)]
+    assert mem[1]["content"] == "" and mem[1]["neuron_id"] is None
+    assert (mem[0]["score"], mem[2]["score"]) == (0.9, None)
+
+
+@pytest.mark.asyncio
+async def test_materialize_on_non_pipeline_response_is_empty() -> None:
+    assert (
+        await recall_api.materialize_memories(
+            _Storage(), {"error": "x"}, None, config=_config(), limit=5
+        )
+        == []
+    )
