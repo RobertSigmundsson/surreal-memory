@@ -284,6 +284,11 @@
           "rerank_degraded": {
             "type": "boolean",
             "title": "Rerank Degraded"
+          },
+          "trace_status": {
+            "type": "string",
+            "title": "Trace Status",
+            "default": "sync"
           }
         },
         "type": "object",

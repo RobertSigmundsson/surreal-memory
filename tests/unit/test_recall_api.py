@@ -282,3 +282,100 @@ async def test_materialize_uses_one_batch_read_for_anchors_and_types() -> None:
         ("f-2", 2, "c-n-f-2", 0.5),
         ("f-3", 3, "c-n-f-3", None),
     ]
+
+
+@pytest.mark.asyncio
+async def test_odroczone_answers_before_side_effects_and_traces_after() -> None:
+    kolejnosc: list[str] = []
+
+    class _Pipe:
+        async def query_rozdzielone(self, **q: Any) -> Any:
+            kolejnosc.append("odpowiedz")
+            res = _result()
+
+            async def _dokoncz() -> RetrievalResult:
+                kolejnosc.append("skutki")
+                res.metadata["odmowa_sygnaly"] = {"jev_status": "OK", "w3_would_refuse": False}
+                return res
+
+            return res, _dokoncz
+
+    storage = _Storage()
+    with patch("surreal_memory.engine.retrieval.ReflexPipeline", return_value=_Pipe()):
+        out = await recall_api.recall(
+            storage,
+            {"query": "q", "trace": True},
+            config=_config(),
+            tor="http:hermes-pod",
+            agent_id="agent:a_1",
+            engine_session_id="s",
+            skutki="odroczone",
+            dekoracje=False,
+        )
+        assert out.trace == "deferred" and kolejnosc == ["odpowiedz"]
+        assert storage.traces == []
+        tid = out.response["trace_id"]
+        assert out.pending is not None and await out.pending == "sync"
+    assert kolejnosc == ["odpowiedz", "skutki"]
+    t = storage.traces[0]
+    assert t.id == tid and t.tor == "http:hermes-pod" and t.signals.get("jev_status") == "OK"
+
+
+@pytest.mark.asyncio
+async def test_odroczone_trace_failure_is_an_error_not_silence() -> None:
+    class _Pipe:
+        async def query_rozdzielone(self, **q: Any) -> Any:
+            res = _result()
+
+            async def _dokoncz() -> RetrievalResult:
+                return res
+
+            return res, _dokoncz
+
+    class _Fail(_Storage):
+        async def add_retrieval_trace(self, trace: Any) -> str:
+            raise RuntimeError("db down")
+
+    with patch("surreal_memory.engine.retrieval.ReflexPipeline", return_value=_Pipe()):
+        out = await recall_api.recall(
+            _Fail(),
+            {"query": "q"},
+            config=_config(),
+            tor="http:test",
+            engine_session_id="s",
+            skutki="odroczone",
+        )
+        with pytest.raises(RuntimeError, match="deferred trace not persisted"):
+            await out.pending  # type: ignore[misc]
+
+
+@pytest.mark.asyncio
+async def test_dekoracje_false_skips_sources_and_chunking_reads() -> None:
+    storage = _Storage()
+    res = _result()
+    res.fibers_matched = [f"f-{i}" for i in range(9)]  # > 7 triggers chunking when decorations on
+    res.subgraph = Subgraph(neuron_ids=[f"n-{i}" for i in range(9)], synapse_ids=[], anchor_ids=[])
+
+    async def _query(**q: Any) -> RetrievalResult:
+        return res
+
+    with patch("surreal_memory.engine.retrieval.ReflexPipeline") as pcls:
+        pcls.return_value = SimpleNamespace(query=_query)
+        await recall_api.recall(
+            storage,
+            {"query": "q"},
+            config=_config(),
+            tor="http:test",
+            engine_session_id="s",
+            dekoracje=False,
+        )
+        assert "get_synapses" not in storage.calls and "get_source" not in storage.calls
+        await recall_api.recall(
+            storage,
+            {"query": "q"},
+            config=_config(),
+            tor="http:test",
+            engine_session_id="s",
+            dekoracje=True,
+        )
+        assert "get_synapses" in storage.calls

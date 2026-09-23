@@ -45,6 +45,17 @@ def recall_http(
         bool,
         typer.Option("--reconsolidate/--no-reconsolidate", help="Recall reconsolidates top hits"),
     ] = True,
+    skutki: Annotated[
+        str,
+        typer.Option(
+            "--skutki",
+            help="inline = side effects before the answer (today); odroczone = answer first, "
+            "side effects + trace after it, awaited before the next recall",
+        ),
+    ] = "inline",
+    bariera_s: Annotated[
+        float, typer.Option("--bariera-s", help="Max wait for pending side effects before a recall")
+    ] = 10.0,
 ) -> None:
     """Run the recall-only HTTP shim (GET /health, POST /v1/recall; bearer auth; no daemons).
 
@@ -55,6 +66,9 @@ def recall_http(
     if len(key) < 32:
         typer.echo(f"ERROR: {KEY_ENV} missing or shorter than 32 characters", err=True)
         raise typer.Exit(78)
+    if skutki not in ("inline", "odroczone"):
+        typer.echo("ERROR: --skutki must be 'inline' or 'odroczone'", err=True)
+        raise typer.Exit(2)
     if trace not in ("force", "config"):
         typer.echo("ERROR: --trace must be 'force' or 'config'", err=True)
         raise typer.Exit(2)
@@ -76,6 +90,8 @@ def recall_http(
         queue_timeout_s=queue_timeout_s,
         trace_mode="force" if trace == "force" else "config",
         reconsolidate=reconsolidate,
+        skutki="odroczone" if skutki == "odroczone" else "inline",
+        bariera_s=bariera_s,
     )
     del key
     typer.echo(f"smem recall-http on http://{host}:{port} (routes: /health, /v1/recall)")
