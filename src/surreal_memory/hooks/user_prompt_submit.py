@@ -36,9 +36,12 @@ Usage standalone:
 from __future__ import annotations
 
 import asyncio
+import datetime as dt
 import json
 import logging
+import os
 import sys
+from pathlib import Path
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -47,6 +50,43 @@ logger = logging.getLogger(__name__)
 # character cut. Deliberately crude: it only has to bound the injection, and a
 # cheap over-estimate is better than a tokenizer import on every prompt.
 _CHARS_PER_TOKEN = 4
+
+
+# Durable record of every prompt-recall skip for system content. Hook stderr is
+# not persisted by Claude Code (measured 2026-09-24: 0 occurrences in transcripts),
+# so a filter reporting only there would be a filter without a trace.
+_SKIP_LOG = "prompt_recall_pominiete.jsonl"
+
+
+def _data_dir() -> Path:
+    custom = os.environ.get("SURREAL_MEMORY_DIR", "")
+    return Path(custom) if custom else (Path.home() / ".surrealmemory")
+
+
+def _record_skip(prefix: str, length: int, session: str) -> None:
+    """Append one line per skip — prefix, length, session; NEVER the prompt text
+    (bash-mode stdout can carry secrets). A failed write degrades visibly on stderr;
+    the skip itself still holds and the prompt is never blocked."""
+    rekord = {
+        "ts": dt.datetime.now(dt.UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "powod": "prefiks",
+        "prefiks": prefix,
+        "dlugosc": length,
+        "sesja": session,
+    }
+    try:
+        with open(_data_dir() / _SKIP_LOG, "a", encoding="utf-8") as f:
+            f.write(json.dumps(rekord, ensure_ascii=False) + "\n")
+    except OSError as exc:
+        print(  # noqa: T201
+            f"[Surreal-Memory] licznik pominięć: zapis nieudany ({type(exc).__name__})",
+            file=sys.stderr,
+        )
+        return
+    print(  # noqa: T201
+        f"[Surreal-Memory] prompt recall pominięty: treść systemowa ({prefix}) -> {_SKIP_LOG}",
+        file=sys.stderr,
+    )
 
 
 def read_hook_input() -> dict[str, Any]:
@@ -75,13 +115,25 @@ async def get_prompt_recall(hook_input: dict[str, Any]) -> str:
     Any failure degrades to "": the prompt must never be blocked by recall.
     """
     from surreal_memory.engine.retrieval import ReflexPipeline
-    from surreal_memory.unified_config import get_config, get_shared_storage
+    from surreal_memory.unified_config import (
+        DEFAULT_SYSTEM_PREFIXES,
+        get_config,
+        get_shared_storage,
+    )
 
     config = get_config()
     cfg = config.prompt_recall
     if not cfg.enabled:
         return ""
     prompt = str(hook_input.get("prompt") or "").strip()
+    # Claude Code system content (task notifications, bash-mode input) is not a
+    # question: no recall, no Jev call, no storage connection. Checked before the
+    # length gate so the recorded reason is always the specific one.
+    # A config object without the field (older or duck-typed) keeps the filter ON.
+    for prefix in getattr(cfg, "system_prefixes", DEFAULT_SYSTEM_PREFIXES):
+        if prefix and prompt.startswith(prefix):
+            _record_skip(prefix, len(prompt), str(hook_input.get("session_id") or ""))
+            return ""
     if len(prompt) < cfg.min_prompt_chars:
         return ""
 
