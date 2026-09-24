@@ -16,6 +16,14 @@ from surreal_memory.utils.timeutils import utcnow
 def quick_recall(
     query: Annotated[str, typer.Argument(help="Query to search")],
     depth: Annotated[int | None, typer.Option("-d")] = None,
+    trace: Annotated[
+        bool | None,
+        typer.Option(
+            "--trace/--no-trace",
+            help="Retrieval trace: default obeys [trace] in config; --trace forces one; "
+            "--no-trace writes none",
+        ),
+    ] = None,
 ) -> None:
     """Quick recall - shortcut for 'smem recall'.
 
@@ -23,29 +31,44 @@ def quick_recall(
         smem q "what's the API format"
         smem q "yesterday's work" -d 2
     """
+    from surreal_memory.cli.recall_trace import CliTraceOutcome, persist_cli_trace
     from surreal_memory.engine.retrieval import DepthLevel, ReflexPipeline
 
-    async def _recall() -> None:
+    async def _recall() -> CliTraceOutcome | None:
         config = get_config()
         storage = await get_storage(config)
         brain = await storage.get_brain(storage.brain_id or "")
 
         if not brain:
             typer.secho("No brain configured", fg=typer.colors.RED)
-            return
+            return None
 
         pipeline = ReflexPipeline(storage, brain.config)
         depth_level = DepthLevel(depth) if depth is not None else None
         result = await pipeline.query(query, depth=depth_level, max_tokens=500)
+        slad = await persist_cli_trace(
+            storage,
+            result,
+            brain=brain,
+            query=query,
+            depth=result.depth_used.value,
+            max_tokens=500,
+            min_confidence=0.0,
+            flag=trace,
+        )
 
         if result.confidence < 0.1:
             typer.secho("No relevant memories found.", fg=typer.colors.YELLOW)
-            return
+            return slad
 
         typer.echo(result.context)
         typer.secho(f"\n[confidence: {result.confidence:.2f}]", fg=typer.colors.BRIGHT_BLACK)
+        return slad
 
-    run_async(_recall())
+    slad = run_async(_recall())
+    line = slad.stderr_line() if slad is not None else None
+    if line:
+        typer.echo(line, err=True)
 
 
 def quick_add(

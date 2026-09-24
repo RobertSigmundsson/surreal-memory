@@ -1,7 +1,8 @@
 """Recall + retrieval trace in ONE engine call, shared by every caller path ("tor").
 
 tor: ``"mcp"`` (``RecallHandler``) | ``"http:<role>"`` (the ``recall_http`` shim that hermes
-pods call) | later ``"inproc:<role>"``. The body was moved verbatim from
+pods call) | ``"cli"`` (``smem recall``/``smem q``: trace only, via ``persist_trace`` after the
+CLI's own pipeline call — see ``cli/recall_trace.py``) | later ``"inproc:<role>"``. The body was moved verbatim from
 ``mcp/recall_handler.py`` (``RecallHandler._recall`` minus cross-brain, and
 ``_maybe_persist_trace``); side effects that belong to an MCP session (active-session
 context, knowledge-surface routing, passive capture, maintenance/onboarding hints) are
@@ -37,8 +38,13 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 TOR_MCP: Final = "mcp"
-TOR_PATTERN: Final = re.compile(r"^(?:mcp|http:[a-z0-9][a-z0-9-]{0,31})$")
+TOR_CLI: Final = "cli"
+TOR_PATTERN: Final = re.compile(r"^(?:mcp|cli|http:[a-z0-9][a-z0-9-]{0,31})$")
 AGENT_ID_MAX: Final = 120
+# Caller identity character sets — the same ones the recall-http shim enforces on RecallIn
+# (recall_http.py), kept in one place for callers that validate identity themselves (CLI).
+AGENT_ID_PATTERN: Final = re.compile(r"^[A-Za-z0-9._:@-]{1,120}$")
+SESSION_ID_PATTERN: Final = re.compile(r"^[A-Za-z0-9._:@|-]{1,128}$")
 
 RecallPath = Literal["error", "exact_fiber", "surface", "min_confidence", "pipeline"]
 TraceStatus = Literal["sync", "sync_error", "background", "off", "skipped", "deferred"]
