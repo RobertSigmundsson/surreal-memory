@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
   "info": {
     "title": "smem recall-http",
-    "version": "0.1.0"
+    "version": "0.2.0"
   },
   "paths": {
     "/health": {
@@ -46,34 +46,556 @@
               }
             }
           },
-          "422": {
-            "description": "Validation Error",
+          "401": {
+            "description": "Unauthorized",
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
+                  "$ref": "#/components/schemas/BladOut"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BladOut"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Unprocessable Entity",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BladOut"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Service Unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BladOut"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal Server Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BladOut"
                 }
               }
             }
           }
-        }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ],
+        "x-zakres": "odczyt"
+      }
+    },
+    "/v1/recall-cli": {
+      "post": {
+        "summary": "Recall Cli",
+        "operationId": "recall_cli_v1_recall_cli_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CliRecallIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CliRecallOut"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BladOut"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BladOut"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Unprocessable Entity",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BladOut"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Service Unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BladOut"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal Server Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BladOut"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ],
+        "x-zakres": "odczyt"
+      }
+    },
+    "/v1/remember": {
+      "post": {
+        "summary": "Remember",
+        "operationId": "remember_v1_remember_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RememberIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RememberOut"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BladOut"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BladOut"
+                }
+              }
+            }
+          },
+          "411": {
+            "description": "Length Required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BladOut"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Request Entity Too Large",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BladOut"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Unprocessable Entity",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BladOut"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Service Unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BladOut"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal Server Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BladOut"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ],
+        "x-zakres": "zapis"
       }
     }
   },
   "components": {
     "schemas": {
-      "HTTPValidationError": {
+      "BladOut": {
         "properties": {
+          "error": {
+            "type": "string",
+            "title": "Error"
+          },
+          "powod": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Powod"
+          },
           "detail": {
-            "items": {
-              "$ref": "#/components/schemas/ValidationError"
-            },
-            "type": "array",
+            "anyOf": [
+              {
+                "items": {
+                  "$ref": "#/components/schemas/BladSzczegol"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
             "title": "Detail"
+          },
+          "typy": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Typy"
+          },
+          "liczba": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Liczba"
           }
         },
         "type": "object",
-        "title": "HTTPValidationError"
+        "required": [
+          "error"
+        ],
+        "title": "BladOut",
+        "description": "Every error body. Never carries the input, content, a sensitive match or a header value."
+      },
+      "BladSzczegol": {
+        "properties": {
+          "loc": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Loc"
+          },
+          "msg": {
+            "type": "string",
+            "title": "Msg"
+          },
+          "type": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Type"
+          }
+        },
+        "type": "object",
+        "required": [
+          "loc",
+          "msg"
+        ],
+        "title": "BladSzczegol"
+      },
+      "CliRecallIn": {
+        "properties": {
+          "query": {
+            "type": "string",
+            "maxLength": 4000,
+            "minLength": 1,
+            "title": "Query"
+          },
+          "depth": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "maximum": 3.0,
+                "minimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Depth"
+          },
+          "max_tokens": {
+            "type": "integer",
+            "maximum": 10000.0,
+            "minimum": 1.0,
+            "title": "Max Tokens",
+            "default": 500
+          },
+          "min_confidence": {
+            "type": "number",
+            "maximum": 1.0,
+            "minimum": 0.0,
+            "title": "Min Confidence",
+            "default": 0.0
+          },
+          "agent_id": {
+            "type": "string",
+            "maxLength": 120,
+            "minLength": 1,
+            "pattern": "^[A-Za-z0-9._:@-]+$",
+            "title": "Agent Id"
+          },
+          "tor": {
+            "type": "string",
+            "pattern": "^http:[a-z0-9][a-z0-9-]{0,31}$",
+            "title": "Tor"
+          },
+          "session_id": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 128,
+                "pattern": "^[A-Za-z0-9._:@|-]+$"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Session Id"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "query",
+          "agent_id",
+          "tor"
+        ],
+        "title": "CliRecallIn",
+        "description": "Request body of ``POST /v1/recall-cli`` (``smem recall`` semantics)."
+      },
+      "CliRecallOut": {
+        "properties": {
+          "answer": {
+            "type": "string",
+            "title": "Answer"
+          },
+          "confidence": {
+            "type": "number",
+            "title": "Confidence"
+          },
+          "depth_used": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Depth Used"
+          },
+          "neurons_activated": {
+            "type": "integer",
+            "title": "Neurons Activated"
+          },
+          "fibers_matched": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Fibers Matched"
+          },
+          "latency_ms": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Latency Ms"
+          },
+          "below_threshold": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Below Threshold"
+          },
+          "oldest_memory_age": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Oldest Memory Age"
+          },
+          "freshness_warnings": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Freshness Warnings"
+          },
+          "rerank_degraded_warning": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Rerank Degraded Warning"
+          },
+          "trace_status": {
+            "type": "string",
+            "title": "Trace Status"
+          },
+          "trace_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Trace Id"
+          },
+          "trace_error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Trace Error"
+          }
+        },
+        "type": "object",
+        "required": [
+          "answer",
+          "confidence",
+          "neurons_activated",
+          "trace_status"
+        ],
+        "title": "CliRecallOut",
+        "description": "``smem recall --json`` of the host CLI (same keys; absent keys are omitted)."
       },
       "MemoryOut": {
         "properties": {
@@ -309,45 +831,179 @@
         ],
         "title": "RecallOut"
       },
-      "ValidationError": {
+      "RememberIn": {
         "properties": {
-          "loc": {
-            "items": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "integer"
-                }
-              ]
-            },
-            "type": "array",
-            "title": "Location"
-          },
-          "msg": {
+          "content": {
             "type": "string",
-            "title": "Message"
+            "maxLength": 8000,
+            "minLength": 1,
+            "title": "Content"
           },
           "type": {
             "type": "string",
-            "title": "Error Type"
+            "enum": [
+              "fact",
+              "decision",
+              "insight",
+              "context",
+              "error",
+              "workflow",
+              "reference",
+              "todo"
+            ],
+            "title": "Type"
           },
-          "input": {
-            "title": "Input"
+          "tags": {
+            "items": {
+              "type": "string",
+              "maxLength": 100,
+              "minLength": 1,
+              "pattern": "^[^\\x00-\\x1f\\x7f]+$"
+            },
+            "type": "array",
+            "maxItems": 50,
+            "title": "Tags"
           },
-          "ctx": {
-            "type": "object",
-            "title": "Context"
+          "priority": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "maximum": 10.0,
+                "minimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Priority"
+          },
+          "agent_id": {
+            "type": "string",
+            "maxLength": 120,
+            "minLength": 1,
+            "pattern": "^[A-Za-z0-9._:@-]+$",
+            "title": "Agent Id"
+          },
+          "tor": {
+            "type": "string",
+            "pattern": "^http:[a-z0-9][a-z0-9-]{0,31}$",
+            "title": "Tor"
+          },
+          "session_id": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 128,
+                "pattern": "^[A-Za-z0-9._:@|-]+$"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Session Id"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "content",
+          "type",
+          "agent_id",
+          "tor"
+        ],
+        "title": "RememberIn",
+        "description": "Request body of ``POST /v1/remember``."
+      },
+      "RememberOut": {
+        "properties": {
+          "message": {
+            "type": "string",
+            "title": "Message"
+          },
+          "fiber_id": {
+            "type": "string",
+            "title": "Fiber Id"
+          },
+          "memory_type": {
+            "type": "string",
+            "title": "Memory Type"
+          },
+          "priority": {
+            "type": "string",
+            "title": "Priority"
+          },
+          "neurons_created": {
+            "type": "integer",
+            "title": "Neurons Created"
+          },
+          "neurons_linked": {
+            "type": "integer",
+            "title": "Neurons Linked"
+          },
+          "synapses_created": {
+            "type": "integer",
+            "title": "Synapses Created"
+          },
+          "expires_in_days": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Expires In Days"
+          },
+          "anchor_neuron_id": {
+            "type": "string",
+            "title": "Anchor Neuron Id"
+          },
+          "content_sha256": {
+            "type": "string",
+            "title": "Content Sha256"
+          },
+          "oczyszczone": {
+            "type": "boolean",
+            "title": "Oczyszczone"
+          },
+          "agent_id": {
+            "type": "string",
+            "title": "Agent Id"
+          },
+          "tor": {
+            "type": "string",
+            "title": "Tor"
+          },
+          "elapsed_ms": {
+            "type": "number",
+            "title": "Elapsed Ms"
           }
         },
         "type": "object",
         "required": [
-          "loc",
-          "msg",
-          "type"
+          "message",
+          "fiber_id",
+          "memory_type",
+          "priority",
+          "neurons_created",
+          "neurons_linked",
+          "synapses_created",
+          "anchor_neuron_id",
+          "content_sha256",
+          "oczyszczone",
+          "agent_id",
+          "tor",
+          "elapsed_ms"
         ],
-        "title": "ValidationError"
+        "title": "RememberOut",
+        "description": "``smem remember --json`` of the host CLI plus shim fields."
+      }
+    },
+    "securitySchemes": {
+      "bearer": {
+        "type": "http",
+        "scheme": "bearer"
       }
     }
   }

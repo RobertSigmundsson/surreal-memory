@@ -9,6 +9,7 @@ from typing import Annotated
 import typer
 
 KEY_ENV = "SMEM_RECALL_HTTP_KEY"
+REMEMBER_KEY_ENV = "SMEM_REMEMBER_HTTP_KEY"
 
 
 def configure_logging() -> logging.Logger:
@@ -56,16 +57,36 @@ def recall_http(
     bariera_s: Annotated[
         float, typer.Option("--bariera-s", help="Max wait for pending side effects before a recall")
     ] = 10.0,
+    zapis: Annotated[
+        bool,
+        typer.Option(
+            "--zapis/--bez-zapisu",
+            help="Enable POST /v1/remember with the write key from SMEM_REMEMBER_HTTP_KEY "
+            "(off = the route answers 403 zapis_wylaczony)",
+        ),
+    ] = False,
 ) -> None:
-    """Run the recall-only HTTP shim (GET /health, POST /v1/recall; bearer auth; no daemons).
+    """Run the HTTP shim (GET /health, POST /v1/recall, /v1/recall-cli, /v1/remember; bearer
+    auth with disjoint read/write scopes; no daemons).
 
-    The bearer secret is read from the SMEM_RECALL_HTTP_KEY environment variable; a missing
-    or short key is a hard error (exit 78), never an unauthenticated server.
+    The read bearer comes from SMEM_RECALL_HTTP_KEY; a missing or short key is a hard error
+    (exit 78), never an unauthenticated server. Writing is enabled only by --zapis, and then the
+    write bearer SMEM_REMEMBER_HTTP_KEY must be present, >= 32 characters and differ from the
+    read key (else exit 78) — a write key merely present in the environment never enables writes.
     """
     key = os.environ.get(KEY_ENV, "")
     if len(key) < 32:
         typer.echo(f"ERROR: {KEY_ENV} missing or shorter than 32 characters", err=True)
         raise typer.Exit(78)
+    remember_key: str | None = None
+    if zapis:
+        remember_key = os.environ.get(REMEMBER_KEY_ENV, "")
+        if len(remember_key) < 32:
+            typer.echo(f"ERROR: {REMEMBER_KEY_ENV} missing or shorter than 32 characters", err=True)
+            raise typer.Exit(78)
+        if remember_key == key:
+            typer.echo(f"ERROR: {REMEMBER_KEY_ENV} must differ from {KEY_ENV}", err=True)
+            raise typer.Exit(78)
     if skutki not in ("inline", "odroczone"):
         typer.echo("ERROR: --skutki must be 'inline' or 'odroczone'", err=True)
         raise typer.Exit(2)
@@ -82,10 +103,15 @@ def recall_http(
 
     from surreal_memory.recall_http import create_app
 
-    configure_logging()
+    log = configure_logging()
+    if remember_key is None:
+        log.warning("recall-http: zapis wylaczony (brak --zapis)")
+        if os.environ.get(REMEMBER_KEY_ENV):
+            log.warning("recall-http: klucz zapisu obecny, ale zapis wylaczony — brak --zapis")
 
     app = create_app(
         key=key,
+        remember_key=remember_key,
         max_concurrency=max_concurrency,
         queue_timeout_s=queue_timeout_s,
         trace_mode="force" if trace == "force" else "config",
@@ -93,8 +119,11 @@ def recall_http(
         skutki="odroczone" if skutki == "odroczone" else "inline",
         bariera_s=bariera_s,
     )
-    del key
-    typer.echo(f"smem recall-http on http://{host}:{port} (routes: /health, /v1/recall)")
+    del key, remember_key
+    typer.echo(
+        f"smem recall-http on http://{host}:{port} "
+        f"(routes: /health, /v1/recall, /v1/recall-cli, /v1/remember; zapis={'on' if zapis else 'off'})"
+    )
     uvicorn.run(
         app,
         host=host,

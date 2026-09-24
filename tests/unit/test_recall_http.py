@@ -286,7 +286,7 @@ def test_openapi_contract_file_matches_app() -> None:
 
 def test_no_docs_routes_exposed() -> None:
     paths = {getattr(r, "path", "") for r in create_app(key=KEY).routes}
-    assert paths == {"/health", "/v1/recall"}
+    assert paths == {"/health", "/v1/recall", "/v1/recall-cli", "/v1/remember"}
 
 
 def test_import_does_not_load_daemon_app() -> None:
