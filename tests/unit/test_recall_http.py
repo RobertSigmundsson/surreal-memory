@@ -120,6 +120,7 @@ async def test_401_precedes_payload_validation() -> None:
         {"depth": 4},
         {"extra": 1},
         {"tor": "mcp"},
+        {"tor": "cli"},
         {"tor": "gateway"},
         {"tor": "http:"},
         {"agent_id": None},

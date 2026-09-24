@@ -13,6 +13,7 @@ if TYPE_CHECKING:
 import typer
 
 from surreal_memory.cli._helpers import get_config, get_storage, output_result, run_async
+from surreal_memory.cli.recall_trace import CliTraceOutcome, persist_cli_trace
 from surreal_memory.core.memory_types import (
     DEFAULT_EXPIRY_DAYS,
     MemoryType,
@@ -438,6 +439,14 @@ def recall(
         bool, typer.Option("--show-routing", "-R", help="Show query routing info")
     ] = False,
     json_output: Annotated[bool, typer.Option("--json", "-j", help="Output as JSON")] = False,
+    trace: Annotated[
+        bool | None,
+        typer.Option(
+            "--trace/--no-trace",
+            help="Retrieval trace: default obeys [trace] in config; --trace forces one; "
+            "--no-trace writes none",
+        ),
+    ] = None,
 ) -> None:
     """Query memories with intelligent routing (query type auto-detected).
 
@@ -448,7 +457,7 @@ def recall(
         smem recall "project status" --min-confidence 0.5
     """
 
-    async def _recall() -> dict[str, Any]:
+    async def _recall() -> tuple[dict[str, Any], CliTraceOutcome | None]:
         config = get_config()
         storage = await get_storage(config, force_shared=shared)
 
@@ -457,7 +466,7 @@ def recall(
         )
         brain = await storage.get_brain(brain_id)
         if not brain:
-            return {"error": "No brain configured"}
+            return {"error": "No brain configured"}, None
 
         parser = QueryParser()
         router = QueryRouter()
@@ -474,6 +483,16 @@ def recall(
             max_tokens=max_tokens,
             reference_time=utcnow(),
         )
+        slad = await persist_cli_trace(
+            storage,
+            result,
+            brain=brain,
+            query=query,
+            depth=depth_level.value,
+            max_tokens=max_tokens,
+            min_confidence=min_confidence,
+            flag=trace,
+        )
 
         if result.confidence < min_confidence:
             return {
@@ -481,7 +500,8 @@ def recall(
                 "confidence": result.confidence,
                 "neurons_activated": result.neurons_activated,
                 "below_threshold": True,
-            }
+                **slad.json_fields(),
+            }, slad
 
         freshness_warnings, oldest_age = await _gather_freshness(
             storage,
@@ -518,11 +538,15 @@ def recall(
             response["rerank_degraded_warning"] = (
                 f"[!] Results NOT reranked (reranker enabled but unavailable): {rerank_degraded}"
             )
+        response.update(slad.json_fields())
 
-        return response
+        return response, slad
 
-    result = run_async(_recall())
+    result, slad = run_async(_recall())
     output_result(result, json_output)
+    line = slad.stderr_line() if slad is not None else None
+    if line:
+        typer.echo(line, err=True)
 
 
 def context(

@@ -143,10 +143,22 @@ async def test_tor_and_agent_id_land_in_trace() -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("tor", ["", "http", "http:", "HTTP:x", "http:bad tor", "cli", "mcp2"])
+@pytest.mark.parametrize(
+    "tor", ["", "http", "http:", "HTTP:x", "http:bad tor", "cli:x", "CLI", "cli ", "mcp2"]
+)
 async def test_invalid_tor_is_rejected(tor: str) -> None:
     with pytest.raises(ValueError):
         await _call({"query": "q"}, tor=tor)
+
+
+@pytest.mark.asyncio
+async def test_cli_tor_is_accepted() -> None:
+    storage = _Storage()
+    out, _ = await _call(
+        {"query": "q", "trace": True}, storage=storage, tor=recall_api.TOR_CLI, agent_id="cli"
+    )
+    assert out.response["trace_id"] == storage.traces[0].id
+    assert (storage.traces[0].tor, storage.traces[0].agent_id) == ("cli", "cli")
 
 
 @pytest.mark.asyncio
