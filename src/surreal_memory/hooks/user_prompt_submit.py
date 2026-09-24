@@ -89,6 +89,106 @@ def _record_skip(prefix: str, length: int, session: str) -> None:
     )
 
 
+# Every recall from a host path leaves a retrieval_trace (tor ``cli``), the hook
+# included: it runs on every longer prompt, so without a trace the most frequent
+# host recall was invisible to recall telemetry (V-GATE r1 F-3, 2026-09-24).
+# The hook's agent_id is kept apart from an explicit ``smem recall`` in the same
+# session (``claude-code:<entrypoint>``) so the two can be counted separately.
+HOOK_AGENT_PREFIX = "claude-code-hook:"
+HOOK_AGENT_DEFAULT = "cli-hook"
+HOOK_AGENT_SUFFIX = ":hook"
+_TRACE_ERROR_LOG = "prompt_recall_slad_bledy.jsonl"
+
+
+def resolve_hook_identity(
+    hook_input: dict[str, Any], env: dict[str, str] | Any
+) -> tuple[str, str | None]:
+    """``agent_id`` and ``session_id`` of one hook recall.
+
+    agent_id: ``SMEM_AGENT_ID`` + ``:hook`` -> ``claude-code-hook:<CLAUDE_CODE_ENTRYPOINT>``
+    -> ``cli-hook``. session_id: the hook input's ``session_id`` -> ``CLAUDE_CODE_SESSION_ID``.
+
+    Raises:
+        IdentityError: an id does not match the trace patterns (no silent substitution).
+    """
+    from surreal_memory.engine import recall_api
+    from surreal_memory.engine.cli_recall_api import IdentityError
+
+    raw_agent = env.get("SMEM_AGENT_ID") or ""
+    entrypoint = env.get("CLAUDE_CODE_ENTRYPOINT") or ""
+    if raw_agent:
+        agent_id, variable = raw_agent + HOOK_AGENT_SUFFIX, "SMEM_AGENT_ID"
+    elif entrypoint:
+        agent_id, variable = HOOK_AGENT_PREFIX + entrypoint, "CLAUDE_CODE_ENTRYPOINT"
+    else:
+        agent_id, variable = HOOK_AGENT_DEFAULT, "default"
+    if not recall_api.AGENT_ID_PATTERN.match(agent_id):
+        raise IdentityError(variable, "niepoprawny-agent_id")
+    session_id = (
+        str(hook_input.get("session_id") or "") or env.get("CLAUDE_CODE_SESSION_ID") or None
+    )
+    if session_id is not None and not recall_api.SESSION_ID_PATTERN.match(session_id):
+        raise IdentityError("session_id", "niepoprawny-session_id")
+    return agent_id, session_id
+
+
+def _record_trace_error(line: str, session: str) -> None:
+    """Hook stderr is not persisted — a trace that failed is also written to a file
+    (status and reason only, never the prompt). Never raises."""
+    rekord = {
+        "ts": dt.datetime.now(dt.UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "blad": line,
+        "sesja": session,
+    }
+    try:
+        with open(_data_dir() / _TRACE_ERROR_LOG, "a", encoding="utf-8") as f:
+            f.write(json.dumps(rekord, ensure_ascii=False) + "\n")
+    except OSError as exc:
+        print(  # noqa: T201
+            f"[Surreal-Memory] dziennik błędów śladu: zapis nieudany ({type(exc).__name__})",
+            file=sys.stderr,
+        )
+
+
+async def _persist_hook_trace(
+    storage: Any,
+    result: Any,
+    *,
+    brain: Any,
+    prompt: str,
+    max_tokens: int,
+    hook_input: dict[str, Any],
+    config: Any,
+) -> None:
+    """One retrieval_trace (tor ``cli``) for this hook recall. Never raises, never
+    blocks the prompt, never mutates ``result``; a failure is visible on stderr and in
+    ``prompt_recall_slad_bledy.jsonl``."""
+    from surreal_memory.engine import recall_api
+    from surreal_memory.engine.cli_recall_api import persist_identified_trace
+
+    try:
+        depth = int(result.depth_used.value)
+    except (AttributeError, TypeError, ValueError):
+        depth = 1
+    outcome = await persist_identified_trace(
+        storage,
+        result,
+        brain=brain,
+        query=prompt,
+        depth=depth,
+        max_tokens=max_tokens,
+        min_confidence=0.0,
+        flag=None,
+        tor=recall_api.TOR_CLI,
+        identity=lambda: resolve_hook_identity(hook_input, os.environ),
+        config=config,
+    )
+    line = outcome.stderr_line()
+    if line:
+        print(line, file=sys.stderr)  # noqa: T201
+        _record_trace_error(line, str(hook_input.get("session_id") or ""))
+
+
 def read_hook_input() -> dict[str, Any]:
     """Read Claude Code hook JSON from stdin (empty/malformed -> {})."""
     try:
@@ -148,6 +248,15 @@ async def get_prompt_recall(hook_input: dict[str, Any]) -> str:
             query=prompt,
             max_tokens=cfg.max_tokens,
             session_id=str(hook_input.get("session_id") or "ups"),
+        )
+        await _persist_hook_trace(
+            storage,
+            result,
+            brain=brain,
+            prompt=prompt,
+            max_tokens=cfg.max_tokens,
+            hook_input=hook_input,
+            config=config,
         )
         context = (result.context or "").strip()
         if not context:

@@ -428,3 +428,143 @@ def test_unwritable_skip_log_still_skips_and_says_so(
     assert out == ""
     shared.assert_not_awaited()
     assert "zapis nieudany" in capsys.readouterr().err
+
+
+# ---------------------------------------------------------------------------
+# smem-cli-slad-i-pody-claude (V-GATE r1 F-3): the hook's recall leaves a trace
+# (tor ``cli``) with its own agent_id, like every other host recall path.
+# ---------------------------------------------------------------------------
+
+_PERSIST = "surreal_memory.engine.recall_api.persist_trace"
+
+
+def _recall_with_trace(
+    prompt: str,
+    *,
+    env: dict[str, str],
+    trace_enabled: bool = True,
+    persist: AsyncMock | None = None,
+    session: str = "sesja-hook-1",
+):
+    """Runs get_prompt_recall with a real-shaped [trace]; returns (out, persist_spy, result)."""
+    import asyncio
+    from types import SimpleNamespace
+
+    from surreal_memory.hooks.user_prompt_submit import get_prompt_recall
+
+    spy = persist or AsyncMock(
+        side_effect=lambda sink, *a, **k: sink.update({"trace_id": "retrieval_trace:t1"}) or "sync"
+    )
+
+    async def _run():
+        pipeline = await _pipeline_returning("- trafienie z pamięci")
+        result = pipeline.query.return_value
+        storage = AsyncMock()
+        storage.brain_id = "b1"
+        storage.get_brain = AsyncMock(return_value=type("B", (), {"config": object()})())
+        with (
+            patch.dict("os.environ", env, clear=False),
+            patch("surreal_memory.unified_config.get_config") as gc,
+            patch(
+                "surreal_memory.unified_config.get_shared_storage", AsyncMock(return_value=storage)
+            ),
+            patch("surreal_memory.engine.retrieval.ReflexPipeline", return_value=pipeline),
+            patch(_PERSIST, spy),
+        ):
+            gc.return_value.prompt_recall = _cfg(min_prompt_chars=40)
+            gc.return_value.current_brain = "b1"
+            gc.return_value.trace = SimpleNamespace(enabled=trace_enabled, sample_rate=1.0)
+            out = await get_prompt_recall({"prompt": prompt, "session_id": session})
+        return out, spy, result
+
+    return asyncio.run(_run())
+
+
+_HOOK_ENV = {"CLAUDE_CODE_ENTRYPOINT": "claude-desktop", "SMEM_AGENT_ID": ""}
+_LONG = "co ustaliliśmy o śladzie recallu z hooka i torze cli w smem? " * 2
+
+
+def test_hook_recall_writes_one_trace_tor_cli_with_hook_identity(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("SURREAL_MEMORY_DIR", str(tmp_path))
+    out, spy, _ = _recall_with_trace(_LONG, env=_HOOK_ENV)
+    assert spy.await_count == 1
+    kw = spy.await_args.kwargs
+    assert kw["tor"] == "cli"
+    assert kw["agent_id"] == "claude-code-hook:claude-desktop"
+    assert kw["args"]["session_id"] == "sesja-hook-1"
+    assert kw["query"] == _LONG.strip()
+    assert "trafienie z pamięci" in out
+    assert not (tmp_path / "prompt_recall_slad_bledy.jsonl").exists()
+
+
+def test_hook_agent_id_is_apart_from_explicit_cli_recall() -> None:
+    from surreal_memory.hooks.user_prompt_submit import resolve_hook_identity
+
+    assert resolve_hook_identity({"session_id": "s"}, {"SMEM_AGENT_ID": "gpu-tryb"}) == (
+        "gpu-tryb:hook",
+        "s",
+    )
+    assert resolve_hook_identity({}, {"CLAUDE_CODE_ENTRYPOINT": "sdk-cli"})[0] == (
+        "claude-code-hook:sdk-cli"
+    )
+    assert resolve_hook_identity({}, {}) == ("cli-hook", None)
+    # session from the hook input wins; the env session is the fallback
+    assert resolve_hook_identity({}, {"CLAUDE_CODE_SESSION_ID": "env-s"})[1] == "env-s"
+
+
+def test_hook_trace_off_when_trace_section_disabled(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("SURREAL_MEMORY_DIR", str(tmp_path))
+    out, spy, _ = _recall_with_trace(_LONG, env=_HOOK_ENV, trace_enabled=False)
+    assert spy.await_count == 0
+    assert "trafienie z pamięci" in out
+
+
+def test_hook_invalid_identity_writes_no_trace_and_says_so(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setenv("SURREAL_MEMORY_DIR", str(tmp_path))
+    out, spy, _ = _recall_with_trace(_LONG, env={**_HOOK_ENV, "SMEM_AGENT_ID": "zły agent"})
+    assert spy.await_count == 0
+    assert "SMEM-SLAD-BLAD tor=cli status=identity_error" in capsys.readouterr().err
+    rows = [
+        json.loads(x)
+        for x in (tmp_path / "prompt_recall_slad_bledy.jsonl").read_text().splitlines()
+    ]
+    assert len(rows) == 1 and "identity_error" in rows[0]["blad"]
+    assert "zły agent" not in json.dumps(rows)  # the value never lands in the log
+    assert "trafienie z pamięci" in out  # the prompt still gets its memory
+
+
+def test_hook_trace_failure_never_blocks_the_prompt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setenv("SURREAL_MEMORY_DIR", str(tmp_path))
+    boom = AsyncMock(side_effect=RuntimeError("baza padła"))
+    out, spy, _ = _recall_with_trace(_LONG, env=_HOOK_ENV, persist=boom)
+    assert spy.await_count == 1
+    assert "status=sync_error" in capsys.readouterr().err
+    assert (tmp_path / "prompt_recall_slad_bledy.jsonl").exists()
+    assert "trafienie z pamięci" in out
+
+
+def test_hook_trace_does_not_change_what_the_prompt_receives(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("SURREAL_MEMORY_DIR", str(tmp_path))
+    with_trace, _, r1 = _recall_with_trace(_LONG, env=_HOOK_ENV, trace_enabled=True)
+    without, _, r2 = _recall_with_trace(_LONG, env=_HOOK_ENV, trace_enabled=False)
+    assert with_trace == without
+    assert r1.context == r2.context == "- trafienie z pamięci"
+
+
+def test_system_content_and_short_prompts_write_no_trace(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("SURREAL_MEMORY_DIR", str(tmp_path))
+    for prompt in (_SYSTEM_PROMPTS["<task-notification"], "ok, dalej"):
+        _, spy, _ = _recall_with_trace(prompt, env=_HOOK_ENV)
+        assert spy.await_count == 0
