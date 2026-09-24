@@ -2,13 +2,11 @@
 
 from __future__ import annotations
 
-import asyncio
 from datetime import datetime
 from typing import TYPE_CHECKING, Annotated, Any
 
 if TYPE_CHECKING:
     from surreal_memory.cli.storage import PersistentStorage
-    from surreal_memory.core.fiber import Fiber
 
 import typer
 
@@ -20,11 +18,9 @@ from surreal_memory.core.memory_types import (
     TypedMemory,
 )
 from surreal_memory.engine import remember_api
+from surreal_memory.engine.cli_recall_api import recall_like_cli
 from surreal_memory.engine.dedup.factory import build_dedup_pipeline
 from surreal_memory.engine.encoder import MemoryEncoder
-from surreal_memory.engine.retrieval import DepthLevel, ReflexPipeline
-from surreal_memory.extraction.parser import QueryParser
-from surreal_memory.extraction.router import QueryRouter
 from surreal_memory.safety.freshness import (
     FreshnessLevel,
     analyze_freshness,
@@ -292,29 +288,6 @@ def todo(
     output_result(result, json_output)
 
 
-async def _gather_freshness(
-    storage: PersistentStorage, fiber_ids: list[str]
-) -> tuple[list[str], int]:
-    """Collect freshness warnings and oldest age from matched fibers."""
-    warnings: list[str] = []
-    oldest_age = 0
-    semaphore = asyncio.Semaphore(16)
-
-    async def _fetch_one(fiber_id: str) -> Fiber | None:
-        async with semaphore:
-            return await storage.get_fiber(fiber_id)
-
-    fibers = await asyncio.gather(*(_fetch_one(fiber_id) for fiber_id in fiber_ids))
-    for fiber in fibers:
-        if fiber:
-            freshness = evaluate_freshness(fiber.created_at)
-            if freshness.warning:
-                warnings.append(freshness.warning)
-            if freshness.age_days > oldest_age:
-                oldest_age = freshness.age_days
-    return warnings, oldest_age
-
-
 def recall(
     query: Annotated[str, typer.Argument(help="Query to search memories")],
     depth: Annotated[
@@ -366,79 +339,30 @@ def recall(
         if not brain:
             return {"error": "No brain configured"}, None
 
-        parser = QueryParser()
-        router = QueryRouter()
-        stimulus = parser.parse(query, reference_time=utcnow())
-        route = router.route(stimulus)
+        async def _po_zapytaniu(res: Any, depth_value: int) -> CliTraceOutcome:
+            # persist_cli_trace is looked up in this module at call time (tests patch it here).
+            return await persist_cli_trace(
+                storage,
+                res,
+                brain=brain,
+                query=query,
+                depth=depth_value,
+                max_tokens=max_tokens,
+                min_confidence=min_confidence,
+                flag=trace,
+            )
 
-        depth_level = (
-            DepthLevel(depth) if depth is not None else DepthLevel(min(route.suggested_depth, 3))
-        )
-        pipeline = ReflexPipeline(storage, brain.config)
-        result = await pipeline.query(
-            query=query,
-            depth=depth_level,
-            max_tokens=max_tokens,
-            reference_time=utcnow(),
-        )
-        slad = await persist_cli_trace(
+        return await recall_like_cli(
             storage,
-            result,
-            brain=brain,
+            brain,
             query=query,
-            depth=depth_level.value,
+            depth=depth,
             max_tokens=max_tokens,
             min_confidence=min_confidence,
-            flag=trace,
+            show_routing=show_routing,
+            show_age=show_age,
+            po_zapytaniu=_po_zapytaniu,
         )
-
-        if result.confidence < min_confidence:
-            return {
-                "answer": f"No memories found with confidence >= {min_confidence:.2f}",
-                "confidence": result.confidence,
-                "neurons_activated": result.neurons_activated,
-                "below_threshold": True,
-                **slad.json_fields(),
-            }, slad
-
-        freshness_warnings, oldest_age = await _gather_freshness(
-            storage,
-            result.fibers_matched or [],
-        )
-
-        response = {
-            "answer": result.context or "No relevant memories found.",
-            "confidence": result.confidence,
-            "depth_used": result.depth_used.value,
-            "neurons_activated": result.neurons_activated,
-            "fibers_matched": result.fibers_matched,
-            "latency_ms": result.latency_ms,
-        }
-
-        if show_routing:
-            response["routing"] = {
-                "query_type": route.primary.value,
-                "confidence": route.confidence.name.lower(),
-                "suggested_depth": route.suggested_depth,
-                "use_embeddings": route.use_embeddings,
-                "time_weighted": route.time_weighted,
-                "signals": list(route.signals)[:5],
-            }
-        if show_age and oldest_age > 0:
-            response["oldest_memory_age"] = format_age(oldest_age)
-        if freshness_warnings:
-            response["freshness_warnings"] = list(dict.fromkeys(freshness_warnings))[:3]
-
-        # Never let reranking fail silently: raw SA ordering is indistinguishable
-        # from reranked output, so say it out loud when the reranker did not run.
-        rerank_degraded = (result.metadata or {}).get("rerank_degraded")
-        if rerank_degraded:
-            response["rerank_degraded_warning"] = (
-                f"[!] Results NOT reranked (reranker enabled but unavailable): {rerank_degraded}"
-            )
-        response.update(slad.json_fields())
-
-        return response, slad
 
     result, slad = run_async(_recall())
     output_result(result, json_output)
