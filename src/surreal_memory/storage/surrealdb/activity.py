@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import AsyncIterator
 from datetime import datetime
 from typing import Any
 from uuid import uuid4
@@ -121,6 +122,149 @@ class SurrealDBActivityMixin:
         result.sort(key=lambda x: x[2], reverse=True)
         return result
 
+    async def iter_co_activation_counts(
+        self,
+        *,
+        since: datetime,
+        until: datetime,
+        min_count: int = 1,
+        after_pair: tuple[str, str] | None = None,
+        page_size: int = 500,
+    ) -> AsyncIterator[tuple[str, str, int, float]]:
+        """Yield pair aggregates from bounded raw-event keyset pages.
+
+        Aggregating in Python is deliberate: SurrealDB 3.2 applies LIMIT after
+        GROUP BY, so a grouped page query retains every matching pair before
+        returning the requested page. Raw rows are fetched in stable pair/id
+        order and reduced incrementally, retaining only one event page and the
+        current pair's counters.
+        """
+        if page_size < 1:
+            raise ValueError("page_size must be positive")
+        brain_id = self._get_brain_id()
+        pair_cursor = after_pair
+        event_cursor: tuple[str, str, str] | None = None
+        current_pair: tuple[str, str] | None = None
+        pair_count = 0
+        pair_strength_total = 0.0
+        event_page_size = min(int(page_size), 2000)
+        while True:
+
+            async def fetch_events(
+                cursor_condition: str = "", cursor_params: dict[str, Any] | None = None
+            ) -> list[dict[str, Any]]:
+                conditions = [
+                    "brain_id = $brain_id",
+                    "created_at > $since",
+                    "created_at <= $until",
+                ]
+                if cursor_condition:
+                    conditions.append(cursor_condition)
+                params: dict[str, Any] = {
+                    "brain_id": brain_id,
+                    "since": since,
+                    "until": until,
+                    "limit": event_page_size,
+                }
+                if cursor_params:
+                    params.update(cursor_params)
+                return await self._query(
+                    "SELECT id, neuron_a, neuron_b, binding_strength "
+                    "FROM co_activations WHERE "
+                    + " AND ".join(conditions)
+                    + " ORDER BY neuron_a, neuron_b, id LIMIT $limit",
+                    **params,
+                )
+
+            event_rows: list[dict[str, Any]] = []
+            if event_cursor is None and pair_cursor is None:
+                event_rows = await fetch_events()
+            else:
+                after_a, after_b = event_cursor[:2] if event_cursor else pair_cursor or ("", "")
+                if event_cursor is not None:
+                    event_rows.extend(
+                        await fetch_events(
+                            "neuron_a = $after_a AND neuron_b = $after_b "
+                            "AND id > type::record('co_activations', $after_id)",
+                            {
+                                "after_a": after_a,
+                                "after_b": after_b,
+                                "after_id": _to_surreal_id(event_cursor[2]),
+                            },
+                        )
+                    )
+                # SurrealDB 3.2's composite-index range scan can include its
+                # lower-bound key when a residual created_at filter is present.
+                # Keep explicit not-equal filters so the split keyset ranges
+                # are strictly disjoint at their pair boundary.
+                event_rows.extend(
+                    await fetch_events(
+                        "neuron_a = $after_a AND neuron_b > $after_b AND neuron_b != $after_b",
+                        {"after_a": after_a, "after_b": after_b},
+                    )
+                )
+                event_rows.extend(
+                    await fetch_events(
+                        "neuron_a > $after_a AND neuron_a != $after_a",
+                        {"after_a": after_a},
+                    )
+                )
+                event_rows.sort(
+                    key=lambda row: (
+                        str(row.get("neuron_a", "")),
+                        str(row.get("neuron_b", "")),
+                        str(row.get("id", "")).split(":", 1)[-1],
+                    )
+                )
+                event_rows = event_rows[:event_page_size]
+
+            rows = event_rows
+            if not rows:
+                if current_pair is not None and pair_count >= min_count:
+                    yield (
+                        current_pair[0],
+                        current_pair[1],
+                        pair_count,
+                        pair_strength_total / pair_count,
+                    )
+                return
+            for row in rows:
+                neuron_a = str(row.get("neuron_a", ""))
+                neuron_b = str(row.get("neuron_b", ""))
+                raw_id = str(row.get("id", ""))
+                event_id = raw_id.split(":", 1)[-1]
+                pair = (neuron_a, neuron_b)
+                event_key = (neuron_a, neuron_b, event_id)
+                if not neuron_a or not neuron_b or not event_id:
+                    raise RuntimeError("co-activation event is missing its stable key")
+                if event_cursor is not None and event_key <= event_cursor:
+                    raise RuntimeError("co-activation event page did not advance")
+                if current_pair is not None and pair != current_pair:
+                    if pair <= current_pair:
+                        raise RuntimeError("co-activation pair order regressed")
+                    if pair_count >= min_count:
+                        yield (
+                            current_pair[0],
+                            current_pair[1],
+                            pair_count,
+                            pair_strength_total / pair_count,
+                        )
+                    pair_count = 0
+                    pair_strength_total = 0.0
+                current_pair = pair
+                pair_count += 1
+                pair_strength_total += float(row.get("binding_strength", 0.0))
+                event_cursor = event_key
+            if len(rows) < event_page_size:
+                if current_pair is not None and pair_count >= min_count:
+                    yield (
+                        current_pair[0],
+                        current_pair[1],
+                        pair_count,
+                        pair_strength_total / pair_count,
+                    )
+                return
+
     async def prune_co_activations(self, older_than: datetime) -> int:
         """Delete co-activation events older than older_than. Returns count deleted."""
         brain_id = self._get_brain_id()
@@ -138,6 +282,54 @@ class SurrealDBActivityMixin:
             if rid:
                 await conn.delete(rid)
                 deleted += 1
+        return deleted
+
+    async def get_co_activation_prune_page(
+        self, older_than: datetime, after_id: str | None = None, *, limit: int = 500
+    ) -> list[str]:
+        """Return an ID-keyset page without materializing the prune backlog."""
+        page_limit = min(max(int(limit), 1), 2000)
+        conditions = ["brain_id = $brain_id", "created_at < $older_than"]
+        params: dict[str, Any] = {
+            "brain_id": self._get_brain_id(),
+            "older_than": older_than,
+            "limit": page_limit,
+        }
+        if after_id is not None:
+            conditions.append("id > type::record('co_activations', $after_id)")
+            params["after_id"] = _to_surreal_id(after_id)
+        rows = await self._query(
+            "SELECT id FROM co_activations WHERE "
+            + " AND ".join(conditions)
+            + " ORDER BY id ASC LIMIT $limit",
+            **params,
+        )
+        return [str(row.get("id", "")) for row in rows if row.get("id") is not None]
+
+    async def prune_co_activation_ids(self, event_ids: list[str]) -> int:
+        """Delete only still-live IDs from one bounded, replayable prune batch."""
+        unique_ids = list(dict.fromkeys(event_ids))
+        if not unique_ids:
+            return 0
+        deleted = 0
+        for start in range(0, len(unique_ids), 200):
+            batch = unique_ids[start : start + 200]
+            params: dict[str, Any] = {"brain_id": self._get_brain_id()}
+            record_refs: list[str] = []
+            for index, event_id in enumerate(batch):
+                key = f"event_id_{index}"
+                params[key] = _to_surreal_id(event_id)
+                record_refs.append(f"type::record('co_activations', ${key})")
+            rows = await self._query(
+                "SELECT id FROM co_activations WHERE brain_id = $brain_id "
+                f"AND id IN [{', '.join(record_refs)}]",
+                **params,
+            )
+            for row in rows:
+                rid = row.get("id")
+                if rid is not None:
+                    await self._ensure_conn().delete(rid)
+                    deleted += 1
         return deleted
 
     # ─── Action log ─────────────────────────────────────────────────────────

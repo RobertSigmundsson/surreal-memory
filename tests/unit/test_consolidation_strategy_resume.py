@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from dataclasses import replace
 from types import SimpleNamespace
 from typing import Any, cast
@@ -16,8 +17,9 @@ from surreal_memory.engine.consolidation import (
     ConsolidationStrategy,
 )
 from surreal_memory.engine.consolidation_progress import ConsolidationPausedError
-from surreal_memory.engine.dream import DreamResult
+from surreal_memory.engine.dream import DreamPlanCheckpoint, DreamResult
 from surreal_memory.engine.hippocampal_replay import ReplayResult
+from tests.unit.test_consolidation_group_plan import _PlanStorage
 
 
 class _Progress:
@@ -110,6 +112,52 @@ class _Storage:
         return neuron.id
 
 
+class _DurableSchemaStorage(_Storage):
+    def __init__(self, neurons: list[Neuron]) -> None:
+        super().__init__()
+        self.neurons = {neuron.id: neuron for neuron in neurons}
+        self.brain.config.schema_assimilation_enabled = True
+        self.brain.config.schema_min_cluster_size = 10
+        self.plan_storage = _PlanStorage()
+
+    async def _query(self, sql: str, **params: Any) -> list[dict[str, Any]]:
+        return await self.plan_storage._query(sql, **params)
+
+    async def find_neurons_after_id(
+        self,
+        cursor_id: str | None,
+        *,
+        limit: int = 1000,
+        created_before: Any = None,
+        ephemeral: bool | None = False,
+        include_embedding: bool = False,
+    ) -> list[Neuron]:
+        found = sorted(self.neurons.values(), key=lambda neuron: neuron.id)
+        if cursor_id is not None:
+            found = [neuron for neuron in found if neuron.id > cursor_id]
+        if ephemeral is not None:
+            found = [neuron for neuron in found if neuron.ephemeral == ephemeral]
+        return found[:limit]
+
+    async def get_neuron(self, neuron_id: str) -> Neuron | None:
+        return self.neurons.get(neuron_id)
+
+    async def get_synapse(self, synapse_id: str) -> Synapse | None:
+        return self.synapses.get(synapse_id)
+
+
+def _tagged_neurons(count: int, tag: str = "popular") -> list[Neuron]:
+    return [
+        Neuron.create(
+            NeuronType.CONCEPT,
+            f"Django memory subject {index:04d}",
+            metadata={"tags": [tag]},
+            neuron_id=f"neuron-{index:04d}",
+        )
+        for index in range(count)
+    ]
+
+
 def _engine(
     strategy: ConsolidationStrategy,
     storage: _Storage,
@@ -145,6 +193,69 @@ async def test_dream_replays_exact_pending_synapse_after_write_before_checkpoint
     await engine._dream(report, dry_run=False)
 
     assert calls == 1
+    assert list(storage.synapses) == [synapse.id]
+    assert report.dream_synapses_created == 1
+    assert progress.strategy_state("dream")["phase"] == "completed"
+
+
+@pytest.mark.asyncio
+async def test_dream_checkpoints_plan_pages_before_apply_and_resumes_same_units(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    storage = _Storage()
+    progress = _Progress(pause_phase="dream_plan")
+    engine = _engine(ConsolidationStrategy.DREAM, storage, progress)
+    synapse = Synapse.create("neuron-a", "neuron-b", SynapseType.RELATED_TO, weight=0.1)
+    partial = DreamPlanCheckpoint(
+        seed=19,
+        activated_ids=("neuron-a", "neuron-b"),
+        pair_cursor=100,
+        pair_receipts=("receipt-0",),
+        planned_synapses=(synapse,),
+        pairs_explored=100,
+        complete=False,
+    )
+    complete = DreamPlanCheckpoint(
+        seed=19,
+        activated_ids=partial.activated_ids,
+        pair_cursor=101,
+        pair_receipts=("receipt-0", "receipt-1"),
+        planned_synapses=(synapse,),
+        pairs_explored=102,
+        complete=True,
+    )
+    calls = 0
+
+    async def fake_dream(
+        _storage: Any,
+        _config: Any,
+        *,
+        resume: DreamPlanCheckpoint | None = None,
+        checkpoint: Any = None,
+    ) -> DreamResult:
+        nonlocal calls
+        calls += 1
+        if resume is None:
+            await checkpoint(partial)
+        else:
+            assert resume.pair_cursor == 100
+            assert resume.seed == 19
+            await checkpoint(complete)
+        return DreamResult([synapse], pairs_explored=102)
+
+    monkeypatch.setattr("surreal_memory.engine.dream.dream", fake_dream)
+    with pytest.raises(ConsolidationPausedError):
+        await engine._dream(ConsolidationReport(), dry_run=False)
+
+    saved = progress.strategy_state("dream")
+    assert saved["phase"] == "dream_plan"
+    manifest = json.loads(saved["pending"][0])
+    assert manifest["planning"]["pair_cursor"] == 100
+    assert manifest["planning"]["complete"] is False
+
+    report = ConsolidationReport()
+    await engine._dream(report, dry_run=False)
+    assert calls == 2
     assert list(storage.synapses) == [synapse.id]
     assert report.dream_synapses_created == 1
     assert progress.strategy_state("dream")["phase"] == "completed"
@@ -255,6 +366,126 @@ async def test_schema_replays_checkpointed_create_plan_without_replanning(
     assert list(storage.neurons) == [schema.id]
     assert report.extra["schemas_created"] == 1
     assert progress.strategy_state("schema")["phase"] == "completed"
+
+
+@pytest.mark.asyncio
+async def test_durable_schema_pages_oversized_tag_and_checkpoints_partial_count() -> None:
+    storage = _DurableSchemaStorage(_tagged_neurons(605))
+    progress = _Progress()
+    progress.state["run_id"] = "schema-large-run"
+    engine = _engine(ConsolidationStrategy.SCHEMA, storage, progress)
+    interrupted = False
+
+    async def pause_after_first_posting_page(
+        _strategy: str, phase: str, cursor: str | None
+    ) -> None:
+        nonlocal interrupted
+        if phase != "schema_plan_tag_counts" or not cursor:
+            return
+        saved = __import__("json").loads(cursor)
+        if saved.get("count_after_candidate") == "neuron-0499":
+            interrupted = True
+            raise ConsolidationPausedError("simulated interruption within a large tag")
+
+    progress.checkpoint_hook = pause_after_first_posting_page
+    with pytest.raises(ConsolidationPausedError, match="within a large tag"):
+        await engine._schema(ConsolidationReport(), dry_run=False)
+    assert interrupted
+
+    checkpoint = progress.strategy_state("schema")
+    partial_cursor = __import__("json").loads(checkpoint["cursor"])
+    assert partial_cursor["count_feature"].startswith("schema-tag:")
+    assert partial_cursor["count_value"] == 500
+    assert len(partial_cursor["count_sample_ids"]) == 20
+
+    progress.checkpoint_hook = None
+    report = ConsolidationReport()
+    await engine._schema(report, dry_run=False)
+
+    count_rows = [
+        row
+        for row in storage.plan_storage.records.values()
+        if row.get("kind") == "schema_tag_count"
+    ]
+    assert len(count_rows) == 1
+    assert count_rows[0]["count"] == 605
+    assert len(count_rows[0]["sample_neuron_ids"]) == 20
+    schemas = [neuron for neuron in storage.neurons.values() if neuron.type == NeuronType.SCHEMA]
+    assert len(schemas) == 1
+    assert schemas[0].metadata["cluster_size"] == 605
+    assert "(605 memories)" in schemas[0].content
+    assert len(storage.synapses) == 20
+    assert report.extra["schemas_created"] == 1
+    assert progress.strategy_state("schema")["phase"] == "completed"
+
+
+@pytest.mark.asyncio
+async def test_durable_schema_rejects_source_change_after_stage_checkpoint() -> None:
+    storage = _DurableSchemaStorage(_tagged_neurons(605))
+    progress = _Progress()
+    progress.state["run_id"] = "schema-changing-run"
+    engine = _engine(ConsolidationStrategy.SCHEMA, storage, progress)
+
+    async def pause_after_stage(_strategy: str, phase: str, _cursor: str | None) -> None:
+        if phase == "schema_plan_stage":
+            raise ConsolidationPausedError("simulated interruption after staged page")
+
+    progress.checkpoint_hook = pause_after_stage
+    with pytest.raises(ConsolidationPausedError, match="staged page"):
+        await engine._schema(ConsolidationReport(), dry_run=False)
+    progress.checkpoint_hook = None
+    source = storage.neurons["neuron-0001"]
+    storage.neurons[source.id] = replace(source, content="Changed while schema plan was paused")
+
+    from surreal_memory.engine.consolidation_progress import ConsolidationProgressError
+
+    with pytest.raises(ConsolidationProgressError, match="source data changed"):
+        await engine._schema(ConsolidationReport(), dry_run=False)
+    assert not any(neuron.type == NeuronType.SCHEMA for neuron in storage.neurons.values())
+
+
+@pytest.mark.asyncio
+async def test_durable_schema_uses_tag_name_for_deterministic_top_twenty_ties() -> None:
+    tags = [f"topic-{index:02d}" for index in reversed(range(24))]
+    neurons = [
+        Neuron.create(
+            NeuronType.CONCEPT,
+            f"Django memory subject {tag} item {index}",
+            metadata={"tags": [tag]},
+            neuron_id=f"{tag}-neuron-{index:02d}",
+        )
+        for tag in tags
+        for index in range(10)
+    ]
+    storage = _DurableSchemaStorage(neurons)
+    progress = _Progress()
+    progress.state["run_id"] = "schema-tie-run"
+    engine = _engine(ConsolidationStrategy.SCHEMA, storage, progress)
+
+    await engine._schema(ConsolidationReport(), dry_run=False)
+
+    selection_rows = [
+        row
+        for row in storage.plan_storage.records.values()
+        if row.get("kind") == "schema_selection"
+    ]
+    assert len(selection_rows) == 1
+    assert [entry["tag"] for entry in selection_rows[0]["entries"]] == sorted(tags)[:20]
+    assert sum(neuron.type == NeuronType.SCHEMA for neuron in storage.neurons.values()) == 20
+
+
+@pytest.mark.asyncio
+async def test_durable_schema_dry_run_does_not_create_plan_or_outputs() -> None:
+    storage = _DurableSchemaStorage(_tagged_neurons(12))
+    progress = _Progress()
+    progress.state["run_id"] = "schema-dry-run"
+    engine = _engine(ConsolidationStrategy.SCHEMA, storage, progress)
+
+    await engine._schema(ConsolidationReport(), dry_run=True)
+
+    assert storage.plan_storage.records == {}
+    assert progress.writes == []
+    assert not any(neuron.type == NeuronType.SCHEMA for neuron in storage.neurons.values())
 
 
 @pytest.mark.asyncio

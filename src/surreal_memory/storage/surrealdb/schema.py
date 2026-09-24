@@ -20,6 +20,7 @@ SOURCE_REVISION_DDL: tuple[str, ...] = (
     "ALTER TABLE synapse CHANGEFEED 7d",
     "DEFINE INDEX idx_synapse_pair_in_out ON synapse FIELDS brain_id, in, out",
     "DEFINE INDEX idx_synapse_pair_out_in ON synapse FIELDS brain_id, out, in",
+    "DEFINE INDEX idx_coact_pair_cursor ON co_activations FIELDS brain_id, neuron_a, neuron_b, id",
     "DEFINE TABLE IF NOT EXISTS semantic_source_barrier SCHEMAFULL",
     "DEFINE FIELD brain_id ON semantic_source_barrier TYPE string",
     "DEFINE FIELD created_at ON semantic_source_barrier TYPE datetime",
@@ -40,6 +41,17 @@ SOURCE_REVISION_DDL: tuple[str, ...] = (
     # Immutable run-scoped source pages for resumable consolidation census.
     "DEFINE TABLE IF NOT EXISTS consolidation_fiber_census SCHEMALESS",
     "DEFINE INDEX idx_census_run_page ON consolidation_fiber_census FIELDS run_id, strategy, filter_fingerprint, page_index UNIQUE",
+    # Immutable anchor projections for resumable dedup pair comparison.
+    "DEFINE TABLE IF NOT EXISTS consolidation_dedup_census SCHEMALESS",
+    "DEFINE INDEX idx_dedup_census_run_page ON consolidation_dedup_census FIELDS run_id, brain_id, strategy, filter_fingerprint, page_index UNIQUE",
+    # Append-only external candidate graph for bounded consolidation grouping.
+    "DEFINE TABLE IF NOT EXISTS consolidation_group_plan SCHEMALESS",
+    "DEFINE INDEX idx_cgroup_plan_item ON consolidation_group_plan FIELDS plan_id, kind, item_key UNIQUE",
+    "DEFINE INDEX idx_cgroup_plan_candidate ON consolidation_group_plan FIELDS plan_id, kind, candidate_id",
+    "DEFINE INDEX idx_cgroup_plan_posting ON consolidation_group_plan FIELDS plan_id, kind, feature, candidate_id",
+    "DEFINE INDEX idx_cgroup_plan_event ON consolidation_group_plan FIELDS plan_id, kind, candidate_id, sequence",
+    "DEFINE INDEX idx_cgroup_plan_member ON consolidation_group_plan FIELDS plan_id, kind, root_id, candidate_id",
+    "DEFINE INDEX idx_cgroup_plan_group ON consolidation_group_plan FIELDS plan_id, kind, root_id",
 )
 
 SCHEMA_SQL = """
@@ -461,6 +473,7 @@ DEFINE FIELD source_anchor    ON co_activations TYPE option<string>;
 DEFINE FIELD created_at       ON co_activations TYPE datetime DEFAULT time::now();
 DEFINE INDEX idx_coact_brain  ON co_activations FIELDS brain_id;
 DEFINE INDEX idx_coact_pair   ON co_activations FIELDS brain_id, neuron_a, neuron_b;
+DEFINE INDEX idx_coact_pair_cursor ON co_activations FIELDS brain_id, neuron_a, neuron_b, id;
 DEFINE INDEX idx_coact_time   ON co_activations FIELDS brain_id, created_at;
 
 -- Action log (hippocampal buffer — habit learning)
