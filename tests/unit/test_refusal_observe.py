@@ -1103,3 +1103,62 @@ class TestJevPominietyIsNotAnOutage:
         ).metadata["odmowa_sygnaly"]
         assert pom["jev_status"] == "JEV_POMINIETY"
         assert {k for k in ok if k.startswith("jev_")} == {k for k in pom if k.startswith("jev_")}
+
+
+class TestJevKeyOverrideInPipeline:
+    """R2: the retrieval pipeline sends the key named by SURREAL_MEMORY_JEV_API_KEY_ENV."""
+
+    async def test_pipeline_uses_channel_key_and_redacts_it(
+        self, obs_storage: Any, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from surreal_memory.engine import jev_gate
+        from surreal_memory.engine.retrieval import ReflexPipeline
+
+        monkeypatch.setattr(
+            "surreal_memory.engine.reranker.rerank_activations",
+            _obs_fake_rerank(raw_top1=0.9, degraded_reason=None),
+        )
+        _obs_jev_enabled(monkeypatch, api_key_env="LITELLM_KEY_ROJ_JEV")
+        monkeypatch.setenv("LITELLM_KEY_ROJ_JEV", "wartosc-klucza-roju-000")
+        monkeypatch.setenv("LITELLM_KEY_NEMO_JEV_MCP", "wartosc-klucza-mcp-111")
+        monkeypatch.setenv("SURREAL_MEMORY_JEV_API_KEY_ENV", "LITELLM_KEY_NEMO_JEV_MCP")
+        seen: list[str] = []
+
+        def _fake(
+            url: str, body: bytes, headers: dict[str, str], timeout_s: float
+        ) -> tuple[int, bytes]:
+            seen.append(headers["Authorization"])
+            return 200, _jev_ok_body()
+
+        monkeypatch.setattr(jev_gate, "_blocking_post", _fake)
+        result = await ReflexPipeline(obs_storage, _obs_config(refusal_mode="observe")).query(
+            _OBS_QUERY
+        )
+        assert result.metadata["odmowa_sygnaly"]["jev_status"] == "OK"
+        assert seen == ["Bearer wartosc-klucza-mcp-111"]
+
+    async def test_pipeline_override_to_missing_key_is_named_outage(
+        self, obs_storage: Any, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from surreal_memory.engine import jev_gate
+        from surreal_memory.engine.retrieval import ReflexPipeline
+
+        monkeypatch.setattr(
+            "surreal_memory.engine.reranker.rerank_activations",
+            _obs_fake_rerank(raw_top1=0.9, degraded_reason=None),
+        )
+        _obs_jev_enabled(monkeypatch, api_key_env="LITELLM_KEY_ROJ_JEV")
+        monkeypatch.setenv("LITELLM_KEY_ROJ_JEV", "wartosc-klucza-roju-000")
+        monkeypatch.delenv("LITELLM_KEY_NIE_ISTNIEJE", raising=False)
+        monkeypatch.setenv("SURREAL_MEMORY_JEV_API_KEY_ENV", "LITELLM_KEY_NIE_ISTNIEJE")
+        calls: list[Any] = []
+        monkeypatch.setattr(
+            jev_gate, "_blocking_post", lambda *a, **k: calls.append(a) or (200, b"{}")
+        )
+        result = await ReflexPipeline(obs_storage, _obs_config(refusal_mode="observe")).query(
+            _OBS_QUERY
+        )
+        sygnaly = result.metadata["odmowa_sygnaly"]
+        assert sygnaly["jev_status"] == "JEV_NIEDOSTEPNY"
+        assert sygnaly["jev_powod"] == "brak klucza: LITELLM_KEY_NIE_ISTNIEJE"
+        assert calls == []
