@@ -7,7 +7,40 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
-SCHEMA_VERSION = 11
+SCHEMA_VERSION = 12
+
+SOURCE_REVISION_DDL: tuple[str, ...] = (
+    # Old v10/v11 clients still connect to the same DB and would otherwise
+    # overwrite schema_meta:version with their lower TARGET_VERSION.
+    "DEFINE EVENT IF NOT EXISTS smem_schema_version_monotonic ON TABLE schema_meta "
+    'WHEN $event = "UPDATE" AND $after.id = schema_meta:version '
+    "AND $after.version < $before.version "
+    'THEN THROW "Surreal-Memory schema version cannot decrease"',
+    "ALTER TABLE neuron CHANGEFEED 7d",
+    "ALTER TABLE synapse CHANGEFEED 7d",
+    "DEFINE INDEX idx_synapse_pair_in_out ON synapse FIELDS brain_id, in, out",
+    "DEFINE INDEX idx_synapse_pair_out_in ON synapse FIELDS brain_id, out, in",
+    "DEFINE TABLE IF NOT EXISTS semantic_source_barrier SCHEMAFULL",
+    "DEFINE FIELD brain_id ON semantic_source_barrier TYPE string",
+    "DEFINE FIELD created_at ON semantic_source_barrier TYPE datetime",
+    "DEFINE INDEX idx_ssbarrier_brain_time ON semantic_source_barrier FIELDS brain_id, created_at",
+    "ALTER TABLE semantic_source_barrier CHANGEFEED 7d",
+    "DEFINE TABLE IF NOT EXISTS semantic_discovery_state SCHEMAFULL",
+    "DEFINE FIELD state_id ON semantic_discovery_state TYPE string",
+    "DEFINE FIELD revision ON semantic_discovery_state TYPE int",
+    "DEFINE FIELD brain_id ON semantic_discovery_state TYPE string",
+    "DEFINE FIELD run_id ON semantic_discovery_state TYPE string",
+    "DEFINE FIELD owner_token ON semantic_discovery_state TYPE string",
+    "DEFINE FIELD source_token ON semantic_discovery_state TYPE string",
+    "DEFINE FIELD payload ON semantic_discovery_state TYPE object FLEXIBLE",
+    "DEFINE FIELD created_at ON semantic_discovery_state TYPE datetime DEFAULT time::now()",
+    "DEFINE INDEX idx_sds_state_revision ON semantic_discovery_state FIELDS state_id, revision UNIQUE",
+    "DEFINE INDEX idx_sds_brain_run ON semantic_discovery_state FIELDS brain_id, run_id",
+    "DEFINE INDEX idx_sds_created_at ON semantic_discovery_state FIELDS created_at",
+    # Immutable run-scoped source pages for resumable consolidation census.
+    "DEFINE TABLE IF NOT EXISTS consolidation_fiber_census SCHEMALESS",
+    "DEFINE INDEX idx_census_run_page ON consolidation_fiber_census FIELDS run_id, strategy, filter_fingerprint, page_index UNIQUE",
+)
 
 SCHEMA_SQL = """
 -- ============================================================
@@ -86,6 +119,12 @@ DEFINE INDEX idx_state_neuron  ON neuron_state FIELDS brain_id, neuron_id UNIQUE
 
 -- Schema migration metadata: version stamp + migration lock + migration state.
 DEFINE TABLE schema_meta SCHEMALESS;
+-- Reject old client migrations that try to lower a newer schema stamp. This
+-- database-side guard also protects against already-installed v10/v11 clients.
+DEFINE EVENT IF NOT EXISTS smem_schema_version_monotonic ON TABLE schema_meta
+    WHEN $event = "UPDATE" AND $after.id = schema_meta:version
+      AND $after.version < $before.version
+    THEN THROW "Surreal-Memory schema version cannot decrease";
 
 -- Fibers (memory clusters / signal pathways)
 DEFINE TABLE fiber SCHEMALESS;
@@ -704,6 +743,7 @@ async def ensure_schema(conn: Any, embedding_dim: int = 3072) -> None:
     synapse_definition = str(table_definitions.get("synapse", "") or "").upper()
     if not synapse_definition or "TYPE RELATION" in synapse_definition:
         statements.extend(SYNAPSE_V8_DDL)
+        statements.extend(SOURCE_REVISION_DDL)
     else:
         logger.debug("Deferring synapse RELATION DDL until legacy migration completes")
 
