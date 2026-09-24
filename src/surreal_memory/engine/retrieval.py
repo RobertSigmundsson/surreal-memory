@@ -8,7 +8,6 @@ import dataclasses
 import heapq
 import logging
 import math
-import os
 import time
 from collections.abc import Awaitable, Callable
 from datetime import datetime
@@ -26,7 +25,8 @@ from surreal_memory.engine.causal_traversal import (
 from surreal_memory.engine.jev_gate import (
     JEV_POMINIETY,
     OdpowiedzJev,
-    resolve_api_key,
+    rozwiaz_klucz,
+    sekrety_do_redakcji,
     zapytaj_jev,
 )
 from surreal_memory.engine.jev_pytania import PROG_ODPOWIADA_STARTOWY, sha256_pytan
@@ -1041,17 +1041,27 @@ class ReflexPipeline:
                 _jev_memories = "\n\n".join(neuron_contents[nid] for nid in _jev_top_nids)[
                     : _jev_cfg.max_chars
                 ]
-                _jev_api_key = resolve_api_key(_jev_cfg.api_key_env, _jev_cfg.api_key_file)
-                _jev_sekrety = [v for name in _jev_cfg.redact_env if (v := os.environ.get(name))]
+                # R2 (jev-uzycie-wdrozenie): per-process key override resolved HERE, at call
+                # time — never stored in JevConfig (save() would pin it for every process).
+                _jev_klucz = rozwiaz_klucz(_jev_cfg.api_key_env, _jev_cfg.api_key_file)
+                _jev_sekrety = sekrety_do_redakcji(_jev_cfg.redact_env, _jev_klucz.wartosc)
+                _jev_klucz_env = (
+                    _jev_klucz.env_name
+                    if _jev_klucz.zrodlo == "nadpisanie"
+                    else "SURREAL_MEMORY_JEV_API_KEY_ENV (nieprawidłowa nazwa)"
+                    if _jev_klucz.zrodlo == "nadpisanie-nieprawidlowe"
+                    else None
+                )
                 _jev_task = asyncio.create_task(
                     zapytaj_jev(
                         query=query,
                         memories=_jev_memories,
                         gateway_url=_jev_cfg.gateway_url,
-                        api_key=_jev_api_key,
+                        api_key=_jev_klucz.wartosc,
                         model=_jev_cfg.model,
                         timeout_ms=_jev_cfg.timeout_ms,
                         sekrety=_jev_sekrety,
+                        klucz_env=_jev_klucz_env,
                     )
                 )
             else:

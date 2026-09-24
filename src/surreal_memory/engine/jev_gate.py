@@ -31,10 +31,13 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 import time
 import urllib.error
 import urllib.request
+from collections.abc import Mapping
 from dataclasses import dataclass
+from typing import Literal
 
 from surreal_memory.engine.jev_pytania import PYTANIA
 
@@ -61,6 +64,66 @@ def resolve_api_key(env_name: str, file_path: str) -> str | None:
     except OSError:
         return None
     return linia or None
+
+
+ENV_NADPISANIE_KLUCZA = "SURREAL_MEMORY_JEV_API_KEY_ENV"
+"""Zmienna PROCESU niosąca NAZWĘ zmiennej z kluczem Jev dla tego kanału (program jev-uzycie-wdrozenie, R2).
+
+Alias klucza wirtualnego to jedyna etykieta źródła wiersza w `decyzja_jev` (na torze pass-through
+`wersja_pytan` jest zawsze `none`), więc każdy kanał — hook promptów, MCP, CLI, aparat pomiarowy —
+woła Jev własnym kluczem. 🛑 Czytana WYŁĄCZNIE w chwili wywołania, nigdy w `JevConfig`: długowieczne
+procesy wołają `UnifiedConfig.save()`, który zapisałby nadpisanie do `config.toml` i przełączył klucz
+WSZYSTKIM procesom (także shimowi roju, który ma zostać przy `roj-jev`)."""
+
+_NAZWA_ZMIENNEJ = re.compile(r"^[A-Z][A-Z0-9_]{0,127}$")
+
+
+@dataclass(frozen=True)
+class KluczJev:
+    """Wynik rozwiązania klucza: NAZWA zmiennej (diagnostyka, nie sekret), wartość, skąd."""
+
+    env_name: str | None
+    wartosc: str | None
+    zrodlo: Literal["config", "nadpisanie", "nadpisanie-nieprawidlowe"]
+
+
+def rozwiaz_klucz(
+    cfg_env: str, cfg_file: str, environ: Mapping[str, str] | None = None
+) -> KluczJev:
+    """Klucz Jev dla TEGO procesu.
+
+    - brak (albo pusty) `SURREAL_MEMORY_JEV_API_KEY_ENV` ⇒ jak dotąd: `cfg_env`, fallback `cfg_file`;
+    - poprawna nazwa ⇒ wartość tej zmiennej i NIC więcej — bez fallbacku na domyślny klucz ani plik
+      (cichy powrót do `roj-jev` dałby błędną atrybucję, która wygląda jak poprawna);
+    - nazwa niezgodna ze wzorcem (np. wklejona WARTOŚĆ klucza) ⇒ brak klucza; napis nigdy nie jest
+      powtarzany w powodzie ani w logu.
+    """
+    env = os.environ if environ is None else environ
+    nadpisanie = env.get(ENV_NADPISANIE_KLUCZA, "").strip()
+    if not nadpisanie:
+        wartosc = env.get(cfg_env, "").strip() or None
+        if wartosc is None and cfg_file:
+            wartosc = resolve_api_key("", cfg_file)
+        return KluczJev(cfg_env, wartosc, "config")
+    if not _NAZWA_ZMIENNEJ.match(nadpisanie):
+        return KluczJev(None, None, "nadpisanie-nieprawidlowe")
+    return KluczJev(nadpisanie, env.get(nadpisanie, "").strip() or None, "nadpisanie")
+
+
+def sekrety_do_redakcji(
+    redact_env: tuple[str, ...] | list[str],
+    aktywny_klucz: str | None,
+    environ: Mapping[str, str] | None = None,
+) -> list[str]:
+    """Wartości do wycięcia z `state` przed wysyłką: nazwy z `redact_env` plus KAŻDA `LITELLM_KEY_*`
+    (klucze kanałów powstają w czasie życia programu, a krotka `redact_env` bywa przypięta w
+    `config.toml` przez `save()`) plus aktywny klucz niezależnie od nazwy. Najdłuższe najpierw."""
+    env = os.environ if environ is None else environ
+    wart = {v for name in redact_env if (v := env.get(name))}
+    wart |= {v for k, v in env.items() if k.startswith("LITELLM_KEY_") and len(v) >= 8}
+    if aktywny_klucz:
+        wart.add(aktywny_klucz)
+    return sorted(wart, key=len, reverse=True)
 
 
 @dataclass(frozen=True)
@@ -168,6 +231,7 @@ async def zapytaj_jev(
     model: str,
     timeout_ms: int,
     sekrety: list[str],
+    klucz_env: str | None = None,
 ) -> OdpowiedzJev:
     """Woła bramę Jev z `(query, memories)`, zwraca `OdpowiedzJev`.
 
@@ -185,7 +249,9 @@ async def zapytaj_jev(
     - do `powod`/logów NIGDY nie trafia wartość klucza.
     """
     if not api_key:
-        return _pusty_wynik("JEV_NIEDOSTEPNY", ms=0.0, zredagowano=0, powod="brak klucza")
+        # NAZWA zmiennej nie jest sekretem — mówi, KTÓREGO klucza brak (kanał bez klucza w SSOT).
+        powod = "brak klucza" if klucz_env is None else f"brak klucza: {klucz_env}"
+        return _pusty_wynik("JEV_NIEDOSTEPNY", ms=0.0, zredagowano=0, powod=powod)
 
     query_red, n_query = redaguj(query, sekrety)
     memories_red, n_memories = redaguj(memories, sekrety)
