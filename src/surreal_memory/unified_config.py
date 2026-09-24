@@ -612,6 +612,37 @@ class TraceConfig:
         )
 
 
+DEFAULT_SYSTEM_PREFIXES: tuple[str, ...] = (
+    "<task-notification",
+    "<bash-input",
+    "<local-command",
+    "<command-",
+)
+# A system prefix must be an opening tag: `<` + lowercase name. This rejects the
+# empty string (which would match EVERY prompt, human ones included), bare words
+# and anything that could break out of a TOML string.
+_SYSTEM_PREFIX = re.compile(r"^<[a-z][a-z0-9_:-]{0,63}$")
+
+
+def _valid_system_prefixes(raw: Any) -> tuple[str, ...]:
+    """Keep only well-formed prefixes; say how many were dropped (never silently)."""
+    items = list(raw) if isinstance(raw, (list, tuple)) else []
+    kept = tuple(p for p in items if isinstance(p, str) and _SYSTEM_PREFIX.match(p))
+    dropped = len(items) - len(kept) + (0 if isinstance(raw, (list, tuple)) else 1)
+    if dropped:
+        logger.warning(
+            "prompt_recall.system_prefixes: dropped %d invalid entr%s (must match <lowercase-tag)",
+            dropped,
+            "y" if dropped == 1 else "ies",
+        )
+    return kept
+
+
+def _sanitize_toml_prefixes(prefixes: tuple[str, ...]) -> str:
+    """TOML array of system prefixes; `_sanitize_toml_str` would blank anything with `<`."""
+    return "[" + ", ".join(f'"{p}"' for p in prefixes if _SYSTEM_PREFIX.match(p)) + "]"
+
+
 @dataclass(frozen=True)
 class PromptRecallConfig:
     """Recall memories RELEVANT TO THE PROMPT, at the one moment a query exists.
@@ -634,6 +665,12 @@ class PromptRecallConfig:
     min_prompt_chars: int = 40  # below this there is nothing worth searching for
     max_tokens: int = 600  # hard ceiling on injected context
     timeout_seconds: float = 5.0  # memory never blocks the prompt
+    # Claude Code system content that reaches this hook as a "prompt" (task
+    # notifications, `!` bash-mode input with its stdout). Measured on this brain
+    # 2026-09-24: 48 % of real Jev traffic, 62 % judged irrelevant. A prompt that
+    # STARTS with one of these is not a question — skip recall for it, and record
+    # every skip (see hooks/user_prompt_submit.py). Empty tuple = filter off.
+    system_prefixes: tuple[str, ...] = DEFAULT_SYSTEM_PREFIXES
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -641,15 +678,19 @@ class PromptRecallConfig:
             "min_prompt_chars": self.min_prompt_chars,
             "max_tokens": self.max_tokens,
             "timeout_seconds": self.timeout_seconds,
+            "system_prefixes": list(self.system_prefixes),
         }
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> PromptRecallConfig:
+        raw = data.get("system_prefixes")
+        prefixes = DEFAULT_SYSTEM_PREFIXES if raw is None else _valid_system_prefixes(raw)
         return cls(
             enabled=bool(data.get("enabled", False)),
             min_prompt_chars=int(data.get("min_prompt_chars", 40)),
             max_tokens=int(data.get("max_tokens", 600)),
             timeout_seconds=float(data.get("timeout_seconds", 5.0)),
+            system_prefixes=prefixes,
         )
 
 
@@ -2457,6 +2498,7 @@ class UnifiedConfig:
             f"min_prompt_chars = {self.prompt_recall.min_prompt_chars}",
             f"max_tokens = {self.prompt_recall.max_tokens}",
             f"timeout_seconds = {self.prompt_recall.timeout_seconds}",
+            f"system_prefixes = {_sanitize_toml_prefixes(self.prompt_recall.system_prefixes)}",
             "",
             *self._reasoning_toml_lines(),
             "",

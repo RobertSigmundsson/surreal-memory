@@ -68,3 +68,64 @@ class TestUnifiedConfigPromptRecallWiring:
         reloaded = UnifiedConfig.load(config_path=tmp_path / "config.toml")
         assert reloaded.prompt_recall.enabled is True
         assert reloaded.prompt_recall.min_prompt_chars == 200
+
+
+class TestSystemPrefixes:
+    """R1 (jev-uzycie-wdrozenie): `system_prefixes` survives save()/load() and rejects junk."""
+
+    def test_default_is_the_measured_list(self) -> None:
+        assert PromptRecallConfig().system_prefixes == (
+            "<task-notification",
+            "<bash-input",
+            "<local-command",
+            "<command-",
+        )
+
+    def test_missing_key_means_default(self) -> None:
+        assert PromptRecallConfig.from_dict({"enabled": True}).system_prefixes == (
+            PromptRecallConfig().system_prefixes
+        )
+
+    def test_explicit_empty_list_disables(self) -> None:
+        assert PromptRecallConfig.from_dict({"system_prefixes": []}).system_prefixes == ()
+
+    def test_invalid_entries_are_dropped_with_a_count(self, caplog) -> None:
+        c = PromptRecallConfig.from_dict(
+            {"system_prefixes": ["", "  ", "task", "<ok", '<zle"cudzyslow', "<Wielkie"]}
+        )
+        assert c.system_prefixes == ("<ok",)
+        assert "dropped 5 invalid" in caplog.text
+
+    def test_save_load_round_trip_keeps_prefixes(self, tmp_path: Path) -> None:
+        for prefixes in (
+            (),
+            ("<task-notification", "<bash-input"),
+            PromptRecallConfig().system_prefixes,
+        ):
+            cfg = UnifiedConfig(data_dir=tmp_path)
+            cfg.prompt_recall = PromptRecallConfig(enabled=True, system_prefixes=prefixes)
+            cfg.save()
+            loaded = UnifiedConfig.load(config_path=tmp_path / "config.toml")
+            assert loaded.prompt_recall.system_prefixes == prefixes
+        tekst = (tmp_path / "config.toml").read_text(encoding="utf-8")
+        assert (
+            'system_prefixes = ["<task-notification", "<bash-input", "<local-command", "<command-"]'
+            in tekst
+        )
+
+    def test_resaving_twice_does_not_drop_prefixes(self, tmp_path: Path) -> None:
+        cfg = UnifiedConfig(data_dir=tmp_path)
+        cfg.prompt_recall = PromptRecallConfig(enabled=True, system_prefixes=("<bash-input",))
+        cfg.save()
+        UnifiedConfig.load(config_path=tmp_path / "config.toml").save()
+        UnifiedConfig.load(config_path=tmp_path / "config.toml").save()
+        reloaded = UnifiedConfig.load(config_path=tmp_path / "config.toml")
+        assert reloaded.prompt_recall.system_prefixes == ("<bash-input",)
+
+    def test_file_without_the_key_loads_default(self, tmp_path: Path) -> None:
+        """The live config.toml has no `system_prefixes` line — the filter must still be on."""
+        (tmp_path / "config.toml").write_text(
+            "[prompt_recall]\nenabled = true\nmin_prompt_chars = 200\n", encoding="utf-8"
+        )
+        loaded = UnifiedConfig.load(config_path=tmp_path / "config.toml")
+        assert loaded.prompt_recall.system_prefixes == PromptRecallConfig().system_prefixes

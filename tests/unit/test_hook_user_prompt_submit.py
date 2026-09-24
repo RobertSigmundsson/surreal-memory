@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import io
 import json
+from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -299,3 +300,131 @@ async def test_the_pipelines_own_heading_is_not_stacked_under_ours() -> None:
 
     assert out.lower().count("## relevant memor") == 1
     assert "- fakt o rclone" in out
+
+
+# ---------------------------------------------------------------------------
+# R1 (program jev-uzycie-wdrozenie): Claude Code system content is not a question.
+# Measured 2026-09-24: 48 % of real Jev traffic came from task notifications and
+# bash-mode input reaching this hook; 62 % of it judged irrelevant.
+# ---------------------------------------------------------------------------
+
+_SYSTEM_PROMPTS = {
+    "<task-notification": "<task-notification>\n<task-id>b1</task-id>\n<status>completed</status>\n"
+    "<summary>Background command finished</summary>\n</task-notification> smem recall Jev brama klucz",
+    "<bash-input": "<bash-input>git -C ~/repos/github/uruboros push origin master</bash-input>"
+    "<bash-stdout>Everything up-to-date</bash-stdout><bash-stderr></bash-stderr> smem recall Jev",
+    "<local-command": "<local-command-stdout>Goal set: program ukończony</local-command-stdout> smem Jev",
+    "<command-": "<command-name>/goal</command-name><command-message>goal</command-message> smem Jev",
+}
+
+
+def _mocked_recall(prompt: str, **cfg: object):
+    """Runs get_prompt_recall with storage/pipeline spies; returns (out, storage_mock, pipeline)."""
+    import asyncio
+
+    from surreal_memory.hooks.user_prompt_submit import get_prompt_recall
+
+    async def _run():
+        pipeline = await _pipeline_returning("- trafienie z pamięci")
+        storage = AsyncMock()
+        storage.brain_id = "b1"
+        storage.get_brain = AsyncMock(return_value=type("B", (), {"config": object()})())
+        shared = AsyncMock(return_value=storage)
+        with (
+            patch("surreal_memory.unified_config.get_config") as gc,
+            patch("surreal_memory.unified_config.get_shared_storage", shared),
+            patch("surreal_memory.engine.retrieval.ReflexPipeline", return_value=pipeline),
+        ):
+            gc.return_value.prompt_recall = _cfg(min_prompt_chars=40, **cfg)
+            gc.return_value.current_brain = "b1"
+            out = await get_prompt_recall({"prompt": prompt, "session_id": "sesja-test"})
+        return out, shared, pipeline
+
+    return asyncio.run(_run())
+
+
+def _skip_lines(tmp_path: Path) -> list[dict]:
+    p = tmp_path / "prompt_recall_pominiete.jsonl"
+    return [json.loads(x) for x in p.read_text(encoding="utf-8").splitlines()] if p.exists() else []
+
+
+@pytest.mark.parametrize("prefix", list(_SYSTEM_PROMPTS))
+def test_system_content_skips_recall_and_is_recorded(
+    prefix: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("SURREAL_MEMORY_DIR", str(tmp_path))
+    out, shared, pipeline = _mocked_recall(_SYSTEM_PROMPTS[prefix])
+    assert out == ""
+    shared.assert_not_awaited()  # no storage connection, hence no Jev call
+    pipeline.query.assert_not_awaited()
+    lines = _skip_lines(tmp_path)
+    assert len(lines) == 1
+    assert set(lines[0]) == {"ts", "powod", "prefiks", "dlugosc", "sesja"}
+    assert lines[0]["prefiks"] == prefix and lines[0]["powod"] == "prefiks"
+    assert lines[0]["sesja"] == "sesja-test"
+
+
+def test_skip_record_never_contains_the_prompt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("SURREAL_MEMORY_DIR", str(tmp_path))
+    znacznik = "UNIKALNY-ZNACZNIK-TRESCI-7731"
+    _mocked_recall("<bash-input>echo " + znacznik + "</bash-input>" + "x" * 60)
+    _mocked_recall("\n   <task-notification>" + znacznik + "</task-notification>" + "y" * 60)
+    tekst = (tmp_path / "prompt_recall_pominiete.jsonl").read_text(encoding="utf-8")
+    assert znacznik not in tekst
+    assert [r["prefiks"] for r in _skip_lines(tmp_path)] == ["<bash-input", "<task-notification"]
+
+
+@pytest.mark.parametrize(
+    "prompt",
+    [
+        "Robert pyta o wynik, a w środku cytuje <task-notification> z poprzedniej tury — co z tym?",
+        "<div> jak ustawić wyrównanie w tym komponencie strony, bo się rozjeżdża na telefonie?",
+        "task-notification: dlaczego przyszło powiadomienie o zadaniu w tle, które się nie udało?",
+        "<Task-Notification> wielkie litery to nie format Claude Code, więc to człowiek coś wkleił",
+    ],
+)
+def test_human_prompt_is_never_filtered(
+    prompt: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Negative control (checker mandate a): only a prompt STARTING with a system tag is skipped."""
+    monkeypatch.setenv("SURREAL_MEMORY_DIR", str(tmp_path))
+    out, _shared, pipeline = _mocked_recall(prompt)
+    assert pipeline.query.await_args.kwargs["query"] == prompt
+    assert out.startswith("## Relevant memory")
+    assert _skip_lines(tmp_path) == []
+
+
+def test_empty_prefix_list_disables_the_filter(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("SURREAL_MEMORY_DIR", str(tmp_path))
+    out, _shared, pipeline = _mocked_recall(
+        _SYSTEM_PROMPTS["<task-notification"], system_prefixes=[]
+    )
+    pipeline.query.assert_awaited()
+    assert _skip_lines(tmp_path) == []
+
+
+def test_invalid_prefixes_never_filter_human_prompts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An empty string would match every prompt — it must not survive config parsing."""
+    monkeypatch.setenv("SURREAL_MEMORY_DIR", str(tmp_path))
+    prompt = "zwykłe pytanie Roberta o stan programu jev-uzycie i klucze per kanał na bramie"
+    out, _shared, pipeline = _mocked_recall(prompt, system_prefixes=["", "  ", "zwykle", "<ok"])
+    pipeline.query.assert_awaited()
+    assert out.startswith("## Relevant memory")
+
+
+def test_unwritable_skip_log_still_skips_and_says_so(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    plik = tmp_path / "to-jest-plik"
+    plik.write_text("x")
+    monkeypatch.setenv("SURREAL_MEMORY_DIR", str(plik))
+    out, shared, _pipeline = _mocked_recall(_SYSTEM_PROMPTS["<bash-input"])
+    assert out == ""
+    shared.assert_not_awaited()
+    assert "zapis nieudany" in capsys.readouterr().err
