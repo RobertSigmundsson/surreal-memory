@@ -594,7 +594,7 @@ def test_timed_out_recall_is_recorded_not_silent(
     assert rows == [
         {
             "ts": rows[0]["ts"],
-            "blad": "SMEM-SLAD-BLAD tor=cli status=timeout powod=recall>0.05s",
+            "blad": "SMEM-SLAD-BLAD tor=cli status=timeout powod=recall+slad>0.05s",
             "sesja": "s-timeout",
         }
     ]

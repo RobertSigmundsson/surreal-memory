@@ -295,8 +295,9 @@ async def _recall_within_timeout(hook_input: dict[str, Any], seconds: float) -> 
             f"[Surreal-Memory] prompt recall exceeded {seconds}s — skipped", file=sys.stderr
         )
         # A cancelled recall writes no trace; the durable log says why there is none.
+        # The cap covers the recall AND its trace write, so the reason names both.
         _record_trace_error(
-            f"SMEM-SLAD-BLAD tor=cli status=timeout powod=recall>{seconds}s",
+            f"SMEM-SLAD-BLAD tor=cli status=timeout powod=recall+slad>{seconds}s",
             str(hook_input.get("session_id") or ""),
         )
         return ""
