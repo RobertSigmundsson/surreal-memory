@@ -948,9 +948,19 @@ class TestJevUnmeasuredIsNamed:
         result = await pipeline.query("qwzlmnprt vxbdfghj")
         assert result.synthesis_method == "insufficient_signal"
         sygnaly = result.metadata["odmowa_sygnaly"]
-        assert sygnaly["jev_status"] == "JEV_NIEDOSTEPNY"
-        assert sygnaly["jev_would_refuse"] is None
-        assert "4.8" in sygnaly["jev_powod"]
+        # R3 (jev-uzycie-wdrozenie): "never called" is JEV_POMINIETY, not an outage;
+        # the reason string stays byte-identical (readers match on it).
+        assert sygnaly["jev_status"] == "JEV_POMINIETY"
+        assert sygnaly["jev_powod"] == "early exit at gate 4.8; Jev never called"
+        for pole in (
+            "jev_odpowiada",
+            "jev_sensowne",
+            "jev_ta_domena",
+            "jev_jakosc",
+            "jev_would_refuse",
+            "jev_ms",
+        ):
+            assert sygnaly[pole] is None, pole
         await s.close()
 
     async def test_measured_jev_carries_powod_none_and_failure_carries_reason(
@@ -986,3 +996,110 @@ class TestJevUnmeasuredIsNamed:
         assert sygnaly["jev_status"] == "JEV_ODRZUCIL", sygnaly
         assert "403" in sygnaly["jev_powod"]
         assert sygnaly["jev_would_refuse"] is None
+
+
+class TestJevPominietyIsNotAnOutage:
+    """R3 (program jev-uzycie-wdrozenie): `JEV_POMINIETY` = the engine had no input for Jev;
+    `JEV_NIEDOSTEPNY` stays reserved for real failures (timeout, network, missing key)."""
+
+    async def test_no_candidate_contents_is_pominiety_and_makes_no_call(
+        self, obs_storage: Any, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import dataclasses
+
+        from surreal_memory.engine import jev_gate
+        from surreal_memory.engine.retrieval import ReflexPipeline
+        from surreal_memory.unified_config import JevConfig, get_config
+
+        # jev observe WITHOUT the reranker seam: anchors exist, but no candidate
+        # contents are fetched, so there is nothing to send Jev.
+        patched = dataclasses.replace(get_config(), jev=JevConfig(mode="observe", api_key_file=""))
+        monkeypatch.setattr(
+            "surreal_memory.unified_config.get_config", lambda reload=False: patched
+        )
+        monkeypatch.setenv("LITELLM_KEY_ROJ_JEV", "klucz-testowy-nieprawdziwy")
+        calls: list[Any] = []
+        monkeypatch.setattr(
+            jev_gate, "_blocking_post", lambda *a, **k: calls.append(a) or (200, b"{}")
+        )
+        pipeline = ReflexPipeline(obs_storage, _obs_config(refusal_mode="observe"))
+        result = await pipeline.query(_OBS_QUERY)
+        sygnaly = result.metadata["odmowa_sygnaly"]
+        assert sygnaly["jev_status"] == "JEV_POMINIETY", sygnaly
+        assert sygnaly["jev_powod"] == "no candidate contents; reranking never ran"
+        assert sygnaly["jev_would_refuse"] is None and sygnaly["jev_odpowiada"] is None
+        assert calls == []
+
+    async def test_timeout_stays_niedostepny_not_pominiety(
+        self, obs_storage: Any, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Negative control for mandate (b): the new status must not swallow a real outage."""
+        import asyncio as _asyncio
+        import dataclasses
+
+        from surreal_memory.engine.retrieval import ReflexPipeline
+        from surreal_memory.unified_config import JevConfig, RerankerConfig, get_config
+
+        monkeypatch.setattr(
+            "surreal_memory.engine.reranker.rerank_activations",
+            _obs_fake_rerank(raw_top1=0.9, degraded_reason=None),
+        )
+        patched = dataclasses.replace(
+            get_config(),
+            reranker=RerankerConfig(enabled=True, endpoint="http://fake-reranker.invalid/v1"),
+            jev=JevConfig(mode="observe", api_key_file="", timeout_ms=50),
+        )
+        monkeypatch.setattr(
+            "surreal_memory.unified_config.get_config", lambda reload=False: patched
+        )
+        monkeypatch.setenv("LITELLM_KEY_ROJ_JEV", "klucz-testowy-nieprawdziwy")
+
+        async def _spi(**_kw: Any) -> Any:
+            await _asyncio.sleep(2)
+
+        monkeypatch.setattr("surreal_memory.engine.retrieval.zapytaj_jev", _spi)
+        pipeline = ReflexPipeline(obs_storage, _obs_config(refusal_mode="observe"))
+        result = await pipeline.query(_OBS_QUERY)
+        sygnaly = result.metadata["odmowa_sygnaly"]
+        assert sygnaly["jev_status"] == "JEV_NIEDOSTEPNY", sygnaly
+        assert "wait_for" in sygnaly["jev_powod"]
+        assert sygnaly["jev_odpowiada"] is None and sygnaly["jev_would_refuse"] is None
+
+    async def test_pominiety_has_the_same_keys_as_a_measured_signal(
+        self, obs_storage: Any, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import dataclasses
+
+        from surreal_memory.engine import jev_gate
+        from surreal_memory.engine.retrieval import ReflexPipeline
+        from surreal_memory.unified_config import JevConfig, RerankerConfig, get_config
+
+        monkeypatch.setenv("LITELLM_KEY_ROJ_JEV", "klucz-testowy-nieprawdziwy")
+        monkeypatch.setattr(jev_gate, "_blocking_post", lambda *a, **k: (200, _jev_ok_body()))
+        monkeypatch.setattr(
+            "surreal_memory.engine.reranker.rerank_activations",
+            _obs_fake_rerank(raw_top1=0.9, degraded_reason=None),
+        )
+        zmierzony = dataclasses.replace(
+            get_config(),
+            reranker=RerankerConfig(enabled=True, endpoint="http://fake-reranker.invalid/v1"),
+            jev=JevConfig(mode="observe", api_key_file=""),
+        )
+        monkeypatch.setattr(
+            "surreal_memory.unified_config.get_config", lambda reload=False: zmierzony
+        )
+        ok = (
+            await ReflexPipeline(obs_storage, _obs_config(refusal_mode="observe")).query(_OBS_QUERY)
+        ).metadata["odmowa_sygnaly"]
+        assert ok["jev_status"] == "OK"
+        pominiety_cfg = dataclasses.replace(
+            get_config(), jev=JevConfig(mode="observe", api_key_file="")
+        )
+        monkeypatch.setattr(
+            "surreal_memory.unified_config.get_config", lambda reload=False: pominiety_cfg
+        )
+        pom = (
+            await ReflexPipeline(obs_storage, _obs_config(refusal_mode="observe")).query(_OBS_QUERY)
+        ).metadata["odmowa_sygnaly"]
+        assert pom["jev_status"] == "JEV_POMINIETY"
+        assert {k for k in ok if k.startswith("jev_")} == {k for k in pom if k.startswith("jev_")}

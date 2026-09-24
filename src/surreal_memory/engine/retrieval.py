@@ -23,7 +23,12 @@ from surreal_memory.engine.causal_traversal import (
     trace_causal_chain,
     trace_event_sequence,
 )
-from surreal_memory.engine.jev_gate import OdpowiedzJev, resolve_api_key, zapytaj_jev
+from surreal_memory.engine.jev_gate import (
+    JEV_POMINIETY,
+    OdpowiedzJev,
+    resolve_api_key,
+    zapytaj_jev,
+)
 from surreal_memory.engine.jev_pytania import PROG_ODPOWIADA_STARTOWY, sha256_pytan
 from surreal_memory.engine.leksyka import tokeny_do_sprawdzenia
 from surreal_memory.engine.lifecycle import ReinforcementManager
@@ -674,18 +679,20 @@ class ReflexPipeline:
         # reranked `activations`/`neuron_contents`. `None` means "jev.mode is not
         # 'observe'" (key omitted entirely from `odmowa_sygnaly`, see the
         # closure below) -- never confused with "the call ran and failed", which
-        # is `jev_status="JEV_NIEDOSTEPNY"`/`"JEV_ODRZUCIL"` inside a populated dict.
+        # is `jev_status="JEV_NIEDOSTEPNY"`/`"JEV_ODRZUCIL"` inside a populated dict,
+        # nor with "Jev was never called for this query" (`JEV_POMINIETY`).
         _jev_sygnaly: dict[str, Any] | None = None
 
-        def _jev_niedostepny(powod: str) -> dict[str, Any]:
+        def _jev_pominiety(powod: str) -> dict[str, Any]:
             # Runner review (U3): every "Jev was not measured" state carries the
             # SAME key set as a measured one plus a NAMED reason. Absence of the
             # `jev_*` keys means "jev.mode is off"; presence with
-            # JEV_NIEDOSTEPNY + `jev_powod` means "observation was on, but this
-            # query could not be scored" — the two must never look alike in the
-            # weekly report (cisza nie jest sukcesem).
+            # JEV_POMINIETY + `jev_powod` means "observation was on, but the
+            # engine had nothing to send Jev for this query" — not an outage, so
+            # it must not look like one (program jev-uzycie-wdrozenie, R3). The
+            # reason strings stay byte-identical: readers match on `jev_powod`.
             return {
-                "jev_status": "JEV_NIEDOSTEPNY",
+                "jev_status": JEV_POMINIETY,
                 "jev_odpowiada": None,
                 "jev_sensowne": None,
                 "jev_ta_domena": None,
@@ -811,7 +818,7 @@ class ReflexPipeline:
                     # Jev is launched only after 4.9; a 4.8 short-circuit means it
                     # was never called for this query. Say so — do not leave the
                     # `jev_*` keys out as if observation were off.
-                    _jev_sygnaly = _jev_niedostepny("early exit at gate 4.8; Jev never called")
+                    _jev_sygnaly = _jev_pominiety("early exit at gate 4.8; Jev never called")
             _odmowa_sygnaly = _make_odmowa_sygnaly(
                 m4_would_refuse=False,
                 rerank_raw_top1=None,
@@ -1052,7 +1059,7 @@ class ReflexPipeline:
                 # (disabled, or a single activation) -- without a NEW read there
                 # is nothing to send Jev. Named, not a silent skip.
                 logger.debug("Jev skipped: no candidate contents available")
-                _jev_sygnaly = _jev_niedostepny("no candidate contents; reranking never ran")
+                _jev_sygnaly = _jev_pominiety("no candidate contents; reranking never ran")
 
         # 5. Find matching fibers
         query_tokens = set(query.lower().split())
