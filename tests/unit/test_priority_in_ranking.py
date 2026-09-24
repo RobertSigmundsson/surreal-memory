@@ -316,8 +316,8 @@ class TestCliRememberStoresExplicitPriorityOnTheFiber:
     async def _encode_via_cli_path(self, priority: int | None):
         from unittest.mock import AsyncMock, MagicMock, patch
 
-        from surreal_memory.cli.commands.memory import _encode_and_store
         from surreal_memory.core.memory_types import MemoryType, Priority
+        from surreal_memory.engine.remember_api import encode_and_store
 
         captured: dict = {}
 
@@ -331,12 +331,13 @@ class TestCliRememberStoresExplicitPriorityOnTheFiber:
 
         storage = AsyncMock()
         storage.disable_auto_save = MagicMock()
+        storage.enable_auto_save = MagicMock()
         with (
-            patch("surreal_memory.cli.commands.memory.MemoryEncoder", _Encoder),
-            patch("surreal_memory.cli.commands.memory.build_dedup_pipeline", return_value=None),
+            patch("surreal_memory.engine.remember_api.MemoryEncoder", _Encoder),
+            patch("surreal_memory.engine.remember_api.build_dedup_pipeline", return_value=None),
             pytest.raises(_StopEncodeError),
         ):
-            await _encode_and_store(
+            await encode_and_store(
                 storage,
                 MagicMock(),
                 "a rule worth remembering",
