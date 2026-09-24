@@ -15,12 +15,11 @@ import typer
 from surreal_memory.cli._helpers import get_config, get_storage, output_result, run_async
 from surreal_memory.cli.recall_trace import CliTraceOutcome, persist_cli_trace
 from surreal_memory.core.memory_types import (
-    DEFAULT_EXPIRY_DAYS,
     MemoryType,
     Priority,
     TypedMemory,
-    suggest_memory_type,
 )
+from surreal_memory.engine import remember_api
 from surreal_memory.engine.dedup.factory import build_dedup_pipeline
 from surreal_memory.engine.encoder import MemoryEncoder
 from surreal_memory.engine.retrieval import DepthLevel, ReflexPipeline
@@ -34,48 +33,9 @@ from surreal_memory.safety.freshness import (
     get_freshness_indicator,
 )
 from surreal_memory.safety.sensitive import (
-    check_sensitive_content,
-    filter_sensitive_content,
     format_sensitive_warning,
 )
 from surreal_memory.utils.timeutils import utcnow
-
-
-def _validate_content(
-    content: str,
-    *,
-    force: bool,
-    redact: bool,
-) -> tuple[str, list[Any]]:
-    """Validate and optionally redact sensitive content. Returns (content, matches)."""
-    sensitive_matches = check_sensitive_content(content, min_severity=2)
-
-    if sensitive_matches and not force and not redact:
-        warning = format_sensitive_warning(sensitive_matches)
-        typer.echo(warning)
-        raise typer.Exit(1)
-
-    store_content = content
-    if redact and sensitive_matches:
-        store_content, _ = filter_sensitive_content(content)
-        typer.secho(f"Redacted {len(sensitive_matches)} sensitive item(s)", fg=typer.colors.YELLOW)
-
-    return store_content, sensitive_matches
-
-
-def _resolve_memory_type(
-    memory_type: str | None,
-    content: str,
-) -> MemoryType:
-    """Parse explicit memory type or auto-detect."""
-    if memory_type:
-        try:
-            return MemoryType(memory_type.lower())
-        except ValueError:
-            valid_types = ", ".join(t.value for t in MemoryType)
-            typer.secho(f"Invalid memory type. Valid types: {valid_types}", fg=typer.colors.RED)
-            raise typer.Exit(1)
-    return suggest_memory_type(content)
 
 
 async def _resolve_project_id(storage: PersistentStorage, project: str | None) -> str | None:
@@ -86,66 +46,6 @@ async def _resolve_project_id(storage: PersistentStorage, project: str | None) -
     if not proj:
         return None
     return proj.id
-
-
-async def _encode_and_store(
-    storage: PersistentStorage,
-    brain_config: Any,
-    content: str,
-    *,
-    tags: set[str] | None,
-    mem_type: MemoryType,
-    mem_priority: Priority,
-    expiry_days: int | None,
-    project_id: str | None,
-    event_timestamp: datetime | None = None,
-    ephemeral: bool = False,
-    priority_was_explicit: bool = False,
-) -> dict[str, Any]:
-    """Encode content into neural graph and store typed memory metadata."""
-    encoder = MemoryEncoder(storage, brain_config, dedup_pipeline=build_dedup_pipeline(storage))
-    storage.disable_auto_save()
-
-    # A priority the caller asked for must reach the FIBER, not only typed_memory:
-    # retrieval scores fibers, so a priority the fiber never carries cannot influence
-    # recall. Mirrors the MCP write path. A priority that was merely defaulted is not
-    # written — the value has to mean "someone said this matters".
-    encode_metadata: dict[str, Any] | None = None
-    if priority_was_explicit:
-        encode_metadata = {"priority": mem_priority.value}
-
-    result = await encoder.encode(
-        content=content,
-        timestamp=event_timestamp or utcnow(),
-        metadata=encode_metadata,
-        tags=tags,
-    )
-
-    # Mark neurons as ephemeral if requested
-    if ephemeral:
-        ephemeral_ids = [n.id for n in result.neurons_created]
-        if ephemeral_ids:
-            await storage.update_neurons_ephemeral_batch(ephemeral_ids, ephemeral=True)
-
-    typed_mem = TypedMemory.create(
-        fiber_id=result.fiber.id,
-        memory_type=mem_type,
-        priority=mem_priority,
-        source="user_input",
-        expires_in_days=expiry_days,
-        tags=tags,
-        project_id=project_id,
-    )
-    await storage.add_typed_memory(typed_mem)
-    await storage.batch_save()
-
-    return {
-        "fiber_id": result.fiber.id,
-        "typed_mem": typed_mem,
-        "neurons_created": len(result.neurons_created),
-        "neurons_linked": len(result.neurons_linked),
-        "synapses_created": len(result.synapses_created),
-    }
 
 
 def remember(
@@ -225,13 +125,23 @@ def remember(
         )
         raise typer.Exit(1)
 
-    store_content, sensitive_matches = _validate_content(content, force=force, redact=redact)
-    mem_type = _resolve_memory_type(memory_type, store_content)
-    expiry_days = expires if expires is not None else DEFAULT_EXPIRY_DAYS.get(mem_type)
-    # Ephemeral memories default to 1-day expiry
-    if ephemeral and expiry_days is None:
-        expiry_days = 1
-    mem_priority = Priority.from_int(priority) if priority is not None else Priority.NORMAL
+    try:
+        chk = remember_api.check_content(content, force=force, redact=redact)
+    except remember_api.SensitiveContentError as exc:
+        typer.echo(format_sensitive_warning(list(exc.matches)))
+        raise typer.Exit(1)
+    if chk.redacted:
+        typer.secho(f"Redacted {len(chk.matches)} sensitive item(s)", fg=typer.colors.YELLOW)
+    store_content = chk.content
+    try:
+        mem_type = remember_api.resolve_memory_type(memory_type, store_content)
+    except remember_api.InvalidMemoryTypeError as exc:
+        typer.secho(
+            f"Invalid memory type. Valid types: {', '.join(exc.valid)}", fg=typer.colors.RED
+        )
+        raise typer.Exit(1)
+    expiry_days = remember_api.resolve_expiry_days(mem_type, expires, ephemeral=ephemeral)
+    mem_priority, priority_was_explicit = remember_api.resolve_priority(priority)
 
     # Parse --timestamp for original event time
     event_timestamp: datetime | None = None
@@ -265,7 +175,7 @@ def remember(
                 "error": f"Project '{project}' not found. Create it with: smem project create \"{project}\""
             }
 
-        enc = await _encode_and_store(
+        stored = await remember_api.encode_and_store(
             storage,
             brain.config,
             store_content,
@@ -276,30 +186,18 @@ def remember(
             project_id=project_id,
             event_timestamp=event_timestamp,
             ephemeral=ephemeral,
-            priority_was_explicit=priority is not None,
+            priority_was_explicit=priority_was_explicit,
+            attribution=remember_api.CLI_ATTRIBUTION,
         )
-
-        response = {
-            "message": f"Remembered: {store_content[:50]}{'...' if len(store_content) > 50 else ''}",
-            "fiber_id": enc["fiber_id"],
-            "memory_type": mem_type.value,
-            "priority": mem_priority.name.lower(),
-            "neurons_created": enc["neurons_created"],
-            "neurons_linked": enc["neurons_linked"],
-            "synapses_created": enc["synapses_created"],
-        }
-        if ephemeral:
-            response["ephemeral"] = True
-            response["message"] += " [ephemeral — auto-expires in 24h]"
-        if project_id:
-            response["project"] = project
-        if enc["typed_mem"].expires_at:
-            response["expires_in_days"] = enc["typed_mem"].days_until_expiry
-        if force and sensitive_matches:
-            response["warnings"] = [
-                f"[!] Stored with {len(sensitive_matches)} sensitive item(s) - consider using --redact"
-            ]
-        return response
+        return remember_api.response_dict(
+            stored,
+            content=store_content,
+            mem_type=mem_type,
+            mem_priority=mem_priority,
+            ephemeral=ephemeral,
+            project=project if project_id else None,
+            forced_matches=len(chk.matches) if force else 0,
+        )
 
     result = run_async(_remember())
     output_result(result, json_output)
