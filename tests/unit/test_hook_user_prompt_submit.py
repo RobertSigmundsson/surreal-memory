@@ -568,3 +568,33 @@ def test_system_content_and_short_prompts_write_no_trace(
     for prompt in (_SYSTEM_PROMPTS["<task-notification"], "ok, dalej"):
         _, spy, _ = _recall_with_trace(prompt, env=_HOOK_ENV)
         assert spy.await_count == 0
+
+
+def test_timed_out_recall_is_recorded_not_silent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No trace for a cancelled recall — so the durable log must say why."""
+    import asyncio
+
+    from surreal_memory.hooks.user_prompt_submit import _recall_within_timeout
+
+    monkeypatch.setenv("SURREAL_MEMORY_DIR", str(tmp_path))
+
+    async def _slow(_hook_input: dict) -> str:
+        await asyncio.sleep(5)
+        return "nigdy"
+
+    with patch(_RECALL, _slow):
+        out = asyncio.run(_recall_within_timeout({"session_id": "s-timeout"}, 0.05))
+    assert out == ""
+    rows = [
+        json.loads(x)
+        for x in (tmp_path / "prompt_recall_slad_bledy.jsonl").read_text().splitlines()
+    ]
+    assert rows == [
+        {
+            "ts": rows[0]["ts"],
+            "blad": "SMEM-SLAD-BLAD tor=cli status=timeout powod=recall>0.05s",
+            "sesja": "s-timeout",
+        }
+    ]
