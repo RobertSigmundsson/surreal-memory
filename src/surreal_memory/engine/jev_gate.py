@@ -73,7 +73,7 @@ class OdpowiedzJev:
     jest sukcesem).
     """
 
-    status: str  # "OK" | "JEV_NIEDOSTEPNY" | "JEV_ODRZUCIL"
+    status: str  # "OK" | "JEV_NIEDOSTEPNY" | "JEV_ODRZUCIL" (JEV_POMINIETY — patrz niżej)
     odpowiada: float | None
     sensowne: float | None
     ta_domena: float | None
@@ -83,6 +83,15 @@ class OdpowiedzJev:
     tok: int | None
     zredagowano: int
     powod: str | None
+
+
+JEV_POMINIETY = "JEV_POMINIETY"
+"""Status ustawiany WYŁĄCZNIE przez silnik (`engine/retrieval.py`), nigdy z odpowiedzi bramy:
+Jev NIE został zawołany, bo recall nie miał dla niego wejścia (wczesne wyjście na bramce 4.8 albo
+brak treści kandydatów po 4.9). To nie jest awaria — awaria (sieć, timeout, brak klucza,
+nieparsowalna odpowiedź) to `JEV_NIEDOSTEPNY`, odmowa bramy/Jev to `JEV_ODRZUCIL`. Rozdzielone,
+zanim ktoś podepnie alarm pod `JEV_NIEDOSTEPNY` (przegląd 2026-09-24: 30 z 33 „niedostępnych"
+było w rzeczywistości „nie wołany"). Pola liczbowe przy tym statusie też są `None`."""
 
 
 def redaguj(tekst: str, sekrety: list[str]) -> tuple[str, int]:
