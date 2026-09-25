@@ -29,11 +29,11 @@ Restart your AI tool. Your agent now remembers.
   safely instead of replaying unbounded work.
 - Pruning and retention resume between committed substeps after errors, and
   indexed keyset scans keep large graph operations bounded.
-- The schema migration preserves unfinished v3.11 checkpoint phase data and
-  its `3.11.0:checkpoint-v1` marker rather than silently retagging it. Because
-  the runtime fences resumes by code version, an unfinished v3.11 run is not
-  automatically resumed by v3.12; let it finish before upgrading, or inspect
-  and recover it explicitly. Incompatible progress formats remain fenced off.
+- The schema migration carries compatible unfinished v3.11 checkpoints
+  forward while preserving their phase data and `3.11.0:checkpoint-v1`
+  compatibility marker. Package-version bumps do not invalidate this v1
+  checkpoint epoch; incompatible formats, schema state, or run parameters
+  remain fenced off from resume.
 - Reranker requests that exceed context limits are split without losing
   candidate scores, and OpenAI-compatible embedding credentials are isolated
   from unrelated provider requests.

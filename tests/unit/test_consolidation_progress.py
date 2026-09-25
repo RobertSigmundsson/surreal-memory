@@ -98,6 +98,7 @@ async def test_new_run_persists_committed_checkpoints_and_completion() -> None:
     assert session.state["status"] == "running"
     assert session.state["schema_version"] > 0
     assert session.state["engine_version"] == progress_module.CONSOLIDATION_ENGINE_VERSION
+    assert session.state["engine_version"] == "3.11.0:checkpoint-v1"
     assert storage.started == 1
 
     await session.checkpoint(

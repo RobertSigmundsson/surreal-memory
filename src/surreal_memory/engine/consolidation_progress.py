@@ -12,7 +12,6 @@ from hashlib import sha256
 from typing import Any
 from uuid import uuid4
 
-from surreal_memory import __version__
 from surreal_memory.storage.base import NeuralStorage
 from surreal_memory.storage.surrealdb.schema import SCHEMA_VERSION
 from surreal_memory.utils.timeutils import ensure_naive_utc, utcnow
@@ -20,7 +19,9 @@ from surreal_memory.utils.timeutils import ensure_naive_utc, utcnow
 logger = logging.getLogger(__name__)
 
 PROGRESS_FORMAT_VERSION = 1
-CONSOLIDATION_ENGINE_VERSION = f"{__version__}:checkpoint-v1"
+# Keep this compatibility epoch stable across package releases; change it only
+# when checkpoint semantics become incompatible.
+CONSOLIDATION_ENGINE_VERSION = "3.11.0:checkpoint-v1"
 LEASE_SECONDS = 180
 INCOMPLETE_STATUSES = {"queued", "running", "paused", "failed"}
 

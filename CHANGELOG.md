@@ -61,12 +61,11 @@ fiber-wide operations avoid relying on unbounded in-memory scans.
   consolidation may be in progress.
 - Compatible v3.11 progress records retain the `3.11.0:checkpoint-v1` engine
   marker; the marker is a checkpoint-compatibility identifier, not a package
-  version field. The migration advances schema metadata but does not retag old
-  progress or rewrite its phase, cursor, and counters. Since the runtime fences
-  resumption by code version, an unfinished v3.11 run is not automatically
-  resumed under v3.12; let active runs finish before upgrading, or inspect and
-  recover them explicitly. Incompatible markers and progress formats are not
-  rewritten by the migration.
+  version field, and it remains stable across compatible package releases.
+  Migration advances schema metadata without rewriting a checkpoint phase,
+  cursor, or counters. v3.12 can resume a compatible v3.11 checkpoint when its
+  schema, progress format, run options, and requested strategies still match;
+  incompatible markers and formats remain fenced off and are not rewritten.
 
 ## [3.11.0] — 2026-09-23 — recall reaches the right memories and checks its work
 
