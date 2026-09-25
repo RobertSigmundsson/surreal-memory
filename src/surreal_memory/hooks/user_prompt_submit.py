@@ -249,6 +249,19 @@ async def get_prompt_recall(hook_input: dict[str, Any]) -> str:
             max_tokens=cfg.max_tokens,
             session_id=str(hook_input.get("session_id") or "ups"),
         )
+        # A superseded fact (typed_memory.valid_until set) must not come back as context on
+        # every prompt: same filter and escape hatch as recall_api / smem recall.
+        from surreal_memory.engine.superseded_filter import filter_superseded
+
+        result = (
+            await filter_superseded(
+                result,
+                storage,
+                max_tokens=cfg.max_tokens,
+                brain_id=brain_id,
+                config=config,
+            )
+        ).result
         await _persist_hook_trace(
             storage,
             result,

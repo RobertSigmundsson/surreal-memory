@@ -8,6 +8,11 @@ and the same ``ReflexPipeline.query`` arguments for every scenario.
 
 Regenerate ONLY on the pre-refactor tree:
     SMEM_RECALL_SNAPSHOT_REGEN=1 pytest tests/unit/test_recall_response_snapshot.py
+
+One deliberate change since: in ``budzet`` (``recall_token_budget``) the budgeted prose is now
+built AFTER the post-filter, so the superseded filter also covers it — the storage reads swap
+from ``get_fiber x2, get_typed_memory x2`` to ``get_typed_memory x2, get_fiber x2``; the response
+bytes are unchanged. Edited in the fixture by hand, not regenerated.
 """
 
 from __future__ import annotations

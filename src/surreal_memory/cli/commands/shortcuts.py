@@ -46,6 +46,17 @@ def quick_recall(
         pipeline = ReflexPipeline(storage, brain.config)
         depth_level = DepthLevel(depth) if depth is not None else None
         result = await pipeline.query(query, depth=depth_level, max_tokens=500)
+        from surreal_memory.engine.superseded_filter import filter_superseded
+
+        result = (
+            await filter_superseded(
+                result,
+                storage,
+                max_tokens=500,
+                brain_id=storage.brain_id or "",
+                config=config,
+            )
+        ).result
         slad = await persist_cli_trace(
             storage,
             result,

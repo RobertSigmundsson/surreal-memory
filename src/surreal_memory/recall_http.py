@@ -154,6 +154,7 @@ class CliRecallOut(BaseModel):
     oldest_memory_age: str | None = None
     freshness_warnings: list[str] | None = None
     rerank_degraded_warning: str | None = None
+    superseded_excluded_count: int | None = None
     trace_status: str
     trace_id: str | None = None
     trace_error: str | None = None
