@@ -295,12 +295,26 @@ class TestBatchedPruneQueries:
         )
 
         assert page == []
-        sql = st._query.await_args.args[0]
+        sql = st._query.await_args_list[0].args[0]
         params = st._query.await_args.kwargs
         assert "id > type::record('synapse', $cursor_id)" in sql
+        assert "FROM synapse:`edge_10`..`f`" in sql
         assert "created_at IS NONE OR created_at <= $created_before" in sql
         assert "ORDER BY id ASC LIMIT 2000" in sql
         assert params["cursor_id"] == "edge_10"
+
+    @pytest.mark.asyncio
+    async def test_synapse_keyset_page_quotes_numeric_cursor_in_bounded_record_range(self):
+        st, _ = _store_with_mock_conn()
+        st._query = AsyncMock(return_value=[])  # type: ignore[method-assign]
+
+        await st.get_synapses_after_id("1122334455667788", limit=25)
+
+        sql = st._query.await_args_list[0].args[0]
+        params = st._query.await_args.kwargs
+        assert "FROM synapse:`1122334455667788`..`2`" in sql
+        assert "id > type::record('synapse', $cursor_id)" in sql
+        assert params["cursor_id"] == "1122334455667788"
 
     @pytest.mark.asyncio
     async def test_prune_page_uses_projected_tuple_cursor_without_upper_bound(self):
@@ -337,7 +351,7 @@ class TestBatchedPruneQueries:
 
         await st.get_synapse_prune_page(None, None, limit=100)
 
-        sql = st._query.await_args.args[0]
+        sql = st._query.await_args_list[0].args[0]
         assert "brain_id = $brain_id" in sql
         assert "ORDER BY created_at ASC, id ASC LIMIT 100" in sql
         assert "SELECT * FROM synapse" not in sql
@@ -355,15 +369,32 @@ class TestBatchedPruneQueries:
         )
 
         assert page == []
-        sql = st._query.await_args.args[0]
+        sql = st._query.await_args_list[0].args[0]
         params = st._query.await_args.kwargs
-        assert "SELECT * OMIT embedding_vec FROM neuron" in sql
+        assert "SELECT * OMIT embedding_vec FROM neuron:`node_10`..`o`" in sql
         assert 'brain_id = "b1"' in sql
         assert "id > type::record('neuron', $cursor_id)" in sql
         assert "created_at IS NONE OR created_at <= $created_before" in sql
         assert "ephemeral = $ephemeral" in sql
         assert params["cursor_id"] == "node_10"
         assert params["ephemeral"] is False
+
+    @pytest.mark.asyncio
+    async def test_neuron_keyset_page_quotes_underscore_cursor_and_keeps_none_unbounded(self):
+        st, _ = _store_with_mock_conn()
+        st._query = AsyncMock(return_value=[])  # type: ignore[method-assign]
+
+        await st.find_neurons_after_id("_123", limit=25)
+
+        sql = st._query.await_args_list[0].args[0]
+        assert "FROM neuron:`_123`..`a`" in sql
+        assert "id > type::record('neuron', $cursor_id)" in sql
+
+        st._query = AsyncMock(return_value=[])  # type: ignore[method-assign]
+        await st.find_neurons_after_id(None, limit=25)
+        sql = st._query.await_args.args[0]
+        assert "FROM neuron WHERE" in sql
+        assert "id > type::record('neuron'" not in sql
 
     @pytest.mark.asyncio
     async def test_get_connected_neuron_ids_for_only_queries_supplied_endpoints(self):

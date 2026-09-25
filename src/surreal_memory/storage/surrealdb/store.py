@@ -199,6 +199,20 @@ _BATCH_FETCH_CONCURRENCY = 16
 # measured 2026-09-13 on a copy of a production brain (18 657 state rows).
 _DIRECT_STATE_FETCH_LIMIT = 64
 
+# The alphabet emitted by _to_surreal_id, in SurrealDB's ASCII record-name
+# ordering. Keyset windows use adjacent leading-character ranges so a
+# RecordIdScan has an upper bound instead of walking the table's full suffix.
+_SAFE_RECORD_ID_CHARS = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ_abcdefghijklmnopqrstuvwxyz"
+
+
+def _next_surreal_id_prefix(character: str) -> str | None:
+    """Return the next sanitized record-name initial in lexical order."""
+    index = _SAFE_RECORD_ID_CHARS.find(character)
+    if index < 0:
+        return None
+    next_index = index + 1
+    return _SAFE_RECORD_ID_CHARS[next_index] if next_index < len(_SAFE_RECORD_ID_CHARS) else None
+
 
 def _prefer_ws_transport(url: str) -> str:
     """Rewrite http(s):// URLs to ws(s):// for the SDK connection.
@@ -1434,10 +1448,17 @@ class SurrealDBStorage(
         brain_id = self._get_brain_id()
         conditions = [f"brain_id = {_brain_literal(brain_id)}"]
         params: dict[str, Any] = {}
+        range_cursor = _to_surreal_id(cursor_id) if cursor_id is not None else None
 
-        if cursor_id is not None:
-            params["cursor_id"] = _to_surreal_id(cursor_id)
+        if range_cursor is not None:
+            # The explicit exclusive predicate preserves the public keyset
+            # contract.  The lower-bounded record range lets SurrealDB 3.2
+            # seek to the cursor instead of scanning the brain index and
+            # filtering every earlier id.  _to_surreal_id is the single
+            # choke-point for the inlined record name; quoting keeps numeric-
+            # only and underscore-prefixed IDs as string record keys.
             conditions.append("id > type::record('neuron', $cursor_id)")
+            params["cursor_id"] = range_cursor
         if created_before is not None:
             params["created_before"] = created_before
             conditions.append("(created_at IS NONE OR created_at <= $created_before)")
@@ -1447,11 +1468,26 @@ class SurrealDBStorage(
 
         page_limit = min(max(int(limit), 1), 2000)
         projection = "SELECT *" if include_embedding else "SELECT * OMIT embedding_vec"
-        rows = await self._query(
-            f"{projection} FROM neuron WHERE {' AND '.join(conditions)} "
-            f"ORDER BY id ASC LIMIT {page_limit}",
-            **params,
-        )
+        rows: list[dict[str, Any]] = []
+        next_prefix = _next_surreal_id_prefix(range_cursor[0]) if range_cursor else None
+        range_start = range_cursor or None
+        while True:
+            remaining = page_limit - len(rows)
+            upper_clause = f"`{next_prefix}`" if next_prefix is not None else ""
+            if range_start is None:
+                from_clause = "neuron"
+            else:
+                from_clause = f"neuron:`{range_start}`..{upper_clause}"
+            batch = await self._query(
+                f"{projection} FROM {from_clause} WHERE {' AND '.join(conditions)} "
+                f"ORDER BY id ASC LIMIT {remaining}",
+                **params,
+            )
+            rows.extend(batch)
+            if len(batch) >= remaining or next_prefix is None:
+                break
+            range_start = next_prefix
+            next_prefix = _next_surreal_id_prefix(next_prefix)
         return [_row_to_neuron(row) for row in rows]
 
     async def find_neurons_ranked(
@@ -2204,10 +2240,13 @@ class SurrealDBStorage(
         brain_id = self._get_brain_id()
         conditions = ["brain_id = $brain_id"]
         params: dict[str, Any] = {"brain_id": brain_id}
+        range_cursor = _to_surreal_id(cursor_id) if cursor_id is not None else None
 
-        if cursor_id is not None:
-            params["cursor_id"] = _to_surreal_id(cursor_id)
+        if range_cursor is not None:
+            # See find_neurons_after_id: pair the exclusive predicate with a
+            # quoted, sanitized lower record bound so the planner can seek.
             conditions.append("id > type::record('synapse', $cursor_id)")
+            params["cursor_id"] = range_cursor
         if created_before is not None:
             # The frozen run reference excludes records created after this scan began.
             # Preserve legacy rows without a timestamp; they cannot be classified as
@@ -2216,11 +2255,26 @@ class SurrealDBStorage(
             conditions.append("(created_at IS NONE OR created_at <= $created_before)")
 
         page_limit = min(max(int(limit), 1), 2000)
-        rows = await self._query(
-            f"SELECT * FROM synapse WHERE {' AND '.join(conditions)} "
-            f"ORDER BY id ASC LIMIT {page_limit}",
-            **params,
-        )
+        rows: list[dict[str, Any]] = []
+        next_prefix = _next_surreal_id_prefix(range_cursor[0]) if range_cursor else None
+        range_start = range_cursor or None
+        while True:
+            remaining = page_limit - len(rows)
+            upper_clause = f"`{next_prefix}`" if next_prefix is not None else ""
+            if range_start is None:
+                from_clause = "synapse"
+            else:
+                from_clause = f"synapse:`{range_start}`..{upper_clause}"
+            batch = await self._query(
+                f"SELECT * FROM {from_clause} WHERE {' AND '.join(conditions)} "
+                f"ORDER BY id ASC LIMIT {remaining}",
+                **params,
+            )
+            rows.extend(batch)
+            if len(batch) >= remaining or next_prefix is None:
+                break
+            range_start = next_prefix
+            next_prefix = _next_surreal_id_prefix(next_prefix)
         return [_row_to_synapse(row) for row in rows]
 
     async def get_synapse_prune_page(
