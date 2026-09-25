@@ -22,6 +22,7 @@ from surreal_memory.engine.consolidation import (
     ConsolidationStrategy,
 )
 from surreal_memory.engine.consolidation_progress import (
+    ConsolidationLeaseLostError,
     ConsolidationPausedError,
     ConsolidationProgressError,
 )
@@ -674,6 +675,27 @@ def _semantic_result() -> SemanticDiscoveryResult:
     )
 
 
+def _semantic_batch_result(count: int) -> SemanticDiscoveryResult:
+    synapses = [
+        Synapse.create(
+            f"semantic-source-{index:04d}",
+            f"semantic-target-{index:04d}",
+            SynapseType.SIMILAR_TO,
+            weight=0.54,
+            metadata={"_semantic_discovery": True},
+            synapse_id=f"semantic-edge-{index:04d}",
+        )
+        for index in range(count)
+    ]
+    return SemanticDiscoveryResult(
+        neurons_embedded=count * 2,
+        pairs_evaluated=count,
+        synapses_created=count,
+        eligible_total=count * 2,
+        synapses=synapses,
+    )
+
+
 async def _semantic_discovery(*_args: Any, **_kwargs: Any) -> SemanticDiscoveryResult:
     return _semantic_result()
 
@@ -712,6 +734,132 @@ async def test_semantic_link_replays_saved_synapse_after_interruption_without_du
     assert storage.added_synapses == ["semantic-edge-a-b"]
     assert report.semantic_synapses_created == 1
     assert progress.strategy_state("semantic_link")["pending"] == []
+
+
+@pytest.mark.asyncio
+async def test_semantic_link_batches_apply_checkpoint_and_resumes_partial_group(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    result = _semantic_batch_result(123)
+    storage = _Storage()
+    progress = _Progress("semantic_link")
+    monkeypatch.setattr(
+        "surreal_memory.engine.semantic_discovery.discover_semantic_synapses",
+        lambda *_args, **_kwargs: _semantic_discovery_result(result),
+    )
+
+    engine = _engine(storage, ConsolidationStrategy.SEMANTIC_LINK, progress)
+    original_budget_check = engine._check_progress_budget
+    pause_once = True
+
+    async def pause_after_63_writes() -> None:
+        nonlocal pause_once
+        if pause_once and len(storage.added_synapses) >= 63:
+            pause_once = False
+            raise ConsolidationPausedError("simulated mid-group budget pause")
+        await original_budget_check()
+
+    engine._check_progress_budget = pause_after_63_writes  # type: ignore[method-assign]
+    with pytest.raises(ConsolidationPausedError, match="mid-group budget pause"):
+        await engine._semantic_link(ConsolidationReport(), dry_run=False)
+
+    apply_writes = [write for write in progress.writes if write["phase"] == "semantic_link_apply"]
+    assert len(apply_writes) == 2
+    assert apply_writes[-1]["cursor"] == "semantic-edge-0062"
+    assert apply_writes[-1]["counters"]["semantic_synapses_created"] == 63
+    checkpoint_sizes = [
+        len(json.dumps(write["pending"], separators=(",", ":")).encode("utf-8"))
+        for write in apply_writes
+    ]
+    assert checkpoint_sizes[0] == checkpoint_sizes[1]
+    assert max(checkpoint_sizes) < len(result.synapses) * 1000
+
+    report = ConsolidationReport()
+    await _engine(storage, ConsolidationStrategy.SEMANTIC_LINK, progress)._semantic_link(
+        report, dry_run=False
+    )
+
+    all_apply_writes = [
+        write for write in progress.writes if write["phase"] == "semantic_link_apply"
+    ]
+    assert [write["cursor"] for write in all_apply_writes] == [
+        "semantic-edge-0049",
+        "semantic-edge-0062",
+        "semantic-edge-0112",
+        "semantic-edge-0122",
+    ]
+    assert len(storage.added_synapses) == 123
+    assert len(set(storage.added_synapses)) == 123
+    assert report.semantic_synapses_created == 123
+
+
+async def _semantic_discovery_result(
+    result: SemanticDiscoveryResult,
+) -> SemanticDiscoveryResult:
+    return result
+
+
+@pytest.mark.asyncio
+async def test_semantic_link_lease_loss_stops_after_uncheckpointed_apply_group(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    result = _semantic_batch_result(50)
+    storage = _Storage()
+    progress = _Progress("semantic_link")
+    monkeypatch.setattr(
+        "surreal_memory.engine.semantic_discovery.discover_semantic_synapses",
+        lambda *_args, **_kwargs: _semantic_discovery_result(result),
+    )
+    durable_checkpoint = progress.checkpoint
+
+    async def lose_lease_on_apply(strategy: str, phase: str, **kwargs: Any) -> None:
+        if phase == "semantic_link_apply":
+            raise ConsolidationLeaseLostError("simulated lease loss")
+        await durable_checkpoint(strategy, phase, **kwargs)
+
+    monkeypatch.setattr(progress, "checkpoint", lose_lease_on_apply)
+    with pytest.raises(ConsolidationLeaseLostError, match="lease loss"):
+        await _engine(storage, ConsolidationStrategy.SEMANTIC_LINK, progress)._semantic_link(
+            ConsolidationReport(), dry_run=False
+        )
+
+    assert len(storage.added_synapses) == 50
+    assert progress.strategy_state("semantic_link")["phase"] == "semantic_link_pending"
+    assert [write["phase"] for write in progress.writes] == ["semantic_link_pending"]
+
+
+@pytest.mark.asyncio
+async def test_semantic_link_rejects_changed_row_after_apply_checkpoint(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    result = _semantic_batch_result(1)
+    storage = _Storage()
+    progress = _Progress("semantic_link")
+    monkeypatch.setattr(
+        "surreal_memory.engine.semantic_discovery.discover_semantic_synapses",
+        lambda *_args, **_kwargs: _semantic_discovery_result(result),
+    )
+    durable_checkpoint = progress.checkpoint
+
+    async def fail_before_apply_checkpoint(strategy: str, phase: str, **kwargs: Any) -> None:
+        if phase == "semantic_link_apply":
+            raise OSError("simulated checkpoint failure")
+        await durable_checkpoint(strategy, phase, **kwargs)
+
+    monkeypatch.setattr(progress, "checkpoint", fail_before_apply_checkpoint)
+    with pytest.raises(OSError, match="checkpoint failure"):
+        await _engine(storage, ConsolidationStrategy.SEMANTIC_LINK, progress)._semantic_link(
+            ConsolidationReport(), dry_run=False
+        )
+
+    saved = result.synapses[0]
+    storage.synapses[saved.id] = dc_replace(saved, weight=saved.weight / 2)
+    monkeypatch.setattr(progress, "checkpoint", durable_checkpoint)
+    with pytest.raises(ConsolidationProgressError, match="changed after its checkpoint"):
+        await _engine(storage, ConsolidationStrategy.SEMANTIC_LINK, progress)._semantic_link(
+            ConsolidationReport(), dry_run=False
+        )
+    assert progress.strategy_state("semantic_link")["phase"] == "semantic_link_pending"
 
 
 @pytest.mark.asyncio
@@ -854,7 +1002,11 @@ async def test_semantic_link_resumes_after_first_durable_discovery_page(
         await _engine(storage, ConsolidationStrategy.SEMANTIC_LINK, progress)._semantic_link(
             ConsolidationReport(), dry_run=False
         )
-    assert len(storage.added_synapses) == 1
+    # The final partial apply group is fully durable before its pause is raised.
+    assert sorted(storage.added_synapses) == expected_synapse_ids
+    apply_checkpoint = progress.strategy_state("semantic_link")
+    assert apply_checkpoint["cursor"] == expected_synapse_ids[-1]
+    assert apply_checkpoint["counters"]["semantic_synapses_created"] == len(expected_synapse_ids)
 
     await _engine(storage, ConsolidationStrategy.SEMANTIC_LINK, progress)._semantic_link(
         ConsolidationReport(), dry_run=False
