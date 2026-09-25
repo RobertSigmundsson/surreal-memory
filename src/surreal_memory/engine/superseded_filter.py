@@ -9,7 +9,8 @@ escape hatch and the prose rebuild in one place, so every path has the same sema
 
 Filtering the fiber list is not enough: the pipeline prose also lists the anchor neuron of a
 matched fiber under "Related Information" (the top activations), so the rebuild excludes the
-anchors of dropped fibers and any activated neuron stamped ``_superseded``.
+anchors of dropped fibers and any activated neuron that belongs to a superseded fact — stamped
+``_superseded`` or found only in fibers with ``valid_until``.
 """
 
 from __future__ import annotations
@@ -29,6 +30,8 @@ logger = logging.getLogger(__name__)
 DISABLE_ENV = "SURREAL_MEMORY_DISABLE_SUPERSEDED_FILTER"
 # ``format_context`` lists at most this many activations under "Related Information".
 _RELATED_TOP_N = 20
+# Fibers looked up per activated neuron; a neuron in this many or more counts as shared (kept).
+_FIBERS_PER_NEURON = 20
 
 
 def superseded_filter_enabled() -> bool:
@@ -145,8 +148,48 @@ def _activations(result: Any, exclude: set[str]) -> dict[str, ActivationResult]:
     return acts
 
 
+async def _superseded_among(storage: Any, ids: list[str]) -> set[str]:
+    """Normalised ids among ``ids`` that the prose must not list: stamped ``_superseded``, or found
+    ONLY in superseded fibers (every fiber holding the neuron has ``typed_memory.valid_until``).
+
+    A neuron in no fiber, in a valid fiber, or in ``_FIBERS_PER_NEURON`` fibers or more (the lookup
+    is capped, the rest unknown) stays.
+    """
+    neurons = await storage.get_neurons_batch(ids)
+    out = {
+        norm_id(nid)
+        for nid, neuron in neurons.items()
+        if neuron is not None and (neuron.metadata or {}).get("_superseded") is True
+    }
+    rest = [nid for nid in ids if norm_id(nid) not in out]
+    if not rest:
+        return out
+    fibers = await storage.find_fibers_batch(rest, limit_per_neuron=_FIBERS_PER_NEURON)
+    if not fibers:
+        return out
+    typed = await storage.get_typed_memories_batch([f.id for f in fibers])
+    members = [({norm_id(x) for x in f.neuron_ids}, f.id) for f in fibers]
+    for nid in rest:
+        key = norm_id(nid)
+        holders = [fid for ids_in, fid in members if key in ids_in]
+        if (
+            holders
+            and len(holders) < _FIBERS_PER_NEURON
+            and all(
+                is_excluded_by_validity(typed.get(fid), valid_at=None, include_superseded=False)
+                for fid in holders
+            )
+        ):
+            out.add(key)
+    return out
+
+
 async def superseded_neurons(result: Any, storage: Any) -> set[str]:
-    """Normalised ids of the top activated neurons stamped ``_superseded`` (the prose candidates)."""
+    """Normalised ids of the activated neurons the prose would list that belong to superseded facts.
+
+    ``format_context`` lists the top ``_RELATED_TOP_N`` activations; leaving one out moves the next
+    into that window, so the window is re-checked until it holds no superseded neuron.
+    """
     levels = (getattr(result, "metadata", None) or {}).get("activation_levels")
     ids: list[str] = []
     if isinstance(levels, dict) and levels:
@@ -154,15 +197,16 @@ async def superseded_neurons(result: Any, storage: Any) -> set[str]:
     else:
         for co in getattr(result, "co_activations", []) or []:
             ids.extend(co.neuron_ids)
-    ids = list(dict.fromkeys(ids))[:_RELATED_TOP_N]
-    if not ids:
-        return set()
-    neurons = await storage.get_neurons_batch(ids)
-    return {
-        norm_id(nid)
-        for nid, neuron in neurons.items()
-        if neuron is not None and (neuron.metadata or {}).get("_superseded") is True
-    }
+    ids = list(dict.fromkeys(ids))
+    excluded: set[str] = set()
+    checked: set[str] = set()
+    while True:
+        window = [nid for nid in ids if norm_id(nid) not in excluded][:_RELATED_TOP_N]
+        fresh = [nid for nid in window if nid not in checked]
+        if not fresh:
+            return excluded
+        checked.update(fresh)
+        excluded |= await _superseded_among(storage, fresh)
 
 
 async def rebuild_context(
@@ -243,9 +287,9 @@ async def filter_superseded(
         for fid in matched
         if is_excluded_by_validity(typed.get(fid), valid_at=None, include_superseded=False)
     ]
-    # A superseded anchor can reach the prose without its fiber in the matched list: it is an
-    # activated neuron under "Related Information" (measured on a copy of the brain: 1 query of
-    # 136). Checking the top activations for the stamp costs one batch read of 20 neurons.
+    # A superseded fact can reach the prose without its fiber in the matched list: its anchor or
+    # another of its neurons is an activated neuron under "Related Information" (measured on a
+    # copy of the brain: the anchor in 1 query of 136, a neuron of the same fiber in 1 more).
     stamped = await superseded_neurons(result, storage)
     if not excluded and not stamped:
         return SupersededFilterOutcome(result)
