@@ -18,7 +18,6 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 import logging
-import os
 import random
 import re
 from dataclasses import dataclass
@@ -28,6 +27,14 @@ from uuid import uuid4
 
 from surreal_memory.engine.hooks import HookEvent
 from surreal_memory.engine.retrieval import DepthLevel
+from surreal_memory.engine.superseded_filter import (
+    encryptor_from_config,
+    excluded_anchor_ids,
+    is_excluded_by_validity,
+    norm_id,
+    rebuild_context,
+    superseded_neurons,
+)
 from surreal_memory.utils.timeutils import utcnow
 
 if TYPE_CHECKING:
@@ -92,59 +99,6 @@ class RecallOutcome:
     # skutki="odroczone": the post-answer side effects + trace, still running (hold a strong ref,
     # await it before the NEXT recall — the barrier keeps the state sequence identical to inline).
     pending: asyncio.Task[TraceStatus] | None = None
-
-
-async def _rebuild_context_for_fibers(
-    result: Any,
-    fiber_ids: list[str],
-    storage: Any,
-    *,
-    max_tokens: int,
-    brain_id: str,
-    clean_for_prompt: bool,
-) -> Any:
-    """Rebuild ``result.context`` from ``fiber_ids`` via ``format_context``.
-
-    Used after post-filtering drops fibers (e.g. a soft-forgotten memory) so the
-    answer prose reflects the surviving set instead of the pre-filter one. Falls
-    back to the original result on any issue. Pure w.r.t. the DB (read-only).
-    """
-    from surreal_memory.engine.activation import ActivationResult
-    from surreal_memory.engine.retrieval_context import format_context
-
-    fibers_ordered: list[Any] = []
-    for fid in fiber_ids:
-        fiber = await storage.get_fiber(fid)
-        if fiber:
-            fibers_ordered.append(fiber)
-    if not fibers_ordered:
-        return result
-
-    acts: dict[str, ActivationResult] = {}
-    for co in getattr(result, "co_activations", []) or []:
-        for nid in co.neuron_ids:
-            acts.setdefault(
-                nid,
-                ActivationResult(
-                    neuron_id=nid,
-                    activation_level=co.binding_strength,
-                    hop_distance=0,
-                    path=[nid],
-                    source_anchor=nid,
-                ),
-            )
-
-    new_ctx, _ = await format_context(
-        storage=storage,
-        activations=acts,
-        fibers=fibers_ordered,
-        max_tokens=max_tokens,
-        brain_id=brain_id,
-        clean_for_prompt=clean_for_prompt,
-    )
-    if new_ctx:
-        return _result_replace(result, context=new_ctx)
-    return result
 
 
 async def _rerank_by_recency(fiber_ids: list[str], storage: Any) -> list[str]:
@@ -212,8 +166,9 @@ def _superseded_hard_filter_enabled() -> bool:
     filter, in which case superseded facts still surface but are demoted 0.25x via
     their old anchor's ``_superseded`` neuron metadata (the second line of defence).
     """
-    raw = os.getenv("SURREAL_MEMORY_DISABLE_SUPERSEDED_FILTER", "").strip().lower()
-    return raw not in ("1", "true", "yes", "on")
+    from surreal_memory.engine.superseded_filter import superseded_filter_enabled
+
+    return superseded_filter_enabled()
 
 
 async def recall(
@@ -418,83 +373,6 @@ async def recall(
     if extras is not None:
         await extras.after_query(query)
 
-    # Budget-aware context re-formatting (opt-in via recall_token_budget param)
-    budget_stats: dict[str, Any] | None = None
-    raw_recall_budget = args.get("recall_token_budget")
-    if raw_recall_budget is not None and result.fibers_matched:
-        try:
-            recall_budget = min(int(raw_recall_budget), MAX_TOKEN_BUDGET)
-            from surreal_memory.engine.retrieval_context import format_context_budgeted
-            from surreal_memory.engine.token_budget import BudgetConfig
-
-            budget_cfg = BudgetConfig(
-                system_overhead_tokens=config.budget.system_overhead,
-                per_fiber_overhead=config.budget.per_fiber_overhead,
-            )
-
-            # Fetch fiber objects for matched fibers
-            candidate_fibers = []
-            for fid in result.fibers_matched:
-                f = await storage.get_fiber(fid)
-                if f:
-                    candidate_fibers.append(f)
-
-            # Build a minimal activations map from co_activations and neurons
-            from surreal_memory.engine.activation import ActivationResult
-
-            dummy_activations: dict[str, ActivationResult] = {}
-            for co in result.co_activations:
-                for nid in co.neuron_ids:
-                    if nid not in dummy_activations:
-                        dummy_activations[nid] = ActivationResult(
-                            neuron_id=nid,
-                            activation_level=co.binding_strength,
-                            hop_distance=0,
-                            path=[nid],
-                            source_anchor=nid,
-                        )
-
-            if candidate_fibers:
-                # Get encryptor if encryption is enabled
-                encryptor_obj = None
-                try:
-                    if config.encryption.enabled:
-                        from pathlib import Path as _Path
-
-                        from surreal_memory.safety.encryption import MemoryEncryptor
-
-                        keys_dir_str = getattr(config.encryption, "keys_dir", "")
-                        keys_dir = (
-                            _Path(keys_dir_str) if keys_dir_str else (config.data_dir / "keys")
-                        )
-                        encryptor_obj = MemoryEncryptor(keys_dir=keys_dir)
-                except Exception:
-                    pass
-
-                budgeted_ctx, _, allocation = await format_context_budgeted(
-                    storage=storage,
-                    activations=dummy_activations,
-                    fibers=candidate_fibers,
-                    max_tokens=recall_budget,
-                    encryptor=encryptor_obj,
-                    brain_id=brain_id,
-                    budget_config=budget_cfg,
-                    clean_for_prompt=clean_for_prompt,
-                )
-
-                from dataclasses import replace as _dc_replace
-
-                from surreal_memory.engine.token_budget import format_budget_report
-
-                budget_stats = format_budget_report(allocation)
-                # Replace the pipeline-generated context with budget-aware context
-                result = _dc_replace(result, context=budgeted_ctx)
-        except Exception:
-            logger.debug(
-                "Budget-aware recall failed (non-critical), using standard context",
-                exc_info=True,
-            )
-
     if result.confidence < min_confidence:
         return _out(
             {
@@ -520,6 +398,7 @@ async def recall(
     # (RetrievalResult); guard defensively so a non-list value can never make
     # ``list()``/iteration raise and abort recall.
     superseded_excluded = 0
+    superseded_excluded_neurons: set[str] = set()
     needs_post_filter = isinstance(result.fibers_matched, list) and bool(result.fibers_matched)
     if needs_post_filter:
         original_matched = list(result.fibers_matched)
@@ -536,24 +415,13 @@ async def recall(
                 if tm is not None and getattr(tm, "is_expired", False) is True:
                     continue
 
-                # Supersession / point-in-time filter (U3). tm is already fetched
-                # in this pass, so this adds ZERO extra storage reads.
-                if tm is not None:
-                    if valid_at is not None:
-                        # point-in-time: keep only facts that were valid then
-                        # ("where did Emma live before?").
-                        if not tm.is_valid_at(valid_at):
-                            superseded_excluded += 1
-                            continue
-                    elif (
-                        isinstance(tm.valid_until, datetime)
-                        and not include_superseded
-                        and _superseded_hard_filter_enabled()
-                    ):
-                        # default: hard-filter superseded facts (the one intended
-                        # default-behaviour change). Escape hatch keeps them (demoted).
-                        superseded_excluded += 1
-                        continue
+                # Supersession / point-in-time filter (U3), the predicate shared with every
+                # recall path (engine.superseded_filter). tm is already fetched in this pass.
+                if is_excluded_by_validity(
+                    tm, valid_at=valid_at, include_superseded=include_superseded
+                ):
+                    superseded_excluded += 1
+                    continue
 
                 # Trust filter
                 if min_trust is not None:
@@ -584,21 +452,99 @@ async def recall(
         # later stage rebuilds the answer text, regenerate context now so the
         # excluded memory can't linger in the returned prose (issue #36).
         fibers_were_dropped = len(result.fibers_matched) < len(original_matched)
-        will_rebuild_later = bool(args.get("prefer_recent")) or (
-            args.get("recall_token_budget") is not None
-        )
-        if fibers_were_dropped and recall_mode != "exact" and not will_rebuild_later:
+        if fibers_were_dropped:
+            # The prose lists the anchors of matched fibers under "Related Information";
+            # every later rebuild (this one, the budget pass, prefer_recent) leaves them out.
             try:
-                result = await _rebuild_context_for_fibers(
+                kept = set(result.fibers_matched)
+                dropped = [fid for fid in original_matched if fid not in kept]
+                superseded_excluded_neurons = await excluded_anchor_ids(storage, dropped)
+                superseded_excluded_neurons |= await superseded_neurons(result, storage)
+            except Exception:
+                logger.debug("Excluded-neuron lookup after filter failed", exc_info=True)
+        # Rebuild even when the budget pass or prefer_recent will rebuild again: if that later
+        # pass fails (its errors are non-critical), the pre-filter prose must not survive.
+        if fibers_were_dropped and recall_mode != "exact":
+            try:
+                result = await rebuild_context(
                     result,
                     list(result.fibers_matched),
                     storage,
+                    exclude_neuron_ids=superseded_excluded_neurons,
                     max_tokens=max_tokens,
                     brain_id=brain_id,
                     clean_for_prompt=clean_for_prompt,
+                    encryptor=encryptor_from_config(config),
                 )
             except Exception:
                 logger.debug("Context rebuild after filter failed", exc_info=True)
+
+    # Budget-aware context re-formatting (opt-in via recall_token_budget param). Runs AFTER the
+    # post-filter: before it, the budgeted prose was built from the pre-filter fibers and the
+    # filter's rebuild was skipped (`will_rebuild_later`), so a superseded fact leaked into it.
+    budget_stats: dict[str, Any] | None = None
+    raw_recall_budget = args.get("recall_token_budget")
+    if raw_recall_budget is not None and result.fibers_matched:
+        try:
+            recall_budget = min(int(raw_recall_budget), MAX_TOKEN_BUDGET)
+            from surreal_memory.engine.retrieval_context import format_context_budgeted
+            from surreal_memory.engine.token_budget import BudgetConfig
+
+            budget_cfg = BudgetConfig(
+                system_overhead_tokens=config.budget.system_overhead,
+                per_fiber_overhead=config.budget.per_fiber_overhead,
+            )
+
+            # Fetch fiber objects for matched fibers
+            candidate_fibers = []
+            for fid in result.fibers_matched:
+                f = await storage.get_fiber(fid)
+                if f:
+                    candidate_fibers.append(f)
+
+            # Build a minimal activations map from co_activations and neurons
+            from surreal_memory.engine.activation import ActivationResult
+
+            dummy_activations: dict[str, ActivationResult] = {}
+            for co in result.co_activations:
+                for nid in co.neuron_ids:
+                    if norm_id(nid) in superseded_excluded_neurons:
+                        continue
+                    if nid not in dummy_activations:
+                        dummy_activations[nid] = ActivationResult(
+                            neuron_id=nid,
+                            activation_level=co.binding_strength,
+                            hop_distance=0,
+                            path=[nid],
+                            source_anchor=nid,
+                        )
+
+            if candidate_fibers:
+                encryptor_obj = encryptor_from_config(config)
+
+                budgeted_ctx, _, allocation = await format_context_budgeted(
+                    storage=storage,
+                    activations=dummy_activations,
+                    fibers=candidate_fibers,
+                    max_tokens=recall_budget,
+                    encryptor=encryptor_obj,
+                    brain_id=brain_id,
+                    budget_config=budget_cfg,
+                    clean_for_prompt=clean_for_prompt,
+                )
+
+                from dataclasses import replace as _dc_replace
+
+                from surreal_memory.engine.token_budget import format_budget_report
+
+                budget_stats = format_budget_report(allocation)
+                # Replace the pipeline-generated context with budget-aware context
+                result = _dc_replace(result, context=budgeted_ctx)
+        except Exception:
+            logger.debug(
+                "Budget-aware recall failed (non-critical), using standard context",
+                exc_info=True,
+            )
 
     # Optional prefer_recent re-rank (agent-ergonomics).
     # Reorders surviving fibers newest-first AND rebuilds result.context so
@@ -627,6 +573,8 @@ async def recall(
                     acts: dict[str, ActivationResult] = {}
                     for co in result.co_activations:
                         for nid in co.neuron_ids:
+                            if norm_id(nid) in superseded_excluded_neurons:
+                                continue
                             acts.setdefault(
                                 nid,
                                 ActivationResult(

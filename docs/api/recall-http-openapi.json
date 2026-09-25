@@ -560,6 +560,17 @@
             ],
             "title": "Rerank Degraded Warning"
           },
+          "superseded_excluded_count": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Superseded Excluded Count"
+          },
           "trace_status": {
             "type": "string",
             "title": "Trace Status"

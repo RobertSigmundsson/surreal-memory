@@ -1,8 +1,9 @@
 """The ``smem recall`` semantics as ONE engine function, shared by the host CLI and the shim.
 
 ``recall_like_cli`` is the body ``smem recall`` has always run: depth from ``QueryRouter`` (unless
-given), ``ReflexPipeline.query`` with exactly four arguments (no engine session, no post-filter —
-unlike ``recall_api.recall``), the ``min_confidence`` threshold, freshness warnings and the
+given), ``ReflexPipeline.query`` with exactly four arguments (no engine session), the superseded
+filter shared with ``recall_api`` (``engine.superseded_filter`` — only ``valid_until``, none of
+``recall_api``'s expiry/trust/tier filters), the ``min_confidence`` threshold, freshness warnings and the
 reranker-degradation warning — returning the dict ``smem recall --json`` prints. The recall-http
 shim serves it on ``POST /v1/recall-cli`` so a thin ``smem`` client in a pod gets exactly what the
 host CLI gets (same function, same arguments), while ``/v1/recall`` keeps its own semantics.
@@ -25,6 +26,7 @@ from typing import Any, Final, Literal
 
 from surreal_memory.engine import recall_api
 from surreal_memory.engine.retrieval import DepthLevel, ReflexPipeline
+from surreal_memory.engine.superseded_filter import filter_superseded
 from surreal_memory.extraction.parser import QueryParser
 from surreal_memory.extraction.router import QueryRouter
 from surreal_memory.safety.freshness import evaluate_freshness, format_age
@@ -212,6 +214,18 @@ async def recall_like_cli(
         max_tokens=max_tokens,
         reference_time=utcnow(),
     )
+    # Superseded facts (typed_memory.valid_until set) leave the list AND the prose, the same
+    # semantics as recall_api (MCP, /v1/recall); the trace records the filtered list.
+    from surreal_memory.unified_config import get_config
+
+    filtr = await filter_superseded(
+        result,
+        storage,
+        max_tokens=max_tokens,
+        brain_id=getattr(storage, "brain_id", None) or getattr(brain, "id", "") or "",
+        config=get_config(),
+    )
+    result = filtr.result
     slad = await po_zapytaniu(result, depth_level.value)
 
     if result.confidence < min_confidence:
@@ -233,6 +247,8 @@ async def recall_like_cli(
         "fibers_matched": result.fibers_matched,
         "latency_ms": result.latency_ms,
     }
+    if filtr.excluded_fiber_ids:
+        response["superseded_excluded_count"] = len(filtr.excluded_fiber_ids)
 
     if show_routing:
         response["routing"] = {
