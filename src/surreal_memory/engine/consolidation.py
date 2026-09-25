@@ -61,6 +61,10 @@ _DEDUP_MAX_ANCHORS = 2000
 # finished one.
 _CHANGE_LOG_COLLAPSE_CAP = 200_000
 
+# A semantic-link manifest can be large, so checkpoint it at bounded apply
+# groups instead of rewriting it after every synapse.
+_SEMANTIC_LINK_APPLY_CHECKPOINT_BATCH = 50
+
 
 def _encode_prune_synapse_cursor(synapse: Synapse) -> str:
     """Serialize the stable (created_at, id) prune cursor into progress state."""
@@ -10692,10 +10696,34 @@ class ConsolidationEngine:
             raw_skipped = metrics.get("skipped_existing")
         skipped = int(raw_skipped) if isinstance(raw_skipped, (int, float)) else 0
         failures = int(counters.get("semantic_link_failures", 0))
+        applied_since_checkpoint = 0
+
+        async def checkpoint_apply() -> None:
+            nonlocal applied_since_checkpoint
+            if applied_since_checkpoint == 0:
+                return
+            await self._checkpoint_progress(
+                "semantic_link_apply",
+                cursor=cursor,
+                pending=[serialized],
+                counters={
+                    "semantic_synapses_created": created,
+                    "semantic_synapses_skipped": skipped,
+                    "semantic_link_failures": failures,
+                },
+            )
+            applied_since_checkpoint = 0
+
         for synapse in synapses:
             if cursor is not None and synapse.id <= cursor:
                 continue
-            await self._check_progress_budget()
+            try:
+                await self._check_progress_budget()
+            except ConsolidationPausedError:
+                # The per-row budget guard remains in place, while any writes
+                # since the last durable cursor are committed before pausing.
+                await checkpoint_apply()
+                raise
             existing = await self._storage.get_synapse(synapse.id)
             if existing is not None:
                 if (
@@ -10724,16 +10752,12 @@ class ConsolidationEngine:
                             "Semantic synapse write failed (not a duplicate)", exc_info=True
                         )
             cursor = synapse.id
-            await self._checkpoint_progress(
-                "semantic_link_apply",
-                cursor=cursor,
-                pending=[serialized],
-                counters={
-                    "semantic_synapses_created": created,
-                    "semantic_synapses_skipped": skipped,
-                    "semantic_link_failures": failures,
-                },
-            )
+            applied_since_checkpoint += 1
+            if applied_since_checkpoint >= _SEMANTIC_LINK_APPLY_CHECKPOINT_BATCH:
+                await checkpoint_apply()
+
+        # Persist the final partial group before marking the stage complete.
+        await checkpoint_apply()
 
         await self._checkpoint_progress(
             "semantic_link_complete",
