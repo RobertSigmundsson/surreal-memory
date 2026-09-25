@@ -146,9 +146,9 @@ async def test_escape_hatch_keeps_superseded(monkeypatch: pytest.MonkeyPatch) ->
 async def test_fiber_without_typed_memory_is_never_excluded() -> None:
     storage, ids = await _brain()
     res = _result(ids, [ids["f_plain"]])
-    del res.metadata["activation_levels"][
-        ids["n_stamped"]
-    ]  # isolate the list property from the stamp check
+    # isolate the list property from the prose check: no activated neuron of a superseded fact
+    for key in ("n_stamped", "n_old"):
+        del res.metadata["activation_levels"][ids[key]]
     out = await sf.filter_superseded(res, storage, max_tokens=500, brain_id=BRAIN)
     assert out.result is res
 
@@ -229,3 +229,79 @@ async def test_stamped_activation_without_its_fiber_is_removed_from_prose() -> N
     assert out.result.fibers_matched == [ids["f_new"], ids["f_plain"]]
     assert STAMPED not in out.result.context and NEW in out.result.context
     assert out.context_rebuilt is True and out.excluded_fiber_ids == []
+
+
+ENT_OLD = "DH-13 petla zamknieta fragment starego wspomnienia"
+ENT_SHARED = "Neuron wspolny starego i nowego wspomnienia"
+
+
+async def _brain_entities() -> tuple[InMemoryStorage, dict[str, str]]:
+    """The old fiber also holds an entity neuron of its own and one shared with the new fiber."""
+    storage, ids = await _brain()
+    for key, text in (("ent", ENT_OLD), ("shared", ENT_SHARED)):
+        neuron = Neuron.create(type=NeuronType.ENTITY, content=text)
+        await storage.add_neuron(neuron)
+        ids[f"n_{key}"] = neuron.id
+    old = await storage.get_fiber(ids["f_old"])
+    new = await storage.get_fiber(ids["f_new"])
+    assert old is not None and new is not None
+    await storage.update_fiber(
+        Fiber(**{**old.__dict__, "neuron_ids": old.neuron_ids | {ids["n_ent"], ids["n_shared"]}})
+    )
+    await storage.update_fiber(
+        Fiber(**{**new.__dict__, "neuron_ids": new.neuron_ids | {ids["n_shared"]}})
+    )
+    return storage, ids
+
+
+def _result_entities(ids: dict[str, str], fibers: list[str]) -> RetrievalResult:
+    res = _result(ids, fibers)
+    res.metadata["activation_levels"] = {
+        ids["n_ent"]: 0.95,
+        ids["n_shared"]: 0.9,
+        ids["n_new"]: 0.8,
+        ids["n_plain"]: 0.7,
+    }
+    return res
+
+
+async def test_neuron_found_only_in_superseded_fibers_left_out_of_prose() -> None:
+    """E15 (measured on a brain copy, query T08): with the old anchor excluded, a shorter neuron of
+    the SAME superseded memory took its place under "Related Information"."""
+    storage, ids = await _brain_entities()
+    res = _result_entities(ids, [ids["f_new"], ids["f_plain"]])
+    out = await sf.filter_superseded(res, storage, max_tokens=500, brain_id=BRAIN)
+    assert ENT_OLD not in out.result.context
+    assert sf.norm_id(ids["n_ent"]) in out.excluded_neuron_ids
+    assert ENT_SHARED in out.result.context  # also in a valid fiber: stays
+    assert out.result.fibers_matched == [ids["f_new"], ids["f_plain"]]
+
+
+async def test_control_entity_of_superseded_fiber_is_in_prose_without_exclusion() -> None:
+    """Positive control: the rebuild with only the stamp check keeps the old entity text."""
+    storage, ids = await _brain_entities()
+    res = _result_entities(ids, [ids["f_new"], ids["f_plain"]])
+    rebuilt = await sf.rebuild_context(
+        res,
+        [ids["f_new"], ids["f_plain"]],
+        storage,
+        exclude_neuron_ids=set(),
+        max_tokens=500,
+        brain_id=BRAIN,
+    )
+    assert ENT_OLD in rebuilt.context
+
+
+async def test_refilled_window_is_checked_too(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Leaving a neuron out moves the next one into the listed window; that one is checked as well."""
+    monkeypatch.setattr(sf, "_RELATED_TOP_N", 1)
+    storage, ids = await _brain_entities()
+    res = _result_entities(ids, [ids["f_new"], ids["f_plain"]])
+    res.metadata["activation_levels"] = {
+        ids["n_stamped"]: 0.99,
+        ids["n_ent"]: 0.95,
+        ids["n_plain"]: 0.7,
+    }
+    out = await sf.filter_superseded(res, storage, max_tokens=500, brain_id=BRAIN)
+    assert {sf.norm_id(ids["n_stamped"]), sf.norm_id(ids["n_ent"])} <= set(out.excluded_neuron_ids)
+    assert ENT_OLD not in out.result.context and STAMPED not in out.result.context

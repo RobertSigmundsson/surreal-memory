@@ -14,7 +14,9 @@ built AFTER the post-filter, so the superseded filter also covers it — the sto
 from ``get_fiber x2, get_typed_memory x2`` to ``get_typed_memory x2, get_fiber x2``; the response
 bytes are unchanged. And every scenario that runs the pipeline gains ONE read,
 ``storage.get_neurons_batch`` of the top activations — the check for a superseded anchor that
-reached the prose without its fiber. Both edited in the fixture by hand, not regenerated.
+reached the prose without its fiber — followed by ONE ``storage.find_fibers_batch`` of the
+unstamped ones (a neuron found only in superseded fibers is left out of the prose too). All
+edited in the fixture by hand, not regenerated.
 """
 
 from __future__ import annotations
