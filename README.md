@@ -19,24 +19,27 @@ Restart your AI tool. Your agent now remembers.
 
 ---
 
-## What's new in 3.11.0
+## What's new in 3.12.0
 
-- Recall can use BM25-ranked keyword anchors and indexed semantic anchors across
-  the whole brain. An optional fiber-vector retriever can also surface a fiber
-  whose neurons did not win an anchor search; existing fibers need a deliberate
-  vector backfill before enabling it.
-- Creation age and an explicitly requested priority now affect recall ranking.
-  Confidence is reduced when no embedding or fiber-vector anchor grounds a
-  match, even if keyword anchors are present.
-- Brain snapshots retain the persisted fiber fields and stored fiber vectors.
-  `smem brain recall-check` samples stored summaries through normal recall to
-  report self-recall separately from the health score.
-- `auto_capture_mode = "off"` now disables automatic writes. Auto-classified
-  decisions, errors, tools, and predictions no longer receive an implicit
-  expiry; explicit expiry settings still apply.
+- Consolidation now advances through bounded, durable work units. Interrupted
+  runs can resume from committed checkpoints, including semantic-link
+  discovery, deduplication, fiber censuses, compression, and lifecycle work.
+- Semantic-link discovery limits candidate memory and records source revisions
+  so stale or repeatedly changing source data can be detected and recovered
+  safely instead of replaying unbounded work.
+- Pruning and retention resume between committed substeps after errors, and
+  indexed keyset scans keep large graph operations bounded.
+- The schema migration carries compatible unfinished v3.11 checkpoints
+  forward while preserving their phase data and `3.11.0:checkpoint-v1`
+  compatibility marker. Package-version bumps do not invalidate this v1
+  checkpoint epoch; incompatible formats, schema state, or run parameters
+  remain fenced off from resume.
+- Reranker requests that exceed context limits are split without losing
+  candidate scores, and OpenAI-compatible embedding credentials are isolated
+  from unrelated provider requests.
 
 See [CHANGELOG.md](CHANGELOG.md) for migration details and the complete list of
-changes.
+changes. For earlier releases, see the changelog.
 
 ---
 

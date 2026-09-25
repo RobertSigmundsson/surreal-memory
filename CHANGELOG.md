@@ -7,9 +7,65 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.12.0] — 2026-09-25 — consolidation can resume its committed work
+
+Large maintenance runs now make bounded progress and can continue from durable
+checkpoints after interruption. Semantic discovery also detects source changes
+that invalidate its saved work, while pruning, retention, compression, and
+fiber-wide operations avoid relying on unbounded in-memory scans.
+
+### Added
+
+- Durable consolidation progress tracks committed work across bounded strategy
+  steps. Runs can resume across process interruptions, with lease fencing and
+  replay-safe tool events preventing competing workers or duplicate effects.
+- Semantic-link discovery stores bounded staged state and source-revision
+  fences. It can resume discovery across checkpoints, detect stale work when
+  source records change, and recover safely when source drift repeats.
+- Keyset-paged fiber censuses, maturation reads, compression, and activity
+  scans keep large maintenance jobs from requiring whole collections in memory.
+
+### Changed
+
+- Consolidation strategies and pruning advance through durable, committed
+  substeps. Retention resumes from its last committed phase after an error
+  rather than restarting already-completed work.
+- Alias-pair checks use source indexes, unused connectivity queries are
+  removed from prune scans, and semantic-link candidate collection has a
+  bounded memory footprint.
+- Schema migration advances compatible unfinished v3.11 consolidation
+  checkpoint metadata to schema v12 while retaining its phase, cursor, and
+  counters. Checkpoints with a different engine or progress-format marker are
+  left untouched.
+
 ### Fixed
 
-- **Resumable semantic-link discovery** — discovery and similarity progress now checkpoint durably and resume from committed cursors/rows; changed source data invalidates stale progress.
+- Compression preserves backups and resumes fiber processing safely, including
+  compatibility with older stored compression state.
+- Context-overflow reranker requests split into smaller requests without
+  dropping or resetting candidate scores.
+- Embedding credentials for OpenAI-compatible providers are isolated from
+  unrelated provider requests.
+- Semantic discovery safely recovers unapplied legacy work, tolerates
+  unchanged changefeed metadata, handles barriers across changefeed cursors,
+  and safely restarts stale checkpoints.
+- Semantic-link apply checkpoints batch their updates, and keyset range scans
+  remain bounded at page boundaries.
+- Optional SDK-specific test fences no longer fail installations without that
+  optional package.
+
+### Compatibility and rollout
+
+- The database schema advances to v12 through the normal startup migration.
+  Take the usual database backup before deploying, particularly when a
+  consolidation may be in progress.
+- Compatible v3.11 progress records retain the `3.11.0:checkpoint-v1` engine
+  marker; the marker is a checkpoint-compatibility identifier, not a package
+  version field, and it remains stable across compatible package releases.
+  Migration advances schema metadata without rewriting a checkpoint phase,
+  cursor, or counters. v3.12 can resume a compatible v3.11 checkpoint when its
+  schema, progress format, run options, and requested strategies still match;
+  incompatible markers and formats remain fenced off and are not rewritten.
 
 ## [3.11.0] — 2026-09-23 — recall reaches the right memories and checks its work
 
