@@ -126,6 +126,7 @@ async def test_control_without_exclusion_old_text_is_in_related_information() ->
 async def test_nothing_to_exclude_returns_the_same_object() -> None:
     storage, ids = await _brain(old_closed=False)
     res = _result(ids, [ids["f_old"], ids["f_new"], ids["f_plain"]])
+    del res.metadata["activation_levels"][ids["n_stamped"]]  # no stamped activation either
     out = await sf.filter_superseded(res, storage, max_tokens=500, brain_id=BRAIN)
     assert out.result is res
     assert out.excluded_fiber_ids == []
@@ -145,6 +146,9 @@ async def test_escape_hatch_keeps_superseded(monkeypatch: pytest.MonkeyPatch) ->
 async def test_fiber_without_typed_memory_is_never_excluded() -> None:
     storage, ids = await _brain()
     res = _result(ids, [ids["f_plain"]])
+    del res.metadata["activation_levels"][
+        ids["n_stamped"]
+    ]  # isolate the list property from the stamp check
     out = await sf.filter_superseded(res, storage, max_tokens=500, brain_id=BRAIN)
     assert out.result is res
 
@@ -210,3 +214,18 @@ def test_predicate_matches_recall_api_semantics() -> None:
         is False
     )
     assert sf.is_excluded_by_validity(tm, valid_at=now, include_superseded=False) is True
+
+
+async def test_stamped_activation_without_its_fiber_is_removed_from_prose() -> None:
+    """Residual leak (K2 on a brain copy): the superseded anchor is only an ACTIVATED neuron, its fiber
+    is not in the matched list — the prose must still leave it out."""
+    storage, ids = await _brain(old_closed=False)  # nothing to exclude from the list
+    res = _result(ids, [ids["f_new"], ids["f_plain"]])
+    res = sf._replace(
+        res,
+        context=f"## Relevant Memories\n- {NEW}\n\n## Related Information\n- [concept] {STAMPED}",
+    )
+    out = await sf.filter_superseded(res, storage, max_tokens=500, brain_id=BRAIN)
+    assert out.result.fibers_matched == [ids["f_new"], ids["f_plain"]]
+    assert STAMPED not in out.result.context and NEW in out.result.context
+    assert out.context_rebuilt is True and out.excluded_fiber_ids == []

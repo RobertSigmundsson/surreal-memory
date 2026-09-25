@@ -227,8 +227,9 @@ async def filter_superseded(
 
     Only ``valid_until`` excludes here (no expiry, trust or tier) — a path that never had those
     filters keeps its ranking for every fiber that is not superseded. Fibers without a
-    ``typed_memory`` row stay. Nothing excluded (or the escape hatch set) returns the SAME
-    ``result`` object, so the prose is byte-identical to the unfiltered path. ``config`` (a
+    ``typed_memory`` row stay. A matched list without a superseded fiber still gets its prose
+    rebuilt when a top activation is stamped ``_superseded``. Nothing to exclude (or the escape
+    hatch set) returns the SAME ``result`` object, so the prose is byte-identical. ``config`` (a
     ``UnifiedConfig``) supplies the encryptor lazily, only when a rebuild is needed.
     """
     if not superseded_filter_enabled():
@@ -242,11 +243,14 @@ async def filter_superseded(
         for fid in matched
         if is_excluded_by_validity(typed.get(fid), valid_at=None, include_superseded=False)
     ]
-    if not excluded:
+    # A superseded anchor can reach the prose without its fiber in the matched list: it is an
+    # activated neuron under "Related Information" (measured on a copy of the brain: 1 query of
+    # 136). Checking the top activations for the stamp costs one batch read of 20 neurons.
+    stamped = await superseded_neurons(result, storage)
+    if not excluded and not stamped:
         return SupersededFilterOutcome(result)
     kept = [fid for fid in matched if fid not in set(excluded)]
-    exclude_neurons = await excluded_anchor_ids(storage, excluded)
-    exclude_neurons |= await superseded_neurons(result, storage)
+    exclude_neurons = await excluded_anchor_ids(storage, excluded) | stamped
     if encryptor is None and config is not None:
         encryptor = encryptor_from_config(config)
     filtered = _replace(result, fibers_matched=kept)

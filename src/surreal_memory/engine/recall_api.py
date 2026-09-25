@@ -452,19 +452,21 @@ async def recall(
         # later stage rebuilds the answer text, regenerate context now so the
         # excluded memory can't linger in the returned prose (issue #36).
         fibers_were_dropped = len(result.fibers_matched) < len(original_matched)
-        if fibers_were_dropped:
-            # The prose lists the anchors of matched fibers under "Related Information";
-            # every later rebuild (this one, the budget pass, prefer_recent) leaves them out.
-            try:
-                kept = set(result.fibers_matched)
-                dropped = [fid for fid in original_matched if fid not in kept]
+        # The prose lists the anchors of matched fibers — and the top activations — under
+        # "Related Information"; every later rebuild (this one, the budget pass, prefer_recent)
+        # leaves out the anchors of dropped fibers and any activation stamped `_superseded`.
+        try:
+            kept = set(result.fibers_matched)
+            dropped = [fid for fid in original_matched if fid not in kept]
+            if fibers_were_dropped:
                 superseded_excluded_neurons = await excluded_anchor_ids(storage, dropped)
+            if _superseded_hard_filter_enabled() and not include_superseded and valid_at is None:
                 superseded_excluded_neurons |= await superseded_neurons(result, storage)
-            except Exception:
-                logger.debug("Excluded-neuron lookup after filter failed", exc_info=True)
+        except Exception:
+            logger.debug("Excluded-neuron lookup after filter failed", exc_info=True)
         # Rebuild even when the budget pass or prefer_recent will rebuild again: if that later
         # pass fails (its errors are non-critical), the pre-filter prose must not survive.
-        if fibers_were_dropped and recall_mode != "exact":
+        if (fibers_were_dropped or superseded_excluded_neurons) and recall_mode != "exact":
             try:
                 result = await rebuild_context(
                     result,

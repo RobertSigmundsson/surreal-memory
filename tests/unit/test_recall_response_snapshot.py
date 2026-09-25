@@ -12,7 +12,9 @@ Regenerate ONLY on the pre-refactor tree:
 One deliberate change since: in ``budzet`` (``recall_token_budget``) the budgeted prose is now
 built AFTER the post-filter, so the superseded filter also covers it — the storage reads swap
 from ``get_fiber x2, get_typed_memory x2`` to ``get_typed_memory x2, get_fiber x2``; the response
-bytes are unchanged. Edited in the fixture by hand, not regenerated.
+bytes are unchanged. And every scenario that runs the pipeline gains ONE read,
+``storage.get_neurons_batch`` of the top activations — the check for a superseded anchor that
+reached the prose without its fiber. Both edited in the fixture by hand, not regenerated.
 """
 
 from __future__ import annotations

@@ -109,8 +109,14 @@ def _server() -> MCPServer:
         return MCPServer()
 
 
-async def _recall(server: MCPServer, args: dict[str, Any]) -> dict[str, Any]:
-    tms = _tms()
+async def _recall(
+    server: MCPServer,
+    args: dict[str, Any],
+    *,
+    tms: dict[str, TypedMemory] | None = None,
+    wynik: RetrievalResult | None = None,
+) -> dict[str, Any]:
+    tms = tms if tms is not None else _tms()
     storage = AsyncMock()
     storage.get_brain = AsyncMock(return_value=MagicMock(id="test-brain", config=MagicMock()))
     storage._current_brain_id = "test-brain"
@@ -130,7 +136,7 @@ async def _recall(server: MCPServer, args: dict[str, Any]) -> dict[str, Any]:
         patch.object(server, "_passive_capture", new_callable=AsyncMock),
     ):
         pipeline = AsyncMock()
-        pipeline.query = AsyncMock(return_value=_result())
+        pipeline.query = AsyncMock(return_value=wynik if wynik is not None else _result())
         pipeline_cls.return_value = pipeline
         return await server.call_tool(
             "smem_recall", {"query": "where does emma live", "include_citations": False, **args}
@@ -172,3 +178,50 @@ async def test_control_escape_hatch_keeps_the_old_prose(monkeypatch: pytest.Monk
     res = await _recall(_server(), {})
     assert res["fibers_matched"] == ["f-oslo", "f-bergen"]
     assert OSLO in res["answer"]
+
+
+STARE = "Stary rozkaz odwolany juz wczesniej przez inny wpis"
+
+
+def _nic_do_wykluczenia() -> tuple[dict[str, TypedMemory], RetrievalResult]:
+    tms = _tms()
+    tms["f-oslo"] = TypedMemory(
+        fiber_id="f-oslo",
+        memory_type=MemoryType.FACT,
+        priority=Priority.from_int(5),
+        provenance=Provenance(source="test"),
+        created_at=utcnow(),
+        valid_from=utcnow(),
+    )
+    wynik = _result()
+    wynik.metadata["activation_levels"]["anchor-stare"] = 0.95
+    return tms, wynik
+
+
+async def test_stamped_activation_leaves_mcp_prose_with_nothing_dropped(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _NEURONS["anchor-stare"] = Neuron.create(
+        type=NeuronType.CONCEPT,
+        content=STARE,
+        neuron_id="anchor-stare",
+        metadata={"_superseded": True},
+    )
+    try:
+        tms, wynik = _nic_do_wykluczenia()
+        res = await _recall(_server(), {}, tms=tms, wynik=wynik)
+        assert res["fibers_matched"] == ["f-oslo", "f-bergen"]  # list untouched
+        assert (
+            "Related Information" in res["answer"]
+        )  # prose REBUILT (the fixture prose has no such section)
+        assert (
+            STARE not in res["answer"] and OSLO in res["answer"]
+        )  # STARE is the top activation (0.95) — excluded
+        monkeypatch.setenv(
+            "SURREAL_MEMORY_DISABLE_SUPERSEDED_FILTER", "1"
+        )  # control: the escape hatch keeps it
+        tms, wynik = _nic_do_wykluczenia()
+        res2 = await _recall(_server(), {}, tms=tms, wynik=wynik)
+        assert "superseded_excluded_count" not in res2
+    finally:
+        _NEURONS.pop("anchor-stare")
