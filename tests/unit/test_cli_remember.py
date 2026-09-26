@@ -62,11 +62,11 @@ def test_remember_json_shape_and_stored_attribution() -> None:
         "neurons_created",
         "neurons_linked",
         "synapses_created",
-        "expires_in_days",
     ]
     assert out["message"] == f"Remembered: {TEXT[:50]}..."
     assert (out["memory_type"], out["priority"]) == ("decision", "normal")
-    assert out["neurons_created"] > 0 and out["expires_in_days"] >= 89
+    # #252 (contract #196): an auto-classified DECISION carries no implicit expiry.
+    assert out["neurons_created"] > 0 and "expires_in_days" not in out
     typed = _typed(storage)
     assert len(typed) == 1
     tm = typed[0]
@@ -77,6 +77,16 @@ def test_remember_json_shape_and_stored_attribution() -> None:
     )
     assert tm.provenance.created_by == "user"
     assert set(tm.tags) == {"k4"}
+    assert tm.expires_at is None
+
+
+def test_remember_explicit_expiry_still_applies() -> None:
+    storage = _storage()
+    res = _invoke(storage, ["remember", TEXT, "--type", "decision", "--expires", "7", "--json"])
+    assert res.exit_code == 0, res.output
+    out = json.loads(res.stdout)
+    assert out["expires_in_days"] in (6, 7)
+    assert _typed(storage)[0].expires_at is not None
 
 
 def test_remember_fact_without_default_expiry_has_no_expiry_key() -> None:

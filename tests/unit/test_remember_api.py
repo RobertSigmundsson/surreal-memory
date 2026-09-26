@@ -138,7 +138,12 @@ def test_type_expiry_priority_resolution() -> None:
         ra.resolve_memory_type("nieznany", TEXT)
     assert "fact" in exc.value.valid
     assert isinstance(ra.resolve_memory_type(None, TEXT), MemoryType)
-    assert ra.resolve_expiry_days(MemoryType.DECISION, None, ephemeral=False) == 90
+    # #252 (contract #196): no implicit expiry for auto-classified types; explicit TTL still wins.
+    assert ra.resolve_expiry_days(MemoryType.DECISION, None, ephemeral=False) is None
+    assert ra.resolve_expiry_days(MemoryType.ERROR, None, ephemeral=False) is None
+    assert ra.resolve_expiry_days(MemoryType.TOOL, None, ephemeral=False) is None
+    assert ra.resolve_expiry_days(MemoryType.DECISION, 7, ephemeral=False) == 7
+    assert ra.resolve_expiry_days(MemoryType.TODO, None, ephemeral=False) == 30
     assert ra.resolve_expiry_days(MemoryType.FACT, None, ephemeral=False) is None
     assert ra.resolve_expiry_days(MemoryType.FACT, None, ephemeral=True) == 1
     assert ra.resolve_expiry_days(MemoryType.DECISION, 7, ephemeral=True) == 7
