@@ -1443,3 +1443,68 @@ class TestTitleIdf:
         idf = _move_idf([["verify"], ["verify"]])
         assert idf["verify"] > 0.0
         assert _move_idf([]) == {}
+
+
+class _StopBeforeWriteError(Exception):
+    pass
+
+
+async def test_merge_key_finds_a_twin_beyond_the_first_page(
+    tmp_path: Path, no_embedder: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from dataclasses import replace as _replace
+
+    import surreal_memory.engine.reasoning_distiller as rd
+
+    storage = InMemoryStorage()
+    storage.set_brain(BRAIN)
+    cfg = _ucfg(tmp_path)
+    await _seed_batch(storage, "claude-fable-5", "a", _MERGE_BATCH_A)
+    await distill_reasoning_patterns(storage, BRAIN, cfg)
+    # Unrelated fibers whose ids sort BEFORE the pattern fiber, and a one-row page:
+    # the twin is only reachable by walking past page 1.
+    for i in range(3):
+        dummy = Fiber.create(neuron_ids={"n"}, synapse_ids=set(), anchor_neuron_id="n")
+        await storage.add_fiber(_replace(dummy, id=f"00000000-0000-4000-8000-00000000000{i}"))
+    monkeypatch.setattr(rd, "_PATTERN_PAGE_SIZE", 1)
+
+    await _seed_batch(storage, "claude-fable-5", "b", _MERGE_BATCH_B)
+    second = await distill_reasoning_patterns(storage, BRAIN, cfg)
+
+    fibers = await storage.find_fibers(metadata_key="_reasoning_pattern", limit=100)
+    assert len(fibers) == 1
+    assert (second.patterns_learned, second.patterns_merged) == (0, 1)
+    assert fibers[0].metadata["_reasoning_frequency"] == 6
+
+
+async def test_pending_pattern_replays_through_the_merge_path_once(
+    tmp_path: Path, no_embedder: None
+) -> None:
+    storage = InMemoryStorage()
+    storage.set_brain(BRAIN)
+    cfg = _ucfg(tmp_path)
+    await _seed_batch(storage, "claude-fable-5", "a", _MERGE_BATCH_A)
+    await distill_reasoning_patterns(storage, BRAIN, cfg)
+
+    captured: list[dict[str, object]] = []
+
+    async def crash_after_naming(patterns: object) -> None:
+        batch = list(patterns)  # type: ignore[call-overload]
+        if batch:
+            captured.extend(batch)
+            raise _StopBeforeWriteError  # the process "dies" before the database write
+
+    await _seed_batch(storage, "claude-fable-5", "b", _MERGE_BATCH_B)
+    with pytest.raises(_StopBeforeWriteError):
+        await distill_reasoning_patterns(storage, BRAIN, cfg, pattern_checkpoint=crash_after_naming)
+    assert len(captured) == 1
+
+    first = await distill_reasoning_patterns(storage, BRAIN, cfg, pending_patterns=captured)
+    again = await distill_reasoning_patterns(storage, BRAIN, cfg, pending_patterns=captured)
+
+    fibers = await storage.find_fibers(metadata_key="_reasoning_pattern", limit=100)
+    assert len(fibers) == 1
+    assert (first.patterns_learned, first.patterns_merged) == (0, 1)
+    assert (again.patterns_learned, again.patterns_merged) == (0, 0)
+    assert fibers[0].metadata["_reasoning_frequency"] == 6
+    assert len(fibers[0].metadata["_reasoning_signatures"]) == 2
