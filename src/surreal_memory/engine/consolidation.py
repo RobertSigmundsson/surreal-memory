@@ -506,6 +506,13 @@ class ConsolidationReport:
         states = int(self.extra.get("lifecycle_states_updated", 0))
         if states:
             lines.append(f"  Lifecycle states updated: {states}")
+        shadow = self.extra.get("prune_shadow")
+        if isinstance(shadow, dict):
+            line = f"  Prune shadow (F6): {int(shadow.get('recorded', 0))} guarded orphans recorded"
+            failed = int(shadow.get("failed", 0))
+            if failed:
+                line += f" [{failed} rows FAILED to record]"
+            lines.append(line)
         return lines
 
     def _compress_deferred_line(self) -> str | None:
@@ -1464,7 +1471,9 @@ class ConsolidationEngine:
             if phase == "neuron_pending" and pending:
                 neuron_cursor = cursor
 
-        async def _neuron_candidates(neurons: list[Neuron]) -> list[str]:
+        async def _neuron_candidates(
+            neurons: list[Neuron], shadow: list[dict[str, Any]] | None = None
+        ) -> list[str]:
             if not neurons:
                 return []
             neuron_ids = [neuron.id for neuron in neurons]
@@ -1483,13 +1492,48 @@ class ConsolidationEngine:
                     continue
                 state = states.get(neuron.id)
                 access_frequency = state.access_frequency if state else 0
+                age_days = (reference_time - neuron.created_at).total_seconds() / 86400
+                # F6 counterfactual (observability, never deletes): an isolated neuron kept
+                # ONLY by the access/age guard is one a pinned-only policy would have cut.
+                if shadow is not None and (access_frequency > 0 or age_days < dead_neuron_days):
+                    shadow.append(
+                        {
+                            "neuron_id": neuron.id,
+                            "preview": (neuron.content or "")[:120],
+                            "age_days": round(age_days, 2),
+                            "access_frequency": access_frequency,
+                            "connections": 0,
+                            "reason": "accessed" if access_frequency > 0 else "young",
+                        }
+                    )
                 if access_frequency > 0:
                     continue
-                age_days = (reference_time - neuron.created_at).total_seconds() / 86400
                 if age_days < dead_neuron_days:
                     continue
                 eligible.append(neuron.id)
             return eligible
+
+        shadow_recorded = 0
+        shadow_failed = 0
+
+        async def _record_prune_shadow(rows: list[dict[str, Any]]) -> None:
+            # One write per keyset page (<= neuron_page_size rows); written in dry-run too,
+            # because the table is the observation, not a graph mutation. A failed write
+            # never aborts prune, but it is counted and logged, not swallowed.
+            nonlocal shadow_recorded, shadow_failed
+            record = getattr(self._storage, "record_prune_shadow", None)
+            try:
+                if record is None:
+                    raise NotImplementedError("storage has no record_prune_shadow")
+                shadow_recorded += int(await record(rows))
+            except Exception:
+                shadow_failed += len(rows)
+                logger.warning(
+                    "prune_shadow: %d rows NOT recorded (observability only; prune continues)",
+                    len(rows),
+                    exc_info=True,
+                )
+            report.extra["prune_shadow"] = {"recorded": shadow_recorded, "failed": shadow_failed}
 
         async def _finish_neuron_pending(ids: list[str], page_cursor: str | None) -> None:
             nonlocal neurons_pruned
@@ -1536,7 +1580,12 @@ class ConsolidationEngine:
                 break
             await asyncio.sleep(0)
 
-            candidates = await _neuron_candidates(page)
+            shadow_rows: list[dict[str, Any]] | None = (
+                [] if self._config.prune_shadow_enabled else None
+            )
+            candidates = await _neuron_candidates(page, shadow_rows)
+            if shadow_rows:
+                await _record_prune_shadow(shadow_rows)
             next_cursor = page[-1].id
             neuron_pages += 1
             counters.update(

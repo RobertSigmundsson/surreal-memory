@@ -501,6 +501,16 @@ def consolidate(
     min_inactive_days: Annotated[
         float, typer.Option("--min-inactive-days", help="Minimum inactive days before pruning")
     ] = 7.0,
+    prune_shadow: Annotated[
+        bool,
+        typer.Option(
+            "--prune-shadow/--no-prune-shadow",
+            help=(
+                "Record to prune_shadow the isolated neurons kept only by the access/age guard "
+                "(observability; deletes nothing). Written in --dry-run too."
+            ),
+        ),
+    ] = False,
 ) -> None:
     """Consolidate brain memories by pruning, merging, or summarizing.
 
@@ -587,6 +597,7 @@ def consolidate(
             prune_weight_threshold=prune_threshold,
             prune_min_inactive_days=min_inactive_days,
             merge_overlap_threshold=merge_overlap,
+            prune_shadow_enabled=prune_shadow,
         )
 
         delta = await run_with_delta(
