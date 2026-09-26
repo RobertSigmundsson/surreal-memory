@@ -84,7 +84,35 @@ POOL_STATS: dict[str, int] = {
     "reconnect": 0,
     "warm_ok": 0,
     "warm_fail": 0,
+    # #255 context-overflow splits, on either transport: a split is extra requests on a
+    # recall's critical path, so it is counted rather than left to be inferred.
+    "context_split": 0,
 }
+
+
+class RerankHTTPError(RuntimeError):
+    """An HTTP error status from ``/rerank`` on the pooled (``http.client``) path.
+
+    The urllib path raises ``urllib.error.HTTPError``; the pooled path used to raise a bare
+    ``RuntimeError`` and dropped the body, so #255's context-overflow split could never see it.
+    The body is already read (the connection stays reusable); ``str()`` keeps the old text.
+    """
+
+    def __init__(self, status: int, body: bytes) -> None:
+        super().__init__(f"reranker HTTP {status}")
+        self.status = status
+        self.body = body
+
+
+def _is_context_overflow(exc: Exception) -> bool:
+    """#255's predicate on either transport: HTTP 400 whose body names the context limit."""
+    if isinstance(exc, RerankHTTPError):
+        detail = exc.body.lower() if exc.status == 400 else b""
+    elif isinstance(exc, urllib.error.HTTPError):
+        detail = exc.read().lower() if exc.code == 400 else b""
+    else:
+        return False
+    return b"maximum context length" in detail and b"input_tokens" in detail
 
 
 def _endpoint_lock(endpoint: str) -> threading.Lock:
@@ -349,14 +377,14 @@ class HttpReranker:
             headers["Authorization"] = f"Bearer {self._api_key}"
         try:
             data = json.loads(self._post_rerank(payload, headers).decode("utf-8"))
-        except urllib.error.HTTPError as exc:
+        except (urllib.error.HTTPError, RerankHTTPError) as exc:
             # LiteLLM forwards the rerank model's 4096-token context rejection.
             # A single large stored memory can overflow it even with a small
             # max_candidates setting. Split only this specific error; an unknown
             # model, invalid auth, etc. must still surface as a degradation.
-            detail = exc.read().lower() if exc.code == 400 else b""
-            if b"maximum context length" not in detail or b"input_tokens" not in detail:
+            if not _is_context_overflow(exc):
                 raise
+            POOL_STATS["context_split"] += 1
             if len(documents) > 1:
                 middle = len(documents) // 2
                 return self._raw_scores(query, documents[:middle]) + self._raw_scores(
@@ -391,7 +419,7 @@ class HttpReranker:
             finally:
                 lock.release()
             if status >= 400:
-                raise RuntimeError(f"reranker HTTP {status}")
+                raise RerankHTTPError(status, body)
             return body
         req = urllib.request.Request(  # noqa: S310 - fixed local rerank endpoint
             f"{self._endpoint}/rerank",
