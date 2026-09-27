@@ -4330,34 +4330,52 @@ class ConsolidationEngine:
             cast("Any", self._storage)._query,
         )
 
+        def drop_none(value: Any) -> Any:
+            # The SDK sends None as NONE and SurrealDB drops NONE-valued keys (nested
+            # ones too), so a page fingerprinted with them never matches the page read
+            # back. Encode the page exactly as it will come back; decode_fiber already
+            # defaults every missing key.
+            if isinstance(value, dict):
+                return {k: drop_none(v) for k, v in value.items() if v is not None}
+            if isinstance(value, list):
+                return [drop_none(v) for v in value]
+            return value
+
         def encode_fiber(fiber: Fiber) -> dict[str, Any]:
-            return {
-                "id": fiber.id,
-                "neuron_ids": sorted(fiber.neuron_ids),
-                "synapse_ids": sorted(fiber.synapse_ids),
-                "anchor_neuron_id": fiber.anchor_neuron_id,
-                "pathway": list(fiber.pathway),
-                "conductivity": fiber.conductivity,
-                "last_conducted": fiber.last_conducted.isoformat()
-                if fiber.last_conducted
-                else None,
-                "time_start": fiber.time_start.isoformat() if fiber.time_start else None,
-                "time_end": fiber.time_end.isoformat() if fiber.time_end else None,
-                "coherence": fiber.coherence,
-                "salience": fiber.salience,
-                "frequency": fiber.frequency,
-                "summary": fiber.summary,
-                "essence": fiber.essence,
-                "last_ghost_shown_at": (
-                    fiber.last_ghost_shown_at.isoformat() if fiber.last_ghost_shown_at else None
+            return cast(
+                "dict[str, Any]",
+                drop_none(
+                    {
+                        "id": fiber.id,
+                        "neuron_ids": sorted(fiber.neuron_ids),
+                        "synapse_ids": sorted(fiber.synapse_ids),
+                        "anchor_neuron_id": fiber.anchor_neuron_id,
+                        "pathway": list(fiber.pathway),
+                        "conductivity": fiber.conductivity,
+                        "last_conducted": fiber.last_conducted.isoformat()
+                        if fiber.last_conducted
+                        else None,
+                        "time_start": fiber.time_start.isoformat() if fiber.time_start else None,
+                        "time_end": fiber.time_end.isoformat() if fiber.time_end else None,
+                        "coherence": fiber.coherence,
+                        "salience": fiber.salience,
+                        "frequency": fiber.frequency,
+                        "summary": fiber.summary,
+                        "essence": fiber.essence,
+                        "last_ghost_shown_at": (
+                            fiber.last_ghost_shown_at.isoformat()
+                            if fiber.last_ghost_shown_at
+                            else None
+                        ),
+                        "auto_tags": sorted(fiber.auto_tags),
+                        "agent_tags": sorted(fiber.agent_tags),
+                        "metadata": fiber.metadata,
+                        "compression_tier": fiber.compression_tier,
+                        "pinned": fiber.pinned,
+                        "created_at": fiber.created_at.isoformat(),
+                    }
                 ),
-                "auto_tags": sorted(fiber.auto_tags),
-                "agent_tags": sorted(fiber.agent_tags),
-                "metadata": fiber.metadata,
-                "compression_tier": fiber.compression_tier,
-                "pinned": fiber.pinned,
-                "created_at": fiber.created_at.isoformat(),
-            }
+            )
 
         def decode_fiber(row: dict[str, Any]) -> Fiber:
             def parse_time(key: str) -> datetime | None:
