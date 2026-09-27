@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Merge no longer stops with "fiber census staged page is invalid" when a fiber has an
+  empty field. The SDK sends `None` as NONE and SurrealDB drops those keys, so a census
+  page fingerprinted with them never matched the page read back; pages are now encoded
+  exactly as they are stored.
+
 ## [3.12.0] — 2026-09-25 — consolidation can resume its committed work
 
 Large maintenance runs now make bounded progress and can continue from durable
