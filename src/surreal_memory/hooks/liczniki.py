@@ -69,7 +69,7 @@ def zwieksz(delta: Mapping[str, int], *, teraz: dt.datetime | None = None) -> bo
             tmp.write_text(json.dumps(dane, ensure_ascii=False, sort_keys=True), encoding="utf-8")
             os.replace(tmp, sciezka)
         return True
-    except OSError as exc:
+    except (OSError, ValueError, TypeError) as exc:
         print(  # noqa: T201
             f"[Surreal-Memory] licznik dobowy: zapis nieudany ({type(exc).__name__})",
             file=sys.stderr,
