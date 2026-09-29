@@ -36,6 +36,8 @@ async def get_recent_memories(project_name: str | None) -> str:
     yet — or no project could be resolved — returns an empty string rather
     than leaking other projects' context.
     """
+    from surreal_memory.engine.superseded_filter import is_excluded_by_validity
+    from surreal_memory.hooks import liczniki
     from surreal_memory.unified_config import get_config, get_shared_storage
 
     config = get_config()
@@ -49,8 +51,16 @@ async def get_recent_memories(project_name: str | None) -> str:
         if not typed:
             return ""
 
+        # Superseded facts (typed_memory.valid_until set) are dropped from the list — the same predicate as recall
+        # (`is_excluded_by_validity`, same escape hatch). The filter runs AFTER the newest-N cut, so the list is a
+        # strict subset of what it was: no older memory takes the place of a dropped one (that would change what
+        # the user reads, not just remove stale entries).
         lines: list[str] = []
+        odfiltrowane = 0
         for tm in typed[:CONTEXT_LIMIT]:
+            if is_excluded_by_validity(tm, valid_at=None, include_superseded=False):
+                odfiltrowane += 1
+                continue
             fiber = await storage.get_fiber(tm.fiber_id)
             if fiber is None:
                 continue
@@ -61,6 +71,15 @@ async def get_recent_memories(project_name: str | None) -> str:
                     snippet = snippet[:BULLET_MAX_CHARS].rstrip() + "…"
                 lines.append(f"- {snippet}")
 
+        # No retrieval_trace here (a list, not a recall — kept out of tor `cli`); a daily counter instead, so the
+        # filter's work on prod is visible without a synthetic trace row.
+        liczniki.zwieksz(
+            {
+                "sessionstart_wywolania": 1,
+                "sessionstart_pokazane": len(lines),
+                "sessionstart_odfiltrowane_nieaktualne": odfiltrowane,
+            }
+        )
         return "\n".join(lines)
     finally:
         try:
