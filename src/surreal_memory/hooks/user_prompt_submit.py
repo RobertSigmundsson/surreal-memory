@@ -48,6 +48,9 @@ from surreal_memory.hooks import liczniki
 
 logger = logging.getLogger(__name__)
 
+# What the engine answers when nothing matched (surreal_memory/engine/cli_recall_api.py).
+_NO_MATCH = "No relevant memories found."
+
 # Rough chars-per-token used to turn the configured token ceiling into a hard
 # character cut. Deliberately crude: it only has to bound the injection, and a
 # cheap over-estimate is better than a tokenizer import on every prompt.
@@ -158,20 +161,17 @@ async def _persist_hook_trace(
     *,
     brain: Any,
     prompt: str,
+    depth: int,
     max_tokens: int,
     hook_input: dict[str, Any],
     config: Any,
-) -> None:
-    """One retrieval_trace (tor ``cli``) for this hook recall. Never raises, never
-    blocks the prompt, never mutates ``result``; a failure is visible on stderr and in
-    ``prompt_recall_slad_bledy.jsonl``."""
+) -> Any:
+    """One retrieval_trace (tor ``cli``) for this hook recall; the ``po_zapytaniu`` step of
+    ``recall_like_cli``. Never raises, never blocks the prompt, never mutates ``result``; a failure is
+    visible on stderr and in ``prompt_recall_slad_bledy.jsonl``. Returns the ``TraceOutcome``."""
     from surreal_memory.engine import recall_api
     from surreal_memory.engine.cli_recall_api import persist_identified_trace
 
-    try:
-        depth = int(result.depth_used.value)
-    except (AttributeError, TypeError, ValueError):
-        depth = 1
     outcome = await persist_identified_trace(
         storage,
         result,
@@ -189,6 +189,7 @@ async def _persist_hook_trace(
     if line:
         print(line, file=sys.stderr)  # noqa: T201
         _record_trace_error(line, str(hook_input.get("session_id") or ""))
+    return outcome
 
 
 def _linia_wyjatku(exc: BaseException) -> str:
@@ -223,7 +224,7 @@ async def get_prompt_recall(hook_input: dict[str, Any]) -> str:
 
     Any failure degrades to "": the prompt must never be blocked by recall.
     """
-    from surreal_memory.engine.retrieval import ReflexPipeline
+    from surreal_memory.engine.cli_recall_api import recall_like_cli
     from surreal_memory.unified_config import (
         DEFAULT_SYSTEM_PREFIXES,
         get_config,
@@ -255,35 +256,34 @@ async def get_prompt_recall(hook_input: dict[str, Any]) -> str:
         brain = await storage.get_brain(brain_id)
         if brain is None:
             return ""
-        pipeline = ReflexPipeline(storage, brain.config)
-        result = await pipeline.query(
-            query=prompt,
-            max_tokens=cfg.max_tokens,
-            session_id=str(hook_input.get("session_id") or "ups"),
-        )
-        # A superseded fact (typed_memory.valid_until set) must not come back as context on
-        # every prompt: same filter and escape hatch as recall_api / smem recall.
-        from surreal_memory.engine.superseded_filter import filter_superseded
-
-        result = (
-            await filter_superseded(
-                result,
-                storage,
-                max_tokens=cfg.max_tokens,
-                brain_id=brain_id,
-                config=config,
-            )
-        ).result
-        await _persist_hook_trace(
+        # ONE engine function for every reader: the very body of `smem recall` (depth from QueryRouter, the
+        # superseded filter, the trace hook). The hook adds only what is its own: identity, prefix/length gates,
+        # the 20 s cap and the injection format. (Before: its own copy of ReflexPipeline.query + filter.)
+        body, _ = await recall_like_cli(
             storage,
-            result,
-            brain=brain,
-            prompt=prompt,
+            brain,
+            query=prompt,
+            depth=None,
             max_tokens=cfg.max_tokens,
-            hook_input=hook_input,
-            config=config,
+            min_confidence=0.0,
+            show_routing=False,
+            show_age=False,
+            po_zapytaniu=lambda result, depth: _persist_hook_trace(
+                storage,
+                result,
+                brain=brain,
+                prompt=prompt,
+                depth=depth,
+                max_tokens=cfg.max_tokens,
+                hook_input=hook_input,
+                config=config,
+            ),
         )
-        context = (result.context or "").strip()
+        # "Nothing matched" is the engine's literal WITHOUT any fiber (the same test the pods apply).
+        answer = str(body.get("answer") or "")
+        if not body.get("fibers_matched") and answer.strip() == _NO_MATCH:
+            return ""
+        context = answer.strip()
         if not context:
             return ""
         # The pipeline formats its own "## Relevant Memories" heading. Keeping it

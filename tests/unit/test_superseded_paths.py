@@ -10,6 +10,7 @@ the pipeline itself really returns it (positive control — otherwise "gone" pro
 from __future__ import annotations
 
 import asyncio
+import copy
 import json
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -167,7 +168,9 @@ def test_quick_recall_escape_hatch(tmp_path: Path, monkeypatch: pytest.MonkeyPat
 # ── recall_like_cli = POST /v1/recall-cli ────────────────────────────────────────────────────
 
 
-def _recall_like_cli(storage: InMemoryStorage, ucfg: UnifiedConfig) -> tuple[dict[str, Any], Any]:
+def _recall_like_cli(
+    storage: InMemoryStorage, ucfg: UnifiedConfig, max_tokens: int = 500
+) -> tuple[dict[str, Any], Any]:
     seen: list[Any] = []
 
     async def _po(result: Any, depth: int) -> TraceOutcome:
@@ -182,7 +185,7 @@ def _recall_like_cli(storage: InMemoryStorage, ucfg: UnifiedConfig) -> tuple[dic
                 brain,
                 query=QUERY,
                 depth=None,
-                max_tokens=500,
+                max_tokens=max_tokens,
                 min_confidence=0.0,
                 show_routing=False,
                 show_age=False,
@@ -219,7 +222,7 @@ def _hook(storage: InMemoryStorage, ucfg: UnifiedConfig) -> str:
                 "surreal_memory.unified_config.get_shared_storage",
                 AsyncMock(return_value=storage),
             ),
-            patch.object(ups, "_persist_hook_trace", AsyncMock(return_value=None)),
+            patch.object(ups, "_persist_hook_trace", AsyncMock(return_value=TraceOutcome("off"))),
         ):
             return await ups.get_prompt_recall({"prompt": QUERY, "session_id": "s-1"})
 
@@ -238,3 +241,25 @@ def test_hook_escape_hatch_restores(tmp_path: Path, monkeypatch: pytest.MonkeyPa
     monkeypatch.setenv(DISABLE_ENV, "1")
     storage, _ = _build(supersede=True)
     assert OLD in _hook(storage, _ucfg(tmp_path))
+
+
+def _bez_naglowka(tekst: str) -> str:
+    """Body of an injection / of the engine answer without the leading "## …" heading line."""
+    pierwsza, _, reszta = tekst.strip().partition("\n")
+    return (reszta if pierwsza.strip().lower().startswith("## ") else tekst).strip()
+
+
+@pytest.mark.parametrize("supersede", [True, False])
+def test_hook_context_is_the_cli_answer_zero_differences(tmp_path: Path, supersede: bool) -> None:
+    """The hook and `recall_like_cli` on the same brain content and query: same text (the hook only adds its heading).
+
+    One brain, TWO identical deep copies (before any recall): a recall writes state (access counters, reconsolidation),
+    so a second reader on the same storage would see a drifted brain — exactly the drift the parity measurement guards
+    against (ABBA). Same ids and same tie-breaking on both sides, unlike two independent builds."""
+    storage_cli, _ = _build(supersede=supersede)
+    storage_hook = copy.deepcopy(storage_cli)
+    ucfg = _ucfg(tmp_path)
+    body, _slad = _recall_like_cli(storage_cli, ucfg, max_tokens=ucfg.prompt_recall.max_tokens)
+    hook_ctx = _hook(storage_hook, ucfg)
+    assert hook_ctx.startswith("## Relevant memory (recalled for this prompt)")
+    assert _bez_naglowka(hook_ctx.split("\n\n", 1)[1]) == _bez_naglowka(str(body["answer"]))

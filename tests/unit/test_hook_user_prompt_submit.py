@@ -109,13 +109,29 @@ def _cfg(**kw: object):
 
 
 async def _pipeline_returning(context: str):
+    """Pipeline spy whose result carries what `recall_like_cli` reads (the hook now runs the CLI body)."""
     from unittest.mock import MagicMock
+
+    from surreal_memory.engine.retrieval import DepthLevel
 
     result = MagicMock()
     result.context = context
+    result.confidence = 0.9
+    result.depth_used = DepthLevel.CONTEXT
+    result.neurons_activated = 3
+    result.fibers_matched = []
+    result.latency_ms = 1.0
     pipeline = MagicMock()
     pipeline.query = AsyncMock(return_value=result)
     return pipeline
+
+
+@pytest.fixture(autouse=True)
+def _no_freshness_reads(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`recall_like_cli` gathers freshness warnings from storage; these tests use a spy storage."""
+    monkeypatch.setattr(
+        "surreal_memory.engine.cli_recall_api.gather_freshness", AsyncMock(return_value=([], 0))
+    )
 
 
 @pytest.mark.asyncio
@@ -132,7 +148,7 @@ async def test_recall_is_keyed_on_the_prompt_not_on_recency() -> None:
     with (
         patch("surreal_memory.unified_config.get_config") as gc,
         patch("surreal_memory.unified_config.get_shared_storage", AsyncMock(return_value=storage)),
-        patch("surreal_memory.engine.retrieval.ReflexPipeline", return_value=pipeline),
+        patch("surreal_memory.engine.cli_recall_api.ReflexPipeline", return_value=pipeline),
     ):
         gc.return_value.prompt_recall = _cfg()
         gc.return_value.current_brain = "b1"
@@ -219,13 +235,10 @@ def test_the_gap_this_closes_prompt_never_reached_memory(
     zachowania: prompt musi trafić do zapytania. Na kodzie sprzed zmiany pada
     merytorycznie (zero wywołań pipeline'u), a nie na braku symbolu.
     """
+    import asyncio
     from types import SimpleNamespace
-    from unittest.mock import MagicMock
 
-    result = MagicMock()
-    result.context = "- zapamiętany fakt"
-    pipeline = MagicMock()
-    pipeline.query = AsyncMock(return_value=result)
+    pipeline = asyncio.run(_pipeline_returning("- zapamiętany fakt"))
     storage = AsyncMock()
     storage.brain_id = "b1"
     storage.get_brain = AsyncMock(return_value=type("B", (), {"config": object()})())
@@ -235,7 +248,7 @@ def test_the_gap_this_closes_prompt_never_reached_memory(
         patch("sys.stdin", io.StringIO(json.dumps({"prompt": prompt}))),
         patch("surreal_memory.unified_config.get_config") as gc,
         patch("surreal_memory.unified_config.get_shared_storage", AsyncMock(return_value=storage)),
-        patch("surreal_memory.engine.retrieval.ReflexPipeline", return_value=pipeline),
+        patch("surreal_memory.engine.cli_recall_api.ReflexPipeline", return_value=pipeline),
         patch(_ORCHESTRATOR, AsyncMock(return_value="")),
     ):
         # Kaczo-typowany config, NIE import nowej klasy — dzięki temu na kodzie
@@ -269,7 +282,7 @@ async def test_max_tokens_is_a_ceiling_not_a_suggestion() -> None:
     with (
         patch("surreal_memory.unified_config.get_config") as gc,
         patch("surreal_memory.unified_config.get_shared_storage", AsyncMock(return_value=storage)),
-        patch("surreal_memory.engine.retrieval.ReflexPipeline", return_value=pipeline),
+        patch("surreal_memory.engine.cli_recall_api.ReflexPipeline", return_value=pipeline),
     ):
         gc.return_value.prompt_recall = _cfg(max_tokens=100)
         gc.return_value.current_brain = "b1"
@@ -292,7 +305,7 @@ async def test_the_pipelines_own_heading_is_not_stacked_under_ours() -> None:
     with (
         patch("surreal_memory.unified_config.get_config") as gc,
         patch("surreal_memory.unified_config.get_shared_storage", AsyncMock(return_value=storage)),
-        patch("surreal_memory.engine.retrieval.ReflexPipeline", return_value=pipeline),
+        patch("surreal_memory.engine.cli_recall_api.ReflexPipeline", return_value=pipeline),
     ):
         gc.return_value.prompt_recall = _cfg()
         gc.return_value.current_brain = "b1"
@@ -333,7 +346,7 @@ def _mocked_recall(prompt: str, **cfg: object):
         with (
             patch("surreal_memory.unified_config.get_config") as gc,
             patch("surreal_memory.unified_config.get_shared_storage", shared),
-            patch("surreal_memory.engine.retrieval.ReflexPipeline", return_value=pipeline),
+            patch("surreal_memory.engine.cli_recall_api.ReflexPipeline", return_value=pipeline),
         ):
             gc.return_value.prompt_recall = _cfg(min_prompt_chars=40, **cfg)
             gc.return_value.current_brain = "b1"
@@ -468,7 +481,7 @@ def _recall_with_trace(
             patch(
                 "surreal_memory.unified_config.get_shared_storage", AsyncMock(return_value=storage)
             ),
-            patch("surreal_memory.engine.retrieval.ReflexPipeline", return_value=pipeline),
+            patch("surreal_memory.engine.cli_recall_api.ReflexPipeline", return_value=pipeline),
             patch(_PERSIST, spy),
         ):
             gc.return_value.prompt_recall = _cfg(min_prompt_chars=40)
@@ -598,3 +611,75 @@ def test_timed_out_recall_is_recorded_not_silent(
             "sesja": "s-timeout",
         }
     ]
+
+
+# ---------------------------------------------------------------------------
+# Hook = the very body of `smem recall` (recall_like_cli). Program smem-jeden-silnik-odczytu, commit H.
+# ---------------------------------------------------------------------------
+
+_LITERAL = "No relevant memories found."
+
+
+def _hook_with_body(body: dict[str, object]) -> str:
+    """get_prompt_recall with `recall_like_cli` replaced by a fixed engine body (everything else real)."""
+    import asyncio
+
+    from surreal_memory.engine.cli_recall_api import TraceOutcome
+    from surreal_memory.hooks.user_prompt_submit import get_prompt_recall
+
+    async def _run() -> str:
+        storage = AsyncMock()
+        storage.brain_id = "b1"
+        storage.get_brain = AsyncMock(return_value=type("B", (), {"config": object()})())
+        with (
+            patch("surreal_memory.unified_config.get_config") as gc,
+            patch(
+                "surreal_memory.unified_config.get_shared_storage", AsyncMock(return_value=storage)
+            ),
+            patch(
+                "surreal_memory.engine.cli_recall_api.recall_like_cli",
+                AsyncMock(return_value=(body, TraceOutcome("off"))),
+            ),
+        ):
+            gc.return_value.prompt_recall = _cfg(min_prompt_chars=40)
+            gc.return_value.current_brain = "b1"
+            return await get_prompt_recall({"prompt": "x" * 100, "session_id": "s-h"})
+
+    return asyncio.run(_run())
+
+
+def test_hook_runs_the_cli_body_with_the_cli_pipeline_arguments() -> None:
+    """The pipeline is called exactly as `smem recall` calls it: four keyword arguments, NO session_id
+    (session priming never existed in this per-prompt process — U1 §C.2; D-U0-3 (a))."""
+    out, _shared, pipeline = _mocked_recall(
+        "o czym rozmawialiśmy przy strażniku rekoncyliacji? " * 2
+    )
+    assert "trafienie z pamięci" in out
+    assert set(pipeline.query.await_args.kwargs) == {
+        "query",
+        "depth",
+        "max_tokens",
+        "reference_time",
+    }
+
+
+def test_engine_literal_without_fibers_injects_nothing() -> None:
+    assert _hook_with_body({"answer": _LITERAL, "fibers_matched": []}) == ""
+    assert _hook_with_body({"answer": _LITERAL}) == ""
+
+
+def test_engine_literal_with_fibers_is_an_answer_not_nothing() -> None:
+    """A memory may quote the sentence: with matched fibers it is content, and it is injected."""
+    out = _hook_with_body({"answer": _LITERAL, "fibers_matched": ["f1"]})
+    assert out.startswith("## Relevant memory") and _LITERAL in out
+
+
+def test_engine_heading_is_stripped_and_ceiling_kept() -> None:
+    out = _hook_with_body(
+        {"answer": "## Relevant Memories\n\n- fakt " + "x" * 10_000, "fibers_matched": ["f1"]}
+    )
+    assert out.lower().count("## relevant memor") == 1 and out.rstrip().endswith("tokenów]")
+
+
+def test_empty_engine_answer_with_fibers_injects_nothing() -> None:
+    assert _hook_with_body({"answer": "   ", "fibers_matched": ["f1"]}) == ""
