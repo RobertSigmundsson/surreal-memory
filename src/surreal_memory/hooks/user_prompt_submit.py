@@ -44,6 +44,8 @@ import sys
 from pathlib import Path
 from typing import Any
 
+from surreal_memory.hooks import liczniki
+
 logger = logging.getLogger(__name__)
 
 # Rough chars-per-token used to turn the configured token ceiling into a hard
@@ -189,6 +191,13 @@ async def _persist_hook_trace(
         _record_trace_error(line, str(hook_input.get("session_id") or ""))
 
 
+def _linia_wyjatku(exc: BaseException) -> str:
+    """Line for the durable error log when the recall RAISES: status ``wyjatek``, reason = the exception CLASS
+    NAME only (never its message, never the prompt) — same file and format as timeout / sync_error / identity_error,
+    so one instrument counts the three classes plus this one and the denominator."""
+    return f"SMEM-SLAD-BLAD tor=cli status=wyjatek powod=recall-{type(exc).__name__}"
+
+
 def read_hook_input() -> dict[str, Any]:
     """Read Claude Code hook JSON from stdin (empty/malformed -> {})."""
     try:
@@ -235,6 +244,9 @@ async def get_prompt_recall(hook_input: dict[str, Any]) -> str:
             _record_skip(prefix, len(prompt), str(hook_input.get("session_id") or ""))
             return ""
     if len(prompt) < cfg.min_prompt_chars:
+        # Aggregated (per UTC day), not a row per prompt: this gate fires on every short prompt and used to
+        # record nothing, so "0 too-short skips" was not a measurement.
+        liczniki.zwieksz({"za_krotki": 1})
         return ""
 
     storage = await get_shared_storage(config.current_brain)
@@ -332,9 +344,11 @@ def main() -> None:
 
         timeout = get_config().prompt_recall.timeout_seconds
         recalled = asyncio.run(_recall_within_timeout(hook_input, timeout))
-    except Exception:
+    except Exception as exc:
         recalled = ""
         print("[Surreal-Memory] UserPromptSubmit memory recall failed", file=sys.stderr)  # noqa: T201
+        # stderr is not persisted by Claude Code; without this row an exception is a failure class with no counter.
+        _record_trace_error(_linia_wyjatku(exc), str(hook_input.get("session_id") or ""))
     if recalled:
         sections.append(recalled)
 
