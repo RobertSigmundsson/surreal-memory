@@ -94,3 +94,13 @@ def test_katalog_niezapisywalny_nie_rzuca_i_mowi_na_stderr(
     assert liczniki.zwieksz({"za_krotki": 1}) is False
     err = capsys.readouterr().err
     assert err.count("[Surreal-Memory] licznik dobowy: zapis nieudany") == 1
+
+
+def test_plik_z_recznie_zepsuta_wartoscia_nie_rzuca_i_mowi_na_stderr(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setenv("SURREAL_MEMORY_DIR", str(tmp_path))
+    teraz = dt.datetime(2026, 9, 29, 1, tzinfo=dt.UTC)
+    (tmp_path / liczniki.LICZNIKI_PLIK).write_text(json.dumps({"2026-09-29": {"za_krotki": "abc"}}))
+    assert liczniki.zwieksz({"za_krotki": 1}, teraz=teraz) is False
+    assert capsys.readouterr().err.count("[Surreal-Memory] licznik dobowy: zapis nieudany") == 1

@@ -44,11 +44,13 @@ async def get_recent_memories(project_name: str | None) -> str:
     storage = await get_shared_storage(config.current_brain)
     try:
         if not project_name:
+            liczniki.zwieksz({"sessionstart_wywolania": 1})
             return ""
 
         # The repo name doubles as the project id (opaque scope label).
         typed = await storage.get_project_memories(project_name)
         if not typed:
+            liczniki.zwieksz({"sessionstart_wywolania": 1})
             return ""
 
         # Superseded facts (typed_memory.valid_until set) are dropped from the list — the same predicate as recall

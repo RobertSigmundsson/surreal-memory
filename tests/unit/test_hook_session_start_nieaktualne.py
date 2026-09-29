@@ -99,9 +99,11 @@ async def test_licznik_dobowy_wywolania_pokazane_odfiltrowane(
 
 
 @pytest.mark.asyncio
-async def test_bez_projektu_i_bez_wpisow_nie_liczy_wywolania(
+async def test_bez_wpisow_liczy_samo_wywolanie_mianownik_wszystkich_startow(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv("SURREAL_MEMORY_DIR", str(tmp_path))
     assert await _lista([]) == []
-    assert not (tmp_path / liczniki.LICZNIKI_PLIK).exists()
+    dane = json.loads((tmp_path / liczniki.LICZNIKI_PLIK).read_text())
+    (doba,) = dane.values()
+    assert doba == {"sessionstart_wywolania": 1}
