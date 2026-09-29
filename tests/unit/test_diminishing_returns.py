@@ -158,9 +158,15 @@ def _make_storage_mock(
     storage.get_neurons_batch = mock_get_neurons_batch
 
     # get_neighbors: returns list of (neuron, synapse) tuples
+    seen_include_embedding: list[bool] = []
+
     async def mock_get_neighbors(
-        neuron_id: str, direction: str = "both", min_weight: float = 0.1
+        neuron_id: str,
+        direction: str = "both",
+        min_weight: float = 0.1,
+        include_embedding: bool = True,
     ) -> list:
+        seen_include_embedding.append(include_embedding)
         result = []
         for target_id, weight in neighbors.get(neuron_id, []):
             neuron_obj = SimpleNamespace(id=target_id)
@@ -169,6 +175,7 @@ def _make_storage_mock(
         return result
 
     storage.get_neighbors = mock_get_neighbors
+    storage.seen_include_embedding = seen_include_embedding
 
     # get_neuron_states_batch: return empty states (no frequency, no refractory)
     async def mock_get_neuron_states_batch(ids: list[str]) -> dict:
@@ -483,3 +490,13 @@ class TestReflexTrace:
         assert "a" in results  # anchor always in results
         assert trace.new_neurons_per_hop[0] == 1
         assert trace.stopped_early is False
+
+
+@pytest.mark.asyncio
+async def test_spreading_activation_asks_for_neighbours_without_embedding() -> None:
+    """Recall never reads a neighbour's vector: the BFS must ask get_neighbors for include_embedding=False (U5/K10)."""
+    storage = _make_storage_mock({"a": True, "b": True}, {"a": [("b", 0.8)], "b": []})
+    activator = SpreadingActivation(storage, BrainConfig(max_spread_hops=2))
+    await activator.activate(["a"], max_hops=2)
+    assert storage.seen_include_embedding, "get_neighbors was never called"
+    assert set(storage.seen_include_embedding) == {False}

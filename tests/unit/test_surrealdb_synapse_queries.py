@@ -172,6 +172,28 @@ class TestQueryShapes:
         assert "in = type::record('neuron', $nid)" in sql
 
     @pytest.mark.asyncio
+    async def test_get_neighbors_can_inline_endpoints_without_embedding_vec(self):
+        """include_embedding=False (recall path): neighbours inlined WITHOUT the vector (U5/K10: ~180 MB per recall)."""
+        st, conn = _store_with_mock_conn()
+        await st.get_neighbors("a", direction="both", include_embedding=False)
+        found = _find_query(conn, "FROM synapse WHERE")
+        assert found is not None
+        sql, _ = found
+        assert "OMIT embedding_vec" in sql
+        assert "in.* AS" not in sql and "out.* AS" not in sql
+        # both endpoints stay inlined (one query, no N+1) — via subqueries on the edge's own links
+        assert "$parent.in" in sql and "$parent.out" in sql
+        assert "AS in_neuron" in sql and "AS out_neuron" in sql
+
+    @pytest.mark.asyncio
+    async def test_get_neighbors_default_keeps_the_embedding(self):
+        """The default is unchanged (REST route, consolidation): no OMIT."""
+        st, conn = _store_with_mock_conn()
+        await st.get_neighbors("a", direction="out")
+        found = _find_query(conn, "FROM synapse WHERE")
+        assert found is not None and "OMIT" not in found[0]
+
+    @pytest.mark.asyncio
     async def test_delete_neuron_cascade_uses_in_out(self):
         """Two single-field DELETEs, not one OR query — and brain-agnostic.
 

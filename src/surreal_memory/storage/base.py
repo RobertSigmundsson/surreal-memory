@@ -638,6 +638,7 @@ class NeuralStorage(ABC):
         direction: Literal["out", "in", "both"] = "both",
         synapse_types: list[SynapseType] | None = None,
         min_weight: float | None = None,
+        include_embedding: bool = True,
     ) -> list[tuple[Neuron, Synapse]]:
         """
         Get neighboring neurons connected by synapses.
@@ -650,6 +651,9 @@ class NeuralStorage(ABC):
                 - "both": Follow both directions
             synapse_types: Only follow these synapse types
             min_weight: Only follow synapses with weight >= this
+            include_embedding: When False the neighbour records come back WITHOUT their embedding
+                vector (``metadata["_embedding"]``). Recall never reads it, and on a hub neuron the
+                inlined vectors dominate the response (tens of MB) — callers that need it keep the default.
 
         Returns:
             List of (neighbor_neuron, connecting_synapse) tuples

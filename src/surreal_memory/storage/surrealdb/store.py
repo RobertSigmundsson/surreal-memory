@@ -2662,6 +2662,7 @@ class SurrealDBStorage(
         direction: Literal["out", "in", "both"] = "both",
         synapse_types: list[SynapseType] | None = None,
         min_weight: float | None = None,
+        include_embedding: bool = True,
     ) -> list[tuple[Neuron, Synapse]]:
         brain_id = self._get_brain_id()
         base_params: dict[str, Any] = {
@@ -2699,8 +2700,17 @@ class SurrealDBStorage(
             # Inline both endpoint neurons via the native edge links (in.*/out.*)
             # so a single query returns the neighbour records — kills the N+1
             # get_neuron call that ran once per edge before the RELATION migration.
+            # ``include_embedding=False`` (recall path): the inlined records omit ``embedding_vec`` —
+            # 1024 floats per record, tens of MB for a hub neuron, decoded float-by-float in Python.
+            if include_embedding:
+                inline = "in.* AS in_neuron, out.* AS out_neuron"
+            else:
+                inline = (
+                    "(SELECT * OMIT embedding_vec FROM ONLY $parent.in) AS in_neuron, "
+                    "(SELECT * OMIT embedding_vec FROM ONLY $parent.out) AS out_neuron"
+                )
             syn_rows = await self._query(
-                f"SELECT *, in.* AS in_neuron, out.* AS out_neuron FROM synapse WHERE {where}",
+                f"SELECT *, {inline} FROM synapse WHERE {where}",
                 **base_params,
             )
             for sr in syn_rows:
