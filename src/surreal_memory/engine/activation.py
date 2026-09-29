@@ -318,6 +318,7 @@ class SpreadingActivation:
                     current.neuron_id,
                     direction="both",
                     min_weight=0.1,
+                    include_embedding=False,  # recall never reads a neighbour's vector (U5/K10: ~180 MB per recall)
                 )
                 neighbor_cache[current.neuron_id] = neighbors
 

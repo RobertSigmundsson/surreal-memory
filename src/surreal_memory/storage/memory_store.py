@@ -549,6 +549,7 @@ class InMemoryStorage(
         direction: Literal["out", "in", "both"] = "both",
         synapse_types: list[SynapseType] | None = None,
         min_weight: float | None = None,
+        include_embedding: bool = True,  # in-memory neurons are shared objects; nothing to strip
     ) -> list[tuple[Neuron, Synapse]]:
         brain_id = self._get_brain_id()
         results: list[tuple[Neuron, Synapse]] = []

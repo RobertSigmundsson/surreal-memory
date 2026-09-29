@@ -375,6 +375,7 @@ class SharedStorage(SharedFiberBrainMixin, NeuralStorage):
         direction: Literal["out", "in", "both"] = "both",
         synapse_types: list[SynapseType] | None = None,
         min_weight: float | None = None,
+        include_embedding: bool = True,  # server-side route decides; accepted for interface parity
     ) -> list[tuple[Neuron, Synapse]]:
         """Get neighboring neurons."""
         params: dict[str, Any] = {"direction": direction}
