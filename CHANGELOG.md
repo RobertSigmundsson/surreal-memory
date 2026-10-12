@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.12.1] — 2026-10-12 — consolidation resume validates saved work
+
+Explicit resume now checks that a saved checkpoint still belongs to the same
+incomplete run before work continues. Fiber-census retries also tolerate
+SurrealDB omitting nullable fields while retaining the immutable page checks.
+
+### Fixed
+
+- `smem consolidate --resume` resumes the saved strategy set and original
+  reference time, and refuses missing, completed, replaced, or invalid
+  checkpoints without changing their stored state. It cannot be combined with
+  `--strategy` or `--dry-run`.
+- Blocked runs explain that strategies were not executed and suppress health
+  deltas and eligibility hints that could misattribute unrelated snapshot
+  differences to consolidation.
+- Fiber-census page hashing and duplicate-page comparison restore nullable
+  fields omitted by SurrealDB. Tests cover a null-field round trip, an empty
+  census completion marker, and rejection of changed page contents.
+
 ## [3.12.0] — 2026-09-25 — consolidation can resume its committed work
 
 Large maintenance runs now make bounded progress and can continue from durable
