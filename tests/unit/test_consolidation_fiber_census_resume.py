@@ -70,8 +70,15 @@ class _Progress:
 class _PagedStorage:
     current_brain_id = "synthetic-census-brain"
 
-    def __init__(self, fibers: list[Fiber]) -> None:
+    def __init__(
+        self,
+        fibers: list[Fiber],
+        *,
+        drop_null_fields: bool = False,
+    ) -> None:
         self.fibers = sorted(fibers, key=lambda item: item.id)
+        self.drop_null_fields = drop_null_fields
+        self.hide_completion_marker = False
         self.source_cursors: list[str | None] = []
         self.staged: dict[tuple[str, str, int], dict[str, Any]] = {}
         self.stage_ids: dict[str, tuple[str, str, int]] = {}
@@ -99,6 +106,21 @@ class _PagedStorage:
         if sql.startswith("CREATE type::record('consolidation_fiber_census'"):
             stage_id = str(params["stage_id"])
             row = dict(params["row"])
+            if self.drop_null_fields:
+                for field in ("first_fiber_id", "last_fiber_id"):
+                    if row.get(field) is None:
+                        row.pop(field, None)
+                for fiber in row.get("fibers", []):
+                    for field in (
+                        "last_conducted",
+                        "time_start",
+                        "time_end",
+                        "summary",
+                        "essence",
+                        "last_ghost_shown_at",
+                    ):
+                        if fiber.get(field) is None:
+                            fiber.pop(field, None)
             key = (str(row["run_id"]), str(row["strategy"]), int(row["page_index"]))
             if stage_id in self.stage_ids:
                 raise _AlreadyExistsError(f"record {stage_id} already exists")
@@ -115,7 +137,10 @@ class _PagedStorage:
             pages = [
                 row
                 for (row_run_id, row_strategy, page_index), row in self.staged.items()
-                if row_run_id == run_id and row_strategy == strategy and page_index > after_page
+                if row_run_id == run_id
+                and row_strategy == strategy
+                and page_index > after_page
+                and not (self.hide_completion_marker and row.get("complete") is True)
             ]
             pages.sort(key=lambda row: int(row["page_index"]))
             return pages[: int(params.get("limit", 1))]
@@ -140,7 +165,7 @@ def _fibers(count: int) -> list[Fiber]:
 
 @pytest.mark.asyncio
 async def test_fiber_census_budget_pause_resumes_after_staged_page() -> None:
-    storage = _PagedStorage(_fibers(501))
+    storage = _PagedStorage(_fibers(501), drop_null_fields=True)
     progress = _Progress()
     first = ConsolidationEngine(storage, ConsolidationConfig())
     first._progress_session = progress  # type: ignore[assignment]
@@ -265,7 +290,7 @@ async def test_fiber_census_rejects_checkpoint_from_another_run() -> None:
 
 @pytest.mark.asyncio
 async def test_fiber_census_crash_after_stage_write_retries_same_immutable_page() -> None:
-    storage = _PagedStorage(_fibers(501))
+    storage = _PagedStorage(_fibers(501), drop_null_fields=True)
     progress = _Progress(fail_first_checkpoint=True)
     first = ConsolidationEngine(storage, ConsolidationConfig())
     first._progress_session = progress  # type: ignore[assignment]
@@ -287,6 +312,60 @@ async def test_fiber_census_crash_after_stage_write_retries_same_immutable_page(
     assert [fiber.id for fiber in fibers] == [fiber.id for fiber in _fibers(501)]
     assert storage.staged[("run-census-test", "merge", 0)] == staged_before_retry
     assert storage.source_cursors[1] is None
+
+
+@pytest.mark.asyncio
+async def test_fiber_census_duplicate_completion_marker_accepts_omitted_null_bounds() -> None:
+    storage = _PagedStorage([], drop_null_fields=True)
+    progress = _Progress()
+
+    async def collect() -> list[Fiber]:
+        engine = ConsolidationEngine(storage, ConsolidationConfig())
+        engine._progress_session = progress  # type: ignore[assignment]
+        engine._active_strategy = ConsolidationStrategy.MERGE
+        engine._check_progress_budget = _completed_budget_check  # type: ignore[method-assign]
+        return await engine._all_fibers_paged()
+
+    assert await collect() == []
+    marker = storage.staged[("run-census-test", "merge", 0)]
+    assert marker["complete"] is True
+    assert "first_fiber_id" not in marker
+    assert "last_fiber_id" not in marker
+
+    storage.hide_completion_marker = True
+    assert await collect() == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mutation", ["float", "metadata", "required"])
+async def test_fiber_census_duplicate_page_still_rejects_content_changes(
+    mutation: str,
+) -> None:
+    storage = _PagedStorage(_fibers(501), drop_null_fields=True)
+    first = ConsolidationEngine(storage, ConsolidationConfig())
+    first._progress_session = _Progress(fail_first_checkpoint=True)  # type: ignore[assignment]
+    first._active_strategy = ConsolidationStrategy.MERGE
+    first._check_progress_budget = _completed_budget_check  # type: ignore[method-assign]
+
+    with pytest.raises(_SimulatedCrashError, match="after stage write"):
+        await first._all_fibers_paged()
+
+    stored = storage.staged[("run-census-test", "merge", 0)]
+    fiber = stored["fibers"][0]
+    if mutation == "float":
+        fiber["conductivity"] = 0.75
+    elif mutation == "metadata":
+        fiber["metadata"] = {"source": "changed"}
+    else:
+        fiber.pop("id")
+
+    resumed = ConsolidationEngine(storage, ConsolidationConfig())
+    resumed._progress_session = _Progress("run-census-test")  # type: ignore[assignment]
+    resumed._active_strategy = ConsolidationStrategy.MERGE
+    resumed._check_progress_budget = _completed_budget_check  # type: ignore[method-assign]
+
+    with pytest.raises(ConsolidationProgressError):
+        await resumed._all_fibers_paged()
 
 
 @pytest.mark.asyncio

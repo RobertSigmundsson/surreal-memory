@@ -187,6 +187,83 @@ async def test_code_version_mismatch_leaves_checkpoint_untouched(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("replacement", ["different_run", "completed", "missing"])
+async def test_explicit_resume_refuses_changed_checkpoint_without_starting_run(
+    replacement: str,
+) -> None:
+    storage = FakeProgressStorage()
+    first = await ConsolidationProgressSession.open(storage, ["prune"], "same", REFERENCE_TIME)
+    assert first is not None
+    run_id = first.state["run_id"]
+    await first.pause()
+    await first.close()
+    assert storage.progress is not None
+    if replacement == "different_run":
+        storage.progress["run_id"] = "replacement-run"
+    elif replacement == "completed":
+        storage.progress["status"] = "completed"
+    else:
+        storage.progress = None
+    before = deepcopy(storage.progress)
+
+    with pytest.raises(ConsolidationResumeMismatchError):
+        await ConsolidationProgressSession.open(
+            storage, ["prune"], "same", REFERENCE_TIME, resume_run_id=run_id
+        )
+
+    assert storage.progress == before
+    assert storage.started == 1
+    assert storage.lease_owner is None
+
+
+@pytest.mark.asyncio
+async def test_explicit_resume_preserves_completed_strategies_and_reference_time() -> None:
+    storage = FakeProgressStorage()
+    first = await ConsolidationProgressSession.open(
+        storage, ["mature", "merge", "prune"], "same", REFERENCE_TIME
+    )
+    assert first is not None
+    run_id = first.state["run_id"]
+    await first.complete_strategy("prune")
+    await first.complete_strategy("mature")
+    await first.pause()
+    await first.close()
+
+    second = await ConsolidationProgressSession.open(
+        storage,
+        ["mature", "merge", "prune"],
+        "same",
+        REFERENCE_TIME + timedelta(days=2),
+        resume_run_id=run_id,
+    )
+    assert second is not None
+    assert second.resumed
+    assert second.completed_strategies == {"prune", "mature"}
+    assert second.reference_time == REFERENCE_TIME
+    assert storage.started == 1
+    await second.close()
+
+
+def test_blocked_report_explains_no_execution_without_eligibility_hints() -> None:
+    report = ConsolidationReport()
+    report.extra["consolidation_status"] = "blocked"
+    report.extra["failed_strategies"] = ["progress coordination (ConsolidationResumeMismatchError)"]
+
+    summary = report.summary()
+
+    assert "Strategies were not executed; checkpoint preserved" in summary
+    assert "Why nothing changed" not in summary
+    assert "store more memories" not in summary
+
+
+def test_partial_failed_report_preserves_changes_without_eligibility_hints() -> None:
+    report = ConsolidationReport(synapses_pruned=3)
+    report.extra["consolidation_status"] = "failed"
+    assert "Synapses pruned: 3" in report.summary()
+    assert "Strategies were not executed" not in report.summary()
+
+
+@pytest.mark.asyncio
 async def test_explicit_reference_time_mismatch_is_rejected() -> None:
     storage = FakeProgressStorage()
     first = await ConsolidationProgressSession.open(storage, ["prune"], "same", REFERENCE_TIME)
@@ -282,7 +359,7 @@ async def test_engine_resumes_after_strategy_timeout_and_reports_progress(
     first = await engine.run([ConsolidationStrategy.PRUNE])
     assert first.extra["consolidation_status"] == "paused"
     assert first.extra["last_checkpoint"] == ("prune phase=synapse_scan cursor=synapse:10")
-    assert "The next smem consolidate will resume" in first.summary()
+    assert "The next smem consolidate --resume will resume" in first.summary()
     assert storage.progress is not None
     run_id = storage.progress["run_id"]
     frozen_reference_time = storage.progress["reference_time"]
@@ -370,6 +447,56 @@ async def test_progress_validation_failure_is_persisted_not_misreported_as_lease
     assert storage.progress["status"] == "failed"
     assert storage.progress["phase"] == "semantic_link_discovery_neurons"
     assert storage.progress["cursor"] == "neuron:1"
+
+
+@pytest.mark.asyncio
+async def test_explicit_engine_resume_skips_finished_strategies_in_original_set(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    storage = FakeProgressStorage()
+    engine = ConsolidationEngine(storage)
+    strategies = [
+        ConsolidationStrategy.PRUNE,
+        ConsolidationStrategy.MATURE,
+        ConsolidationStrategy.MERGE,
+    ]
+    executed: list[str] = []
+
+    async def initial_run(
+        strategy: ConsolidationStrategy,
+        report: ConsolidationReport,
+        reference_time: datetime,
+        dry_run: bool,
+    ) -> None:
+        if strategy == ConsolidationStrategy.MERGE:
+            raise ConsolidationProgressError("synthetic census failure")
+
+    monkeypatch.setattr(engine, "_run_strategy", initial_run)
+    first = await engine.run(strategies, reference_time=REFERENCE_TIME)
+    assert first.extra["consolidation_status"] == "failed"
+    assert storage.progress is not None
+    run_id = storage.progress["run_id"]
+    assert set(storage.progress["completed_strategies"]) == {"prune", "mature"}
+
+    async def resumed_run(
+        strategy: ConsolidationStrategy,
+        report: ConsolidationReport,
+        reference_time: datetime,
+        dry_run: bool,
+    ) -> None:
+        assert reference_time == REFERENCE_TIME
+        executed.append(strategy.value)
+        report.fibers_merged += 1
+
+    monkeypatch.setattr(engine, "_run_strategy", resumed_run)
+    second = await engine.run(strategies, resume_run_id=run_id)
+
+    assert executed == ["merge"]
+    assert second.fibers_merged == 1
+    assert second.extra["consolidation_status"] == "completed"
+    assert storage.progress["run_id"] == run_id
+    assert storage.progress["reference_time"] == REFERENCE_TIME
+    assert storage.started == 1
 
 
 def test_report_summary_renders_saved_checkpoint_details() -> None:
