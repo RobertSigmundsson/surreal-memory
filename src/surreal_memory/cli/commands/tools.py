@@ -474,10 +474,11 @@ def consolidate(
     ] = None,
     brain: Annotated[str | None, typer.Option("--brain", "-b", help="Brain to consolidate")] = None,
     strategy: Annotated[
-        str,
+        str | None,
         typer.Option(
             "--strategy",
             "-s",
+            show_default=False,
             help=(
                 "Consolidation strategy. Valid values: "
                 "prune, merge, summarize, mature, infer, enrich, dream, "
@@ -488,7 +489,14 @@ def consolidate(
                 "'mature' advances episodic memories to semantic stage."
             ),
         ),
-    ] = "all",
+    ] = None,
+    resume: Annotated[
+        bool,
+        typer.Option(
+            "--resume",
+            help="Resume the incomplete strategies from this brain's saved checkpoint",
+        ),
+    ] = False,
     dry_run: Annotated[
         bool, typer.Option("--dry-run", "-n", help="Preview changes without applying")
     ] = False,
@@ -506,6 +514,7 @@ def consolidate(
 
     Runs one or more consolidation passes on the current (or specified) brain.
     Use --strategy to pick a specific pass, or omit it to run everything.
+    Use --resume to continue an incomplete checkpoint for the selected brain.
 
     Strategies:
         prune         - Remove weak synapses and orphan neurons
@@ -532,6 +541,7 @@ def consolidate(
 
     Examples:
         smem consolidate                         # Run all strategies
+        smem consolidate --resume --brain default # Resume an incomplete checkpoint
         smem consolidate --strategy prune        # Only prune
         smem consolidate --strategy mature       # Advance episodic memories
         smem consolidate --dry-run               # Preview without changes
@@ -552,14 +562,28 @@ def consolidate(
         ConsolidationStrategy,
     )
     from surreal_memory.engine.consolidation_delta import run_with_delta
+    from surreal_memory.engine.consolidation_progress import INCOMPLETE_STATUSES
+
+    if resume and strategy is not None:
+        typer.secho(
+            "Error: --resume cannot be combined with --strategy.", fg=typer.colors.RED, err=True
+        )
+        raise typer.Exit(1)
+    if resume and dry_run:
+        typer.secho(
+            "Error: --resume cannot be combined with --dry-run.", fg=typer.colors.RED, err=True
+        )
+        raise typer.Exit(1)
+
+    strategy_name = strategy or "all"
 
     # Validate strategy early, before opening storage or printing progress
     try:
-        validated_strategies = [ConsolidationStrategy(strategy)]
+        validated_strategies = [ConsolidationStrategy(strategy_name)]
     except ValueError:
         valid = ", ".join(s.value for s in ConsolidationStrategy)
         typer.secho(
-            f"Error: unknown strategy '{strategy}'.\n"
+            f"Error: unknown strategy '{strategy_name}'.\n"
             f"  Valid strategies: {valid}\n"
             f"  Example: smem consolidate --strategy prune",
             fg=typer.colors.RED,
@@ -571,7 +595,10 @@ def consolidate(
         config = get_config()
         brain_name = resolve_brain(brain, config)
 
-        typer.echo(f"Consolidating brain '{brain_name}' (strategy: {strategy})...")
+        if resume:
+            typer.echo(f"Resuming saved consolidation checkpoint for brain '{brain_name}'...")
+        else:
+            typer.echo(f"Consolidating brain '{brain_name}' (strategy: {strategy_name})...")
         if dry_run:
             typer.echo("(dry run - no changes will be saved)")
 
@@ -583,26 +610,79 @@ def consolidate(
         # against the name.
         brain_id = brain_name
 
+        resume_run_id: str | None = None
+        strategies_to_run = validated_strategies
+        if resume:
+            state = await storage.get_consolidation_progress(brain_name)
+            allowed_strategies = {
+                item.value for item in ConsolidationStrategy if item != ConsolidationStrategy.ALL
+            }
+            requested = state.get("requested_strategies") if isinstance(state, dict) else None
+            completed = state.get("completed_strategies") if isinstance(state, dict) else None
+            run_id = state.get("run_id") if isinstance(state, dict) else None
+            checkpoint_status = state.get("status") if isinstance(state, dict) else None
+            if (
+                not isinstance(checkpoint_status, str)
+                or checkpoint_status not in INCOMPLETE_STATUSES
+                or not isinstance(run_id, str)
+                or not run_id.strip()
+                or not isinstance(requested, list)
+                or not requested
+                or not isinstance(completed, list)
+                or any(
+                    not isinstance(item, str) or item not in allowed_strategies
+                    for item in requested
+                )
+                or any(
+                    not isinstance(item, str) or item not in allowed_strategies
+                    for item in completed
+                )
+                or len(set(requested)) != len(requested)
+                or len(set(completed)) != len(completed)
+                or not set(completed).issubset(requested)
+            ):
+                typer.secho(
+                    "Resume refused: no valid incomplete consolidation checkpoint exists for this brain.",
+                    fg=typer.colors.RED,
+                    err=True,
+                )
+                raise typer.Exit(1)
+            resume_run_id = run_id
+            strategies_to_run = [ConsolidationStrategy(item) for item in requested]
+
         cons_config = ConsolidationConfig(
             prune_weight_threshold=prune_threshold,
             prune_min_inactive_days=min_inactive_days,
             merge_overlap_threshold=merge_overlap,
         )
 
-        delta = await run_with_delta(
-            storage,
-            brain_id,
-            strategies=validated_strategies,
-            dry_run=dry_run,
-            config=cons_config,
-            on_progress=lambda message: typer.echo(message),
-        )
+        if resume_run_id is not None:
+            delta = await run_with_delta(
+                storage,
+                brain_id,
+                strategies=strategies_to_run,
+                dry_run=dry_run,
+                config=cons_config,
+                on_progress=lambda message: typer.echo(message),
+                resume_run_id=resume_run_id,
+            )
+        else:
+            delta = await run_with_delta(
+                storage,
+                brain_id,
+                strategies=strategies_to_run,
+                dry_run=dry_run,
+                config=cons_config,
+                on_progress=lambda message: typer.echo(message),
+            )
 
         typer.echo("")
         typer.echo(delta.summary())
 
+        status = delta.report.extra.get("consolidation_status")
+
         # Post-consolidation health hint: warn about orphans if not pruning
-        if strategy != "prune" and not dry_run:
+        if strategy_name != "prune" and not dry_run and status != "blocked":
             try:
                 after = delta.after
                 if after.orphan_rate > 0.20:
@@ -617,7 +697,7 @@ def consolidate(
                         "  Run with --strategy prune to clean up, "
                         "or recall related topics to build connections."
                     )
-                if after.consolidation_ratio == 0.0 and strategy != "mature":
+                if after.consolidation_ratio == 0.0 and strategy_name != "mature":
                     typer.echo("")
                     typer.secho(
                         "  Hint: No memories have reached SEMANTIC stage yet.",
@@ -632,7 +712,6 @@ def consolidate(
         # not on the text, so a partially failed pass must not exit 0 just
         # because it now degrades gracefully instead of crashing.
         failed = delta.report.extra.get("failed_strategies")
-        status = delta.report.extra.get("consolidation_status")
         if failed or status in {"paused", "blocked", "failed", "lease_lost", "timed_out"}:
             raise typer.Exit(1)
 
