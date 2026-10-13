@@ -19,6 +19,14 @@ Restart your AI tool. Your agent now remembers.
 
 ---
 
+## What's new in 3.12.1
+
+- `smem consolidate --resume` resumes the saved incomplete strategy set and
+  reference time after validating the checkpoint. Invalid or replaced
+  checkpoints are refused without changing their stored state.
+- Fiber-census retries account for nullable fields omitted by SurrealDB while
+  preserving page fingerprints and conflict checks.
+
 ## What's new in 3.12.0
 
 - Consolidation now advances through bounded, durable work units. Interrupted

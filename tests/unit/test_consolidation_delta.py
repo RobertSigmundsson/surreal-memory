@@ -53,6 +53,20 @@ class TestHealthSnapshot:
 
 
 class TestConsolidationDelta:
+    def test_blocked_summary_does_not_attribute_snapshot_differences_to_consolidation(self) -> None:
+        from surreal_memory.engine.consolidation import ConsolidationReport
+
+        report = ConsolidationReport()
+        report.extra["consolidation_status"] = "blocked"
+        delta = ConsolidationDelta(
+            before=_make_snapshot(),
+            after=_make_snapshot(purity_score=55.0),
+            report=report,
+            computed_at=datetime(2026, 1, 1),
+        )
+        assert "Health Delta:" not in delta.summary()
+        assert "Strategies were not executed; checkpoint preserved" in delta.summary()
+
     def test_purity_delta_positive(self) -> None:
         before = _make_snapshot(purity_score=50.0)
         after = _make_snapshot(purity_score=55.5)

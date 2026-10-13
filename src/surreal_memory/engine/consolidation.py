@@ -643,6 +643,8 @@ class ConsolidationReport:
         status = self.extra.get("consolidation_status")
         if status in {"paused", "blocked", "failed", "lease_lost", "timed_out"}:
             lines.append(f"  Consolidation status: {status}")
+        if status == "blocked":
+            lines.append("  Strategies were not executed; checkpoint preserved")
 
         # Zeros from a pass where stages died look exactly like zeros from a
         # pass where there was nothing to do. Say which it was — but only when
@@ -682,6 +684,8 @@ class ConsolidationReport:
     def _eligibility_hints(self) -> list[str]:
         """Explain why consolidation produced no changes."""
         hints: list[str] = []
+        if self.extra.get("consolidation_status") == "blocked":
+            return hints
         total_changes = (
             self.synapses_pruned
             + self.neurons_pruned
@@ -890,8 +894,11 @@ class ConsolidationEngine:
         dry_run: bool = False,
         reference_time: datetime | None = None,
         on_progress: Callable[[str], None] | None = None,
+        resume_run_id: str | None = None,
     ) -> ConsolidationReport:
         """Run consolidation, resuming a compatible durable run when available."""
+        if dry_run and resume_run_id is not None:
+            raise ValueError("explicit resume cannot be combined with dry_run")
         if strategies is None:
             strategies = [ConsolidationStrategy.ALL]
 
@@ -932,7 +939,9 @@ class ConsolidationEngine:
         resume_message: str | None = None
 
         progress_session: ConsolidationProgressSession | None = None
-        if not dry_run and supports_persistent_progress(self._storage):
+        if not dry_run and (
+            supports_persistent_progress(self._storage) or resume_run_id is not None
+        ):
             try:
                 tier_config = self._tier_config
                 if tier_config is None:
@@ -957,6 +966,7 @@ class ConsolidationEngine:
                     fingerprint,
                     reference_time,
                     explicit_reference_time=explicit_reference_time,
+                    resume_run_id=resume_run_id,
                 )
             except ConsolidationProgressError as exc:
                 report.extra["consolidation_status"] = "blocked"
@@ -1058,7 +1068,7 @@ class ConsolidationEngine:
                                 progress_messages.append(
                                     "Consolidation paused: "
                                     f"{progress_session.last_checkpoint}; {exc}. "
-                                    "The next smem consolidate will resume this checkpoint."
+                                    "The next smem consolidate --resume will resume this checkpoint."
                                 )
                                 report.extra["last_checkpoint"] = progress_session.last_checkpoint
                             except ConsolidationProgressError as lease_exc:
@@ -1083,7 +1093,7 @@ class ConsolidationEngine:
                                 progress_messages.append(
                                     "Consolidation paused: "
                                     f"{progress_session.last_checkpoint}; the strategy limit "
-                                    "was reached. The next smem consolidate will resume "
+                                    "was reached. The next smem consolidate --resume will resume "
                                     "the last committed checkpoint."
                                 )
                                 report.extra["last_checkpoint"] = progress_session.last_checkpoint
@@ -1172,7 +1182,7 @@ class ConsolidationEngine:
                     report.extra["consolidation_status"] = "paused"
                     progress_messages.append(
                         "Consolidation paused with unfinished strategies; "
-                        "the next smem consolidate will continue."
+                        "the next smem consolidate --resume will continue."
                     )
             elif lease_lost:
                 report.extra["consolidation_status"] = "lease_lost"
@@ -4244,52 +4254,34 @@ class ConsolidationEngine:
             cast("Any", self._storage)._query,
         )
 
-        def drop_none(value: Any) -> Any:
-            # The SDK sends None as NONE and SurrealDB drops NONE-valued keys (nested
-            # ones too), so a page fingerprinted with them never matches the page read
-            # back. Encode the page exactly as it will come back; decode_fiber already
-            # defaults every missing key.
-            if isinstance(value, dict):
-                return {k: drop_none(v) for k, v in value.items() if v is not None}
-            if isinstance(value, list):
-                return [drop_none(v) for v in value]
-            return value
-
         def encode_fiber(fiber: Fiber) -> dict[str, Any]:
-            return cast(
-                "dict[str, Any]",
-                drop_none(
-                    {
-                        "id": fiber.id,
-                        "neuron_ids": sorted(fiber.neuron_ids),
-                        "synapse_ids": sorted(fiber.synapse_ids),
-                        "anchor_neuron_id": fiber.anchor_neuron_id,
-                        "pathway": list(fiber.pathway),
-                        "conductivity": fiber.conductivity,
-                        "last_conducted": fiber.last_conducted.isoformat()
-                        if fiber.last_conducted
-                        else None,
-                        "time_start": fiber.time_start.isoformat() if fiber.time_start else None,
-                        "time_end": fiber.time_end.isoformat() if fiber.time_end else None,
-                        "coherence": fiber.coherence,
-                        "salience": fiber.salience,
-                        "frequency": fiber.frequency,
-                        "summary": fiber.summary,
-                        "essence": fiber.essence,
-                        "last_ghost_shown_at": (
-                            fiber.last_ghost_shown_at.isoformat()
-                            if fiber.last_ghost_shown_at
-                            else None
-                        ),
-                        "auto_tags": sorted(fiber.auto_tags),
-                        "agent_tags": sorted(fiber.agent_tags),
-                        "metadata": fiber.metadata,
-                        "compression_tier": fiber.compression_tier,
-                        "pinned": fiber.pinned,
-                        "created_at": fiber.created_at.isoformat(),
-                    }
+            return {
+                "id": fiber.id,
+                "neuron_ids": sorted(fiber.neuron_ids),
+                "synapse_ids": sorted(fiber.synapse_ids),
+                "anchor_neuron_id": fiber.anchor_neuron_id,
+                "pathway": list(fiber.pathway),
+                "conductivity": fiber.conductivity,
+                "last_conducted": fiber.last_conducted.isoformat()
+                if fiber.last_conducted
+                else None,
+                "time_start": fiber.time_start.isoformat() if fiber.time_start else None,
+                "time_end": fiber.time_end.isoformat() if fiber.time_end else None,
+                "coherence": fiber.coherence,
+                "salience": fiber.salience,
+                "frequency": fiber.frequency,
+                "summary": fiber.summary,
+                "essence": fiber.essence,
+                "last_ghost_shown_at": (
+                    fiber.last_ghost_shown_at.isoformat() if fiber.last_ghost_shown_at else None
                 ),
-            )
+                "auto_tags": sorted(fiber.auto_tags),
+                "agent_tags": sorted(fiber.agent_tags),
+                "metadata": fiber.metadata,
+                "compression_tier": fiber.compression_tier,
+                "pinned": fiber.pinned,
+                "created_at": fiber.created_at.isoformat(),
+            }
 
         def decode_fiber(row: dict[str, Any]) -> Fiber:
             def parse_time(key: str) -> datetime | None:
@@ -4335,8 +4327,29 @@ class ConsolidationEngine:
                 dict(rows[0]) if rows and int(rows[0].get("page_index", -1)) == page_index else None
             )
 
-        def validate_page(row: dict[str, Any], page_index: int) -> list[Fiber]:
+        def restore_nullable_fields(row: dict[str, Any]) -> dict[str, Any]:
+            # SurrealDB omits null object fields; restore the encoder's exact hash input.
+            restored = dict(row)
+            restored.setdefault("first_fiber_id", None)
+            restored.setdefault("last_fiber_id", None)
             raw_fibers = row.get("fibers")
+            if isinstance(raw_fibers, list) and all(isinstance(item, dict) for item in raw_fibers):
+                fibers = [dict(item) for item in raw_fibers]
+                for fiber in fibers:
+                    for field in (
+                        "last_conducted",
+                        "time_start",
+                        "time_end",
+                        "summary",
+                        "essence",
+                        "last_ghost_shown_at",
+                    ):
+                        fiber.setdefault(field, None)
+                restored["fibers"] = fibers
+            return restored
+
+        def validate_page(row: dict[str, Any], page_index: int) -> list[Fiber]:
+            raw_fibers = restore_nullable_fields(row).get("fibers")
             fingerprint = (
                 hashlib.sha256(
                     json.dumps(
@@ -4350,6 +4363,7 @@ class ConsolidationEngine:
                 int(row.get("page_index", -1)) != page_index
                 or not isinstance(raw_fibers, list)
                 or not raw_fibers
+                or not all(isinstance(item, dict) for item in raw_fibers)
                 or len(raw_fibers) > page_size
                 or str(row.get("page_fingerprint")) != fingerprint
                 or str(row.get("first_fiber_id")) != str(raw_fibers[0].get("id"))
@@ -4389,8 +4403,13 @@ class ConsolidationEngine:
                 existing = dict(existing_rows[0])
                 existing.pop("id", None)
                 if json.dumps(
-                    existing, sort_keys=True, separators=(",", ":"), default=str
-                ) != json.dumps(row, sort_keys=True, separators=(",", ":"), default=str):
+                    restore_nullable_fields(existing),
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    default=str,
+                ) != json.dumps(
+                    restore_nullable_fields(row), sort_keys=True, separators=(",", ":"), default=str
+                ):
                     raise ConsolidationProgressError(
                         "immutable fiber census page conflicts with this source page; "
                         "refusing a stale-owner overwrite"

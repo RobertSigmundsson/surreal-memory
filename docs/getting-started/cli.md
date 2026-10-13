@@ -171,6 +171,7 @@ smem consolidate [OPTIONS]
 |--------|-------|-------------|
 | `--brain` | `-b` | Brain to consolidate (default: current) |
 | `--strategy` | `-s` | Strategy to run (default: `all`) |
+| `--resume` | | Resume the incomplete strategies from this brain's saved checkpoint |
 | `--dry-run` | `-n` | Preview without applying changes |
 | `--prune-threshold` | | Synapse weight threshold for pruning (default: 0.05) |
 | `--merge-overlap` | | Jaccard overlap threshold for merging (default: 0.5) |
@@ -201,12 +202,18 @@ smem consolidate [OPTIONS]
 
 ```bash
 smem consolidate                          # Run all strategies
+smem consolidate --resume --brain default # Resume an incomplete saved run
 smem consolidate --strategy prune         # Only prune weak links
 smem consolidate -s mature                # Advance episodic memories
 smem consolidate --dry-run                # Preview without changes
 smem consolidate -s merge --merge-overlap 0.3
 ```
 
+> **Resume:** `--resume` continues only the unfinished strategies in the
+> saved checkpoint for the selected brain. It cannot be combined with
+> `--strategy` or `--dry-run`; if no valid incomplete checkpoint exists, the
+> command exits without running consolidation.
+>
 > **Tip:** Always use `--strategy <name>` (named flag). Positional syntax
 > (`smem consolidate prune`) is not supported and will produce a helpful error.
 
