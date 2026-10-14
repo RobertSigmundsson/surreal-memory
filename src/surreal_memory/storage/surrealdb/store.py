@@ -3723,8 +3723,13 @@ class SurrealDBStorage(
         # ef must stay >= k, otherwise HNSW searches a candidate list smaller than
         # the number of neighbours asked for and quietly returns a worse set.
         ef = max(_KNN_EF_MIN, 2 * int(limit))
+        # OMIT embedding_vec: the KNN consumers (`retrieval._rank_knn_rows`) read only id, content
+        # and the similarity; the 1024-float vector of every returned row was decoded by the pure-
+        # Python CBOR client for nothing (smem-baza-odchudzenie-b B6: response 672 KB -> 20 KB per
+        # k=30 call; ranking and scores identical). `_row_to_neuron` simply omits `_embedding`
+        # when the column is absent — every other read path still returns it.
         rows = await self._query(
-            f"SELECT *, vector::distance::knn() AS score "
+            f"SELECT *, vector::distance::knn() AS score OMIT embedding_vec "
             f"FROM neuron WHERE {where} AND embedding_vec <|{int(limit)},{ef}|> $vec",
             **params,
         )
@@ -3771,8 +3776,9 @@ class SurrealDBStorage(
         See `storage/base.py::find_fibers_by_embedding` for what this fixes.
         """
         brain_id = self._get_brain_id()
+        # OMIT fiber_vec: `_row_to_fiber` cannot carry it anyway (storage-only field).
         rows = await self._query(
-            f"SELECT *, vector::distance::knn() AS score FROM fiber "
+            f"SELECT *, vector::distance::knn() AS score OMIT fiber_vec FROM fiber "
             f"WHERE brain_id = {_brain_literal(brain_id)} "
             f"AND fiber_vec <|{int(limit)},{max(_KNN_EF_MIN, 2 * int(limit))}|> $vec",
             vec=query_embedding,
