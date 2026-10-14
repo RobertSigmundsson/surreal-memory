@@ -198,10 +198,12 @@ class SurrealDBSemanticSourceRevisionMixin:
             )
             if not events:
                 break
+            fresh = 0
             for event in events:
                 stamp = event.get("versionstamp")
                 if last_stamp is not None and isinstance(stamp, int) and stamp <= last_stamp:
                     continue  # SINCE is inclusive: the previous page's last entry repeats
+                fresh += 1
                 changes = event.get("changes")
                 if not isinstance(changes, (list, tuple)):
                     kept.append(event)
@@ -210,7 +212,12 @@ class SurrealDBSemanticSourceRevisionMixin:
                 if own:
                     kept.append({**event, "changes": own})
             scanned += len(events)
-            if len(events) < _DATABASE_FEED_PAGE_SIZE:
+            # The feed has ended only when a page brings nothing new. NOT when it holds fewer than a full page of rows:
+            # SurrealDB 3.2.3 applies LIMIT to feed ENTRIES (versionstamp x table) and merges the entries of one transaction
+            # into a single row, so a transaction touching two changefeed tables (e.g. DELETE neuron + cascaded synapse)
+            # returns LIMIT-1 rows although the feed goes on. Stopping there truncated every later scan until that
+            # transaction left the 1-week retention (barrier "not found within the bounded changefeed scan").
+            if fresh == 0:
                 break
             newest = events[-1].get("versionstamp")
             if (
