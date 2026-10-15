@@ -23,7 +23,7 @@ import {
   Command as CommandIcon,
 } from "@phosphor-icons/react"
 import { openUpgradeModal } from "@/components/common/UpgradeModal"
-import { matchesQuery } from "@/components/common/commandPaletteFilter"
+import { matchesQuery, neuronSearchPath } from "@/components/common/commandPaletteFilter"
 
 /* ------------------------------------------------------------------ */
 /*  Types                                                              */
@@ -114,9 +114,7 @@ export function CommandPalette() {
     setSearching(true)
     debounceRef.current = setTimeout(async () => {
       try {
-        const data = await api.get<{ neurons: NeuronResult[] }>(
-          `/neurons?content_contains=${encodeURIComponent(q)}&limit=8`,
-        )
+        const data = await api.get<{ neurons: NeuronResult[] }>(neuronSearchPath(q))
         setNeurons(data.neurons ?? [])
       } catch {
         setNeurons([])
