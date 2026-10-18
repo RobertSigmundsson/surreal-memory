@@ -7,6 +7,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Consolidation deletes semantic-discovery snapshots that no unfinished run
+  can resume from. Each `semantic_link` run stages its discovery work as
+  snapshots of up to 1 MB, and nothing removed them after the run finished, so
+  the `semantic_discovery_state` table grew with every run. Once
+  `semantic_link` completes, snapshots older than
+  `[maintenance] semantic_discovery_state_retention_days` (default `7`, `0`
+  disables the prune) are deleted in batches of at most 500 rows, except those
+  of the current run and of every queued, running, paused or failed run. The
+  report counts them as "Semantic discovery snapshots pruned" and shows a
+  failed prune there instead of failing the run.
+
+## [3.12.1] — 2026-10-12 — consolidation resume validates saved work
+
+Explicit resume now checks that a saved checkpoint still belongs to the same
+incomplete run before work continues. Fiber-census retries also tolerate
+SurrealDB omitting nullable fields while retaining the immutable page checks.
+
+### Fixed
+
+- `smem consolidate --resume` resumes the saved strategy set and original
+  reference time, and refuses missing, completed, replaced, or invalid
+  checkpoints without changing their stored state. It cannot be combined with
+  `--strategy` or `--dry-run`.
+- Blocked runs explain that strategies were not executed and suppress health
+  deltas and eligibility hints that could misattribute unrelated snapshot
+  differences to consolidation.
+- Fiber-census page hashing and duplicate-page comparison restore nullable
+  fields omitted by SurrealDB. Tests cover a null-field round trip, an empty
+  census completion marker, and rejection of changed page contents.
+
 ## [3.12.0] — 2026-09-25 — consolidation can resume its committed work
 
 Large maintenance runs now make bounded progress and can continue from durable
