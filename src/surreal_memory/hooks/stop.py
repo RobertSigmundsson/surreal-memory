@@ -25,6 +25,7 @@ import logging
 import os
 import re
 import sys
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -630,6 +631,16 @@ async def capture_text(text: str, project_name: str | None = None) -> dict[str, 
             logger.debug("storage.close() failed (non-fatal)", exc_info=True)
 
 
+def _transkrypt_hooka_zcode(resolved: Path) -> bool:
+    """Transkrypt hooka ZCode: ``<tmpdir>/zcode-hook-*/transcript.jsonl`` (ZCode pisze go na czas hooka i usuwa po nim —
+    ``configured-runner-input.ts``; zcode-parytet U7-B). Ścieżka już rozwiązana (``resolve``: dowiązania i ``..`` nie przejdą)."""
+    return (
+        resolved.name == "transcript.jsonl"
+        and resolved.parent.name.startswith("zcode-hook-")
+        and resolved.parent.parent == Path(tempfile.gettempdir()).resolve()
+    )
+
+
 def main() -> None:
     """Entry point for Stop hook or standalone CLI usage."""
     import argparse
@@ -665,10 +676,20 @@ def main() -> None:
             # Validate stdin transcript path is within Claude data directory
             resolved = Path(transcript_path).resolve()
             allowed_dir = Path.home().resolve() / ".claude"
-            if not resolved.is_relative_to(allowed_dir):
+            if resolved.is_relative_to(allowed_dir):
+                text = read_transcript_tail(transcript_path)
+            elif _transkrypt_hooka_zcode(resolved):
+                # zcode-parytet U7-B: liczniki dobowe — „0 przechwyceń ZCode” jest pomiarem, nie ciszą
+                from surreal_memory.hooks.liczniki import zwieksz
+
+                zwieksz({"stop_transkrypt_zcode": 1})
+                text = read_transcript_tail(str(resolved))
+            else:
+                from surreal_memory.hooks.liczniki import zwieksz
+
                 logger.warning("Transcript path outside allowed directory, skipping")
+                zwieksz({"stop_transkrypt_pominiety": 1})
                 sys.exit(0)
-            text = read_transcript_tail(transcript_path)
         else:
             sys.exit(0)
 
