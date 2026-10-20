@@ -9,7 +9,7 @@ the same verdict as a full scan.
 from __future__ import annotations
 
 import random
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import pytest
@@ -177,6 +177,20 @@ async def test_tolerance_and_progress_require_a_frozen_cutoff_and_matching_token
     with pytest.raises(ValueError):
         await storage.assert_semantic_source_unchanged(
             token, created_before=cutoff, progress=mismatched
+        )
+
+
+@pytest.mark.asyncio
+async def test_progress_cutoff_is_compared_as_the_instant_the_fence_parses() -> None:
+    """The engine holds a timezone-aware reference time; the fence normalizes it to naive UTC."""
+    storage, cutoff, token = _setup()
+    aware = cutoff.replace(tzinfo=UTC)
+    progress = SemanticSourceFenceProgress(token=token, created_before=aware)
+    await storage.assert_semantic_source_unchanged(token, created_before=aware, progress=progress)
+    shifted = SemanticSourceFenceProgress(token=token, created_before=aware + timedelta(seconds=1))
+    with pytest.raises(ValueError):
+        await storage.assert_semantic_source_unchanged(
+            token, created_before=aware, progress=shifted
         )
 
 

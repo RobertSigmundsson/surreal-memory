@@ -494,7 +494,8 @@ class SurrealDBSemanticSourceRevisionMixin:
         if created_before is not None:
             cutoff = self._parse_datetime(created_before)
             if progress is not None and (
-                progress.token != since_token or progress.created_before != cutoff
+                progress.token != since_token
+                or self._parse_datetime(progress.created_before) != cutoff
             ):
                 raise ValueError("progress belongs to a different token or cutoff")
             await self._assert_source_unchanged_before(
