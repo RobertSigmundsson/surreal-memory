@@ -1012,6 +1012,7 @@ class ConsolidationEngine:
         self._total_deadline = time.perf_counter() + total_timeout
         paused = False
         lease_lost = False
+        progress_failed = False
 
         try:
             if resume_message is not None and on_progress is not None:
@@ -1114,6 +1115,13 @@ class ConsolidationEngine:
                         )
                         break
                     except ConsolidationProgressError as exc:
+                        progress_failed = True
+                        logger.error(
+                            "Consolidation progress coordination failed in %s: %s",
+                            strategy.value,
+                            exc,
+                            exc_info=True,
+                        )
                         failed_strategies.append(
                             f"{strategy.value} (progress coordination: {type(exc).__name__})"
                         )
@@ -1142,7 +1150,7 @@ class ConsolidationEngine:
                         self._active_strategy = None
                         self._strategy_deadline = None
 
-                if paused or lease_lost:
+                if paused or lease_lost or progress_failed:
                     break
 
             if timed_out_strategies:
@@ -5321,12 +5329,13 @@ class ConsolidationEngine:
             and callable(getattr(self._storage, "_query", None))
             and callable(getattr(self._storage, "get_fibers_after_id", None))
             and (
-                progress_phase in {"", "summarize_plan_stage"}
+                progress_phase in {"", "starting", "fiber_census", "summarize_plan_stage"}
                 or progress_phase.startswith("summarize_plan_")
             )
         )
         if durable_group_mode:
-            await self._summarize_durable(report, run_id=run_id, phase=progress_phase)
+            durable_phase = "" if progress_phase in {"starting", "fiber_census"} else progress_phase
+            await self._summarize_durable(report, run_id=run_id, phase=durable_phase)
             return
         import json
 
