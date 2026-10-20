@@ -10915,6 +10915,11 @@ class ConsolidationEngine:
         start = _time.perf_counter()
         time_budget = self._config.strategy_timeout_seconds * 0.8
         page_size = 250
+        # Share one current-brain protection snapshot across this strategy pass.
+        # Per-fiber pin scans would turn the stable keyset traversal into an
+        # unbounded repeated census; a lookup failure must abort before progress.
+        # Concurrent pin changes after this snapshot take effect next pass.
+        pinned_neuron_ids = await self._storage.get_pinned_neuron_ids()
 
         try:
             brain = await self._storage.get_brain(brain_id)
@@ -11029,6 +11034,7 @@ class ConsolidationEngine:
                     CompressionTier(target_tier),
                     dry_run=dry_run,
                     brain=brain,
+                    _pinned_neuron_ids=pinned_neuron_ids,
                     **({"run_id": run_id} if run_id else {}),
                 )
             except Exception:

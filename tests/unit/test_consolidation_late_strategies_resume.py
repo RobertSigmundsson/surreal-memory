@@ -69,6 +69,8 @@ class _CompressionStorage:
             SimpleNamespace(id="fiber-a", pinned=False, metadata={}, compression_tier=0),
         ]
         self.compressed: list[str] = []
+        self.pinned_neuron_ids: set[str] = set()
+        self.pin_census_calls = 0
 
     async def get_fibers(self, *, limit: int) -> list[Any]:
         return self.fibers[:limit]
@@ -88,6 +90,154 @@ class _CompressionStorage:
     async def get_brain(self, brain_id: str) -> object:
         assert brain_id == self.current_brain_id
         return object()
+
+    async def get_pinned_neuron_ids(self) -> set[str]:
+        self.pin_census_calls += 1
+        return set(self.pinned_neuron_ids)
+
+
+@pytest.mark.asyncio
+async def test_compress_pass_loads_one_pinned_neuron_snapshot(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from surreal_memory.engine import compression
+
+    class _SnapshotCompressionEngine:
+        def __init__(self, storage: _CompressionStorage) -> None:
+            self.storage = storage
+            self.snapshots: list[set[str] | None] = []
+
+        def determine_target_tier(
+            self, _fiber: Any, _reference_time: datetime, *, heat_score: float
+        ) -> int:
+            assert heat_score == 0.0
+            return 1
+
+        async def compress_fiber(
+            self,
+            _fiber: Any,
+            _target_tier: int,
+            *,
+            dry_run: bool,
+            brain: object | None,
+            _pinned_neuron_ids: set[str] | None = None,
+        ) -> Any:
+            self.snapshots.append(_pinned_neuron_ids)
+            return SimpleNamespace(skipped=False, tokens_saved=1)
+
+    engines: list[_SnapshotCompressionEngine] = []
+
+    def _engine_factory(storage: _CompressionStorage) -> _SnapshotCompressionEngine:
+        instance = _SnapshotCompressionEngine(storage)
+        engines.append(instance)
+        return instance
+
+    monkeypatch.setattr(compression, "CompressionEngine", _engine_factory)
+    storage = _CompressionStorage()
+    storage.pinned_neuron_ids = {"protected-neuron"}
+
+    await _engine(storage, ConsolidationStrategy.COMPRESS)._compress(
+        ConsolidationReport(), datetime(2026, 1, 1, tzinfo=UTC), dry_run=False
+    )
+
+    assert storage.pin_census_calls == 1
+    assert engines[0].snapshots == [
+        {"protected-neuron"},
+        {"protected-neuron"},
+    ]
+
+
+@pytest.mark.asyncio
+async def test_compress_replay_pin_conflict_preserves_resume_cursor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from dataclasses import replace
+    from datetime import timedelta
+
+    from surreal_memory.core.brain import Brain
+    from surreal_memory.core.fiber import Fiber
+    from surreal_memory.core.neuron import Neuron, NeuronType
+    from surreal_memory.engine import compression
+    from surreal_memory.engine.compression import CompressionEngine, CompressionTier
+    from surreal_memory.storage.memory_store import InMemoryStorage
+    from surreal_memory.utils.timeutils import utcnow
+
+    async def _refresh(
+        _storage: InMemoryStorage,
+        neuron: Neuron,
+        content: str,
+        *,
+        brain: Any = None,
+    ) -> Neuron:
+        return replace(neuron, content=content)
+
+    store = InMemoryStorage()
+    brain = Brain.create(name="pinned-replay-resume")
+    await store.save_brain(brain)
+    store.set_brain(brain.id)
+    neuron = Neuron.create(
+        type=NeuronType.CONCEPT,
+        content=(
+            "The release contains detailed migration notes and recovery instructions. "
+            "The first check is green. The second check verifies graph integrity. "
+            "The third check confirms checkpoints. The fourth check reads the backup. "
+            "The fifth check reviews the service state."
+        ),
+    )
+    await store.add_neuron(neuron)
+    fiber = Fiber(
+        id="fiber-b",
+        neuron_ids={neuron.id},
+        synapse_ids=set(),
+        anchor_neuron_id=neuron.id,
+        created_at=utcnow() - timedelta(days=15),
+    )
+    await store.add_fiber(fiber)
+    monkeypatch.setattr(compression, "content_refreshed", _refresh)
+    monkeypatch.setattr("surreal_memory.plugins.get_compression_fn", lambda: None)
+
+    update_neuron = store.update_neuron
+
+    async def _interrupt(_updated: Neuron) -> None:
+        raise RuntimeError("interrupted after compression intent")
+
+    monkeypatch.setattr(store, "update_neuron", _interrupt)
+    with pytest.raises(RuntimeError, match="interrupted after compression intent"):
+        await CompressionEngine(store).compress_fiber(fiber, CompressionTier.EXTRACTIVE)
+    monkeypatch.setattr(store, "update_neuron", update_neuron)
+
+    pinned = replace(
+        fiber,
+        id="fiber-c",
+        pinned=True,
+    )
+    await store.add_fiber(pinned)
+    pin_census_calls = 0
+    original_pin_census = store.get_pinned_neuron_ids
+
+    async def _count_pin_census() -> set[str]:
+        nonlocal pin_census_calls
+        pin_census_calls += 1
+        return await original_pin_census()
+
+    monkeypatch.setattr(store, "get_pinned_neuron_ids", _count_pin_census)
+    progress = _Progress()
+    progress.strategy_state("compress").update(
+        phase="compress_fibers",
+        cursor="fiber-a",
+        counters={"fibers_compressed": 0, "tokens_saved": 0},
+    )
+
+    with pytest.raises(RuntimeError, match=r"(?i)pinned neuron.*compression replay"):
+        await _engine(store, ConsolidationStrategy.COMPRESS, progress)._compress(
+            ConsolidationReport(), utcnow(), dry_run=False
+        )
+
+    assert pin_census_calls == 1
+    assert progress.strategy_state("compress")["cursor"] == "fiber-a"
+    saved = await store.get_fiber(fiber.id)
+    assert saved is not None and "_compression_pending" in saved.metadata
+    assert (await store.get_neuron(neuron.id)).content == neuron.content
 
 
 @pytest.mark.asyncio
@@ -114,6 +264,7 @@ async def test_compress_resumes_after_committed_fiber_without_recompressing(
             *,
             dry_run: bool,
             brain: object | None,
+            _pinned_neuron_ids: set[str] | None = None,
         ) -> Any:
             self.storage.compressed.append(fiber.id)
             if fiber.compression_tier >= target_tier:
@@ -167,6 +318,7 @@ async def test_compress_does_not_advance_cursor_when_a_fiber_fails(
             *,
             dry_run: bool,
             brain: object | None,
+            _pinned_neuron_ids: set[str] | None = None,
         ) -> Any:
             if fiber.id == "fiber-b":
                 raise RuntimeError("transient compression failure")
@@ -443,6 +595,7 @@ async def test_late_strategy_dry_runs_do_not_write_or_checkpoint(
             *,
             dry_run: bool,
             brain: object | None,
+            _pinned_neuron_ids: set[str] | None = None,
         ) -> Any:
             assert dry_run
             assert brain is not None
