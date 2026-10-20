@@ -696,6 +696,17 @@ def consolidate(
             ),
         ),
     ] = 0,
+    supersede_failed_semantic_link: Annotated[
+        bool,
+        typer.Option(
+            "--supersede-failed-semantic-link",
+            help=(
+                "Let this run replace the record of a failed (or too old to resume) lone "
+                "semantic_link run instead of being refused; semantic_link is additive and "
+                "idempotent, so nothing is lost. The replaced run is kept in the new record."
+            ),
+        ),
+    ] = False,
 ) -> None:
     """Consolidate brain memories by pruning, merging, or summarizing.
 
@@ -793,6 +804,7 @@ def consolidate(
             config=cons_config,
             on_progress=lambda message: typer.echo(message),
             semantic_auto_restarts=semantic_auto_restarts,
+            supersede_failed_semantic_link=supersede_failed_semantic_link,
         )
 
         typer.echo("")

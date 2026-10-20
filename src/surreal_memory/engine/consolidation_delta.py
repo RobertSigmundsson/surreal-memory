@@ -187,6 +187,7 @@ async def run_with_delta(
     tier_config: TierConfig | None = None,
     on_progress: Callable[[str], None] | None = None,
     semantic_auto_restarts: int = 0,
+    supersede_failed_semantic_link: bool = False,
 ) -> ConsolidationDelta:
     """Run consolidation and compute a before/after health delta.
 
@@ -204,6 +205,8 @@ async def run_with_delta(
         reference_time: Reference time for consolidation.
         semantic_auto_restarts: How many times a semantic_link discovery whose source changed
             may start over within the run (0 = fail as before).
+        supersede_failed_semantic_link: Let a run of another strategy replace the record of a
+            failed (or too old to resume) lone semantic_link run instead of being refused.
 
     Returns:
         ConsolidationDelta with before/after snapshots and report.
@@ -217,6 +220,7 @@ async def run_with_delta(
         config,
         tier_config=tier_config,
         semantic_auto_restarts=semantic_auto_restarts,
+        supersede_failed_semantic_link=supersede_failed_semantic_link,
     )
 
     # Step 1: Before snapshot

@@ -830,8 +830,12 @@ class ConsolidationEngine:
         dream_decay_multiplier: float = 10.0,
         tier_config: TierConfig | None = None,
         semantic_auto_restarts: int = 0,
+        supersede_failed_semantic_link: bool = False,
     ) -> None:
         self._storage = storage
+        # Lets a run of another strategy take over the record of a failed (or too old to resume)
+        # semantic_link run instead of being refused. Not part of the options fingerprint either.
+        self._supersede_failed_semantic_link = bool(supersede_failed_semantic_link)
         # How many times a semantic_link discovery whose source changed may start over within one
         # run. Deliberately not part of the options fingerprint: it changes what a run may do
         # about a failure, not what a resumed run has to match.
@@ -1024,6 +1028,7 @@ class ConsolidationEngine:
                     fingerprint,
                     reference_time,
                     explicit_reference_time=explicit_reference_time,
+                    supersede_failed_semantic_link=self._supersede_failed_semantic_link,
                 )
             except ConsolidationProgressError as exc:
                 report.extra["consolidation_status"] = "blocked"
@@ -1063,6 +1068,13 @@ class ConsolidationEngine:
                 )
                 resume_message = (
                     f"Consolidation: {resume_strategy} progress state found - resuming..."
+                )
+                progress_messages.append(resume_message)
+            superseded = progress_session.superseded
+            if superseded is not None:
+                resume_message = (
+                    f"Superseded unfinished semantic_link run {superseded['run_id']} "
+                    f"({superseded['status']}): {superseded['reason']}"
                 )
                 progress_messages.append(resume_message)
 
