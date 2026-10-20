@@ -514,3 +514,73 @@ async def test_barrier_is_found_behind_other_tables_writes(store, monkeypatch) -
     token = await store.capture_semantic_source_token()
 
     assert json.loads(token)["versionstamp"] > 0
+
+
+@pytest.mark.asyncio
+async def test_tolerance_filter_and_progress_on_a_real_changefeed(store) -> None:
+    """P3: the predicate sees decoded SDK records; memory gives the same verdict as a full scan."""
+    from surreal_memory.storage.surrealdb.semantic_source_revision import (
+        SemanticSourceFenceProgress,
+    )
+
+    old_created_at = store._parse_datetime(
+        await store._query_response("RETURN time::now()")
+    ) - timedelta(days=1)
+    original = replace(
+        Neuron.create(type=NeuronType.CONCEPT, content="tolerance-original"),
+        created_at=old_created_at,
+    )
+    await store.add_neuron(original)
+    reference_time = store._parse_datetime(await store._query_response("RETURN time::now()"))
+    token = await store.capture_semantic_source_token()
+    own_brain = store.current_brain_id
+
+    seen: list[tuple[str, str, str | None, object]] = []
+
+    def predicate(table: str, action: str, public_id: str, brain: str | None, domain) -> bool:
+        seen.append((table, action, brain, domain))
+        if table != "neuron" or domain is None:
+            return False
+        if brain != own_brain:
+            return True
+        return domain.content == original.content and domain.type == original.type
+
+    progress = SemanticSourceFenceProgress(token=token, created_before=reference_time)
+    await store.assert_semantic_source_unchanged(
+        token, created_before=reference_time, tolerate=predicate, progress=progress
+    )
+
+    # A recall-like write: only metadata changes on an old row.
+    await store.update_neuron(replace(original, metadata={"_context_trail": [{"ts": "x"}]}))
+    with pytest.raises(SemanticSourceChangedError):
+        await store.assert_semantic_source_unchanged(token, created_before=reference_time)
+    await store.assert_semantic_source_unchanged(
+        token, created_before=reference_time, tolerate=predicate, progress=progress
+    )
+    assert any(
+        action == "update" and getattr(domain, "content", None) == "tolerance-original"
+        for _table, action, _brain, domain in seen
+    )
+
+    # A neuron created in another brain of the same database.
+    other = Brain.create(name="semantic-source-fence-other-brain")
+    await store.save_brain(other)
+    store.set_brain(other.id)
+    await store.add_neuron(Neuron.create(type=NeuronType.CONCEPT, content="other-brain-neuron"))
+    store.set_brain(own_brain)
+    with pytest.raises(SemanticSourceChangedError):
+        await store.assert_semantic_source_unchanged(token, created_before=reference_time)
+    await store.assert_semantic_source_unchanged(
+        token, created_before=reference_time, tolerate=predicate, progress=progress
+    )
+
+    # A real content change is NOT tolerated, with or without the incremental memory.
+    await store.update_neuron(replace(original, content="tolerance-changed"))
+    with pytest.raises(SemanticSourceChangedError):
+        await store.assert_semantic_source_unchanged(
+            token, created_before=reference_time, tolerate=predicate, progress=progress
+        )
+    with pytest.raises(SemanticSourceChangedError):
+        await store.assert_semantic_source_unchanged(
+            token, created_before=reference_time, tolerate=predicate
+        )

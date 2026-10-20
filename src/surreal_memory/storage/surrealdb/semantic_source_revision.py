@@ -9,7 +9,8 @@ shapes for deletes and cannot miss a relevant write.
 from __future__ import annotations
 
 import json
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
+from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import uuid4
@@ -43,6 +44,28 @@ class SemanticSourceFenceExpiredError(SemanticSourceFenceError):
 
 class SemanticSourceFenceUnavailableError(SemanticSourceFenceError):
     """The source changefeed could not be checked; callers must fail closed."""
+
+
+# (table, action, public_id, brain_id, domain) -> True when the caller proves the change cannot
+# affect its result. ``domain`` is the decoded Neuron/Synapse for create/update events and None for
+# deletes (the feed carries only the id there). Predicates must be pure and fast.
+SourceChangeFilter = Callable[[str, str, str, str | None, Any | None], bool]
+
+
+@dataclass
+class SemanticSourceFenceProgress:
+    """Incremental memory of one (token, created_before) verification inside one process.
+
+    Lets repeated checks read only the feed entries added since the previous successful pass.
+    State is committed per table only after that table's scan finished, so a failed pass never
+    advances it. The final gate of a run should still verify WITHOUT a progress object (a full
+    scan from the token) so a memory bug cannot hide an event.
+    """
+
+    token: str
+    created_before: datetime
+    cursors: dict[str, int] = field(default_factory=dict)
+    post_reference_ids: dict[str, set[str]] = field(default_factory=dict)
 
 
 class SurrealDBSemanticSourceRevisionMixin:
@@ -433,9 +456,19 @@ class SurrealDBSemanticSourceRevisionMixin:
             ) from exc
 
     async def assert_semantic_source_unchanged(
-        self, since_token: str, *, created_before: datetime | None = None
+        self,
+        since_token: str,
+        *,
+        created_before: datetime | None = None,
+        tolerate: SourceChangeFilter | None = None,
+        progress: SemanticSourceFenceProgress | None = None,
     ) -> None:
         """Raise for source changes except provably post-reference-time records.
+
+        ``tolerate`` (frozen cutoff only) lets the caller accept a change it can prove irrelevant
+        to its result; it is consulted before every "changed" verdict except the strict legacy-token
+        branch, and decoding failures fail closed. ``progress`` makes repeated calls incremental.
+        Both default to None, which keeps the strict behaviour byte for byte.
 
         Without a frozen cutoff, retain the legacy conservative check. With a
         cutoff, full-record events whose ``created_at`` is after the cutoff are
@@ -456,12 +489,21 @@ class SurrealDBSemanticSourceRevisionMixin:
                 "semantic source token is older than the safe changefeed window"
             )
 
+        if created_before is None and (tolerate is not None or progress is not None):
+            raise ValueError("tolerate and progress require a frozen created_before cutoff")
         if created_before is not None:
+            cutoff = self._parse_datetime(created_before)
+            if progress is not None and (
+                progress.token != since_token or progress.created_before != cutoff
+            ):
+                raise ValueError("progress belongs to a different token or cutoff")
             await self._assert_source_unchanged_before(
                 brain_id,
                 versionstamp,
-                self._parse_datetime(created_before),
+                cutoff,
                 created_at_readonly=created_at_readonly,
+                tolerate=tolerate,
+                progress=progress,
             )
             return
 
@@ -482,6 +524,44 @@ class SurrealDBSemanticSourceRevisionMixin:
                     f"{table} changed since the semantic source token was captured"
                 )
 
+    @staticmethod
+    def _source_change_public_id(record: Mapping[str, Any]) -> str:
+        from ._ids import _to_public_id
+
+        return _to_public_id(str(record["id"]))
+
+    @staticmethod
+    def _source_change_domain(table: str, record: Mapping[str, Any]) -> Any:
+        # Imported lazily: store.py imports this module, so a module-level import would be circular.
+        from .store import _row_to_neuron, _row_to_synapse
+
+        row = dict(record)
+        return _row_to_neuron(row) if table == "neuron" else _row_to_synapse(row)
+
+    def _source_change_tolerated(
+        self,
+        tolerate: SourceChangeFilter | None,
+        table: str,
+        action: str,
+        record: Mapping[str, Any],
+    ) -> bool:
+        """Ask the caller's predicate whether this change is provably irrelevant to it.
+
+        No predicate, or anything that cannot be decoded, is NOT tolerated: decoding errors raise
+        ``SemanticSourceFenceUnavailableError`` so the fence stays fail-closed.
+        """
+        if tolerate is None:
+            return False
+        try:
+            public_id = self._source_change_public_id(record)
+            brain = None if action == "delete" else record.get("brain_id")
+            domain = None if action == "delete" else self._source_change_domain(table, record)
+        except Exception as exc:
+            raise SemanticSourceFenceUnavailableError(
+                f"{table} changefeed record could not be decoded for the tolerance filter"
+            ) from exc
+        return bool(tolerate(table, action, public_id, brain, domain))
+
     async def _assert_source_unchanged_before(
         self,
         brain_id: str,
@@ -489,6 +569,8 @@ class SurrealDBSemanticSourceRevisionMixin:
         created_before: datetime,
         *,
         created_at_readonly: bool,
+        tolerate: SourceChangeFilter | None = None,
+        progress: SemanticSourceFenceProgress | None = None,
     ) -> None:
         """Page source feeds, ignoring only records provably outside the run.
 
@@ -498,9 +580,13 @@ class SurrealDBSemanticSourceRevisionMixin:
         later updates/deletes for that id can be ignored.
         """
         for table in _SOURCE_TABLES:
-            cursor = versionstamp
+            cursor = (
+                progress.cursors.get(table, versionstamp) if progress is not None else versionstamp
+            )
             scanned = 0
-            post_reference_ids: set[str] = set()
+            post_reference_ids: set[str] = (
+                set(progress.post_reference_ids.get(table, ())) if progress is not None else set()
+            )
             while scanned < _SOURCE_CHANGEFEED_MAX_ROWS:
                 limit = min(
                     _SOURCE_CHANGEFEED_PAGE_SIZE,
@@ -570,6 +656,8 @@ class SurrealDBSemanticSourceRevisionMixin:
                             if record_id_text in post_reference_ids:
                                 post_reference_ids.remove(record_id_text)
                                 continue
+                            if self._source_change_tolerated(tolerate, table, action, record):
+                                continue
                             raise SemanticSourceChangedError(
                                 f"{table} changed since the semantic source token was captured"
                             )
@@ -579,6 +667,8 @@ class SurrealDBSemanticSourceRevisionMixin:
                             )
                         if action == "update" and record_id_text in post_reference_ids:
                             if record.get("brain_id") != brain_id:
+                                if self._source_change_tolerated(tolerate, table, action, record):
+                                    continue
                                 raise SemanticSourceChangedError(
                                     f"{table} changed since the semantic source token was captured"
                                 )
@@ -588,11 +678,15 @@ class SurrealDBSemanticSourceRevisionMixin:
                                 f"{table} changed since the semantic source token was captured"
                             )
                         if record.get("brain_id") != brain_id:
+                            if self._source_change_tolerated(tolerate, table, action, record):
+                                continue
                             raise SemanticSourceChangedError(
                                 f"{table} changed since the semantic source token was captured"
                             )
                         created_at = record.get("created_at")
                         if created_at is None:
+                            if self._source_change_tolerated(tolerate, table, action, record):
+                                continue
                             raise SemanticSourceChangedError(
                                 f"{table} changed since the semantic source token was captured"
                             )
@@ -603,6 +697,8 @@ class SurrealDBSemanticSourceRevisionMixin:
                                 f"{table} changefeed returned an invalid created_at"
                             ) from exc
                         if created_at <= created_before:
+                            if self._source_change_tolerated(tolerate, table, action, record):
+                                continue
                             raise SemanticSourceChangedError(
                                 f"{table} changed since the semantic source token was captured"
                             )
@@ -624,3 +720,8 @@ class SurrealDBSemanticSourceRevisionMixin:
                     raise SemanticSourceFenceUnavailableError(
                         f"{table} changefeed pagination did not advance"
                     )
+
+            if progress is not None:
+                # Commit per table, and only after its whole scan passed.
+                progress.cursors[table] = cursor
+                progress.post_reference_ids[table] = post_reference_ids
