@@ -34,6 +34,11 @@ _OLD = _REFERENCE_TIME - timedelta(days=1)
 _BRAIN = "brain-1"
 
 
+def _aware(moment: datetime) -> datetime:
+    """The engine mixes naive (``utcnow``) and aware timestamps; the real store normalizes both."""
+    return moment if moment.tzinfo is not None else moment.replace(tzinfo=UTC)
+
+
 class _FeedStorage(_Storage):
     """_Storage plus a faithful miniature of the changefeed fence (order of checks as in prod)."""
 
@@ -117,7 +122,9 @@ class _FeedStorage(_Storage):
             for event in self.feed[start:]:
                 examined += 1
                 own = event["brain"] == _BRAIN
-                pre_reference = created_before is None or event["created_at"] <= created_before
+                pre_reference = created_before is None or _aware(event["created_at"]) <= _aware(
+                    created_before
+                )
                 if event["action"] != "delete" and own and not pre_reference:
                     continue  # a record created after the reference time: outside the frozen set
                 if tolerate is not None and tolerate(
@@ -132,13 +139,36 @@ class _FeedStorage(_Storage):
         finally:
             self.calls.append((tolerate is not None, progress is not None, examined))
 
+    async def get_synapses_after_id(
+        self, cursor_id: str | None, *, limit: int, created_before: datetime | None = None
+    ) -> list[Synapse]:
+        found = sorted(self.synapses.values(), key=lambda edge: edge.id)
+        if created_before is not None:
+            found = [e for e in found if _aware(e.created_at) <= _aware(created_before)]
+        if cursor_id is not None:
+            found = [edge for edge in found if edge.id > cursor_id]
+        return found[:limit]
+
+    async def find_existing_synapse_pairs(
+        self, pairs: list[tuple[str, str]], *, created_before: datetime | None = None
+    ) -> set[tuple[str, str]]:
+        requested = {tuple(sorted(pair)) for pair in pairs}
+        found: set[tuple[str, str]] = set()
+        for synapse in self.synapses.values():
+            if created_before is not None and _aware(synapse.created_at) > _aware(created_before):
+                continue
+            key = tuple(sorted((synapse.source_id, synapse.target_id)))
+            if key in requested:
+                found.add(key)  # type: ignore[arg-type]
+        return found
+
     async def get_synapse_degrees(
         self, *, created_before: datetime | None = None
     ) -> dict[str, int]:
         self.degree_calls += 1
         degrees: dict[str, int] = {}
         for synapse in self.synapses.values():
-            if created_before is not None and synapse.created_at > created_before:
+            if created_before is not None and _aware(synapse.created_at) > _aware(created_before):
                 continue
             for endpoint in (synapse.source_id, synapse.target_id):
                 degrees[endpoint] = degrees.get(endpoint, 0) + 1

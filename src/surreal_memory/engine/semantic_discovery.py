@@ -1085,6 +1085,79 @@ def _canonical_pair(first: str, second: str) -> tuple[str, str]:
     return (first, second) if first <= second else (second, first)
 
 
+def staged_source_state_ref(result: SemanticDiscoveryResult) -> dict[str, Any] | None:
+    """The reference a manifest must carry for the store to hand the staged snapshot back.
+
+    The store releases a snapshot only to a run whose pending manifest names its state id, its
+    revision under ``state_revision`` and its source token, exactly as discovery's own manifests
+    do; a reference with fewer keys is silently treated as "unavailable".
+    """
+    if (
+        result.source_token is None
+        or result.source_state_id is None
+        or result.source_state_revision is None
+    ):
+        return None
+    return {
+        "state_id": result.source_state_id,
+        "revision": result.source_state_revision,
+        "state_revision": result.source_state_revision,
+        "source_token": result.source_token,
+    }
+
+
+async def verify_staged_discovery_source(
+    storage: NeuralStorage,
+    state_ref: Any,
+    *,
+    source_token: str,
+    reference_time: datetime,
+    run_id: str | None,
+) -> bool:
+    """Re-verify, from its staged snapshot, the source a finished discovery computed its result from.
+
+    ``True``: verified; anything that can alter the result raises (a ``RuntimeError``). ``False``:
+    this store or snapshot cannot do it and the caller must keep its strict verification. The
+    result depends on the candidates' type, content and vector (their digests) and on their
+    degrees; nothing else a recall or the vector worker rewrites matters, so nothing else is
+    compared. The scan always starts at the token: there is no incremental memory to trust.
+    """
+    verify = getattr(storage, "assert_semantic_source_unchanged", None)
+    if not callable(verify) or not _fence_supports_tolerance(verify):
+        return False
+    state, _state_id, _revision = await _load_source_state(
+        storage, state_ref, brain_id=getattr(storage, "current_brain_id", None), run_id=run_id
+    )
+    digests = _load_candidate_digests(state)
+    if digests is None:
+        return False
+    if state.get("source_token") != source_token or state.get(
+        "reference_time"
+    ) != reference_time.isoformat(timespec="microseconds"):
+        raise SemanticSourceStaleError("semantic_link staged state belongs to another source")
+    candidates = state.get("candidates")
+    if not isinstance(candidates, list):
+        raise SemanticSourceStaleError("semantic_link staged state has no candidates")
+    degree_mode = bool(state.get("degree_mode"))
+    baseline = state.get("candidate_degree_digest")
+    get_degrees = getattr(storage, "get_synapse_degrees", None)
+    working_set = _WorkingSet()
+    working_set.digests = digests
+    working_set.tolerant = True
+    working_set.degree_guard = callable(get_degrees) and (degree_mode or baseline is not None)
+    await _assert_source_unchanged(
+        storage, source_token, created_before=reference_time, working_set=working_set
+    )
+    if working_set.degree_guard:
+        fresh = cast("dict[str, int]", await get_degrees(created_before=reference_time))  # type: ignore[misc]
+        if degree_mode:
+            if any(fresh.get(item[0], 0) != item[2] for item in candidates):
+                raise SemanticSourceStaleError("semantic_link candidate degree changed")
+        elif baseline != _degree_digest([str(item[0]) for item in candidates], fresh):
+            raise SemanticSourceStaleError("semantic_link candidate degree changed")
+    return True
+
+
 async def _discover_semantic_synapses_resumable(
     storage: NeuralStorage,
     config: BrainConfig,

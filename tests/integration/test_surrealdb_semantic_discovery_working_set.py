@@ -8,6 +8,7 @@ be dead letter. Loopback only - never run this against a shared or production en
 from __future__ import annotations
 
 import ipaddress
+import json
 import os
 import uuid
 from dataclasses import replace
@@ -22,12 +23,20 @@ from surreal_memory.core.brain import Brain
 from surreal_memory.core.neuron import Neuron, NeuronType
 from surreal_memory.core.synapse import Synapse, SynapseType
 from surreal_memory.engine import semantic_discovery as semantic_discovery_module
+from surreal_memory.engine.consolidation_progress import (
+    CONSOLIDATION_ENGINE_VERSION,
+    PROGRESS_FORMAT_VERSION,
+)
 from surreal_memory.engine.semantic_discovery import (
     SemanticSourceStaleError,
     discover_semantic_synapses,
+    staged_source_state_ref,
+    verify_staged_discovery_source,
 )
+from surreal_memory.storage.surrealdb.schema import SCHEMA_VERSION
 from surreal_memory.storage.surrealdb.semantic_source_revision import SemanticSourceChangedError
 from surreal_memory.storage.surrealdb.store import SurrealDBStorage
+from surreal_memory.utils.timeutils import utcnow
 
 SURREALDB_URL = os.getenv("SURREALDB_URL")
 SURREALDB_USER = os.getenv("SURREALDB_USER", "root")
@@ -125,7 +134,7 @@ async def _world(store, monkeypatch):
     return neurons, edge, reference_time.replace(tzinfo=UTC)
 
 
-async def _run(store, reference_time, during):
+async def _run(store, reference_time, during, run_id=None):
     fired = False
 
     async def checkpoint(stage: str, _cursor, _details) -> None:
@@ -141,7 +150,7 @@ async def _run(store, reference_time, during):
         resume_state=None,
         budget_check=None,
         reference_time=reference_time,
-        run_id="wset-run-" + uuid.uuid4().hex,
+        run_id=run_id or "wset-run-" + uuid.uuid4().hex,
         owner_token="wset-owner-" + uuid.uuid4().hex,
     )
     assert fired, "the mutation must land while the run is in flight"
@@ -220,3 +229,94 @@ async def test_a_vanished_synapse_of_a_candidate_is_caught_by_the_real_degree_gu
 
     with pytest.raises(SemanticSourceStaleError):
         await _run(store, reference_time, vanish)
+
+
+async def _finished_discovery(store, monkeypatch):
+    """Discovery run to the end on a real store, the way the apply stage will find it afterwards."""
+    neurons, edge, reference_time = await _world(store, monkeypatch)
+    lazy = replace(
+        Neuron.create(NeuronType.CONCEPT, "not embedded yet", neuron_id="wset-lazy"),
+        created_at=reference_time - timedelta(days=1),
+    )
+    await store.add_neuron(lazy)
+    run_id = "wset-run-" + uuid.uuid4().hex
+
+    async def nothing() -> None:
+        return None
+
+    result = await _run(store, reference_time, nothing, run_id=run_id)
+    state_ref = staged_source_state_ref(result)
+    assert state_ref is not None
+    # the apply stage's world: a live lease and a progress record whose pending manifest names the
+    # snapshot exactly as the engine writes it - the store releases a snapshot on no other terms
+    brain_id = store._get_brain_id()
+    owner = "wset-owner-" + uuid.uuid4().hex
+    assert await store.acquire_consolidation_lease(brain_id, owner, lease_seconds=300)
+    manifest = {
+        "kind": "semantic_link_synapses",
+        "version": 2,
+        "source_token": result.source_token,
+        "source_state_ref": state_ref,
+        "synapses": [],
+    }
+    await store.create_consolidation_progress(
+        {
+            "brain_id": brain_id,
+            "run_id": run_id,
+            "schema_version": SCHEMA_VERSION,
+            "engine_version": CONSOLIDATION_ENGINE_VERSION,
+            "format_version": PROGRESS_FORMAT_VERSION,
+            "requested_strategies": ["semantic_link"],
+            "completed_strategies": [],
+            "options_fingerprint": "wset-options",
+            "reference_time": utcnow(),
+            "owner_token": owner,
+            "status": "paused",
+            "current_strategy": "semantic_link",
+            "phase": "semantic_link_apply",
+            "cursor": None,
+            "strategy_states": {
+                "semantic_link": {"pending": [json.dumps(manifest, sort_keys=True)]}
+            },
+            "counters": {},
+            "started_at": utcnow(),
+            "updated_at": utcnow(),
+            "last_error": None,
+        }
+    )
+    kwargs = {
+        "source_token": result.source_token,
+        "reference_time": reference_time,
+        "run_id": run_id,
+    }
+    return neurons, edge, lazy, state_ref, kwargs
+
+
+@pytest.mark.asyncio
+async def test_staged_verification_passes_through_recall_and_worker_traffic_on_a_real_changefeed(
+    store, monkeypatch
+) -> None:
+    neurons, edge, lazy, state_ref, kwargs = await _finished_discovery(store, monkeypatch)
+    assert await verify_staged_discovery_source(store, state_ref, **kwargs) is True
+
+    await store.update_neuron(
+        replace(neurons[0], metadata={"_context_trail": [{"ts": "x"}], "_reconsolidation_count": 1})
+    )
+    await store.update_synapse(replace(edge, weight=0.9, reinforced_count=3))
+    await store.update_neuron_embeddings([(lazy.id, _vec(0.5, 0.5))])  # the worker's write path
+
+    assert await verify_staged_discovery_source(store, state_ref, **kwargs) is True
+
+
+@pytest.mark.asyncio
+async def test_staged_verification_catches_vector_and_degree_changes_on_a_real_changefeed(
+    store, monkeypatch
+) -> None:
+    neurons, edge, _lazy, state_ref, kwargs = await _finished_discovery(store, monkeypatch)
+    await store.delete_synapse(edge.id)
+    with pytest.raises(SemanticSourceStaleError):
+        await verify_staged_discovery_source(store, state_ref, **kwargs)
+
+    await store.update_neuron(replace(neurons[3], metadata={"_embedding": _vec(0.1, 0.9)}))
+    with pytest.raises(SemanticSourceChangedError):
+        await verify_staged_discovery_source(store, state_ref, **kwargs)

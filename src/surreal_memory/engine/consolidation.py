@@ -10470,7 +10470,11 @@ class ConsolidationEngine:
         from surreal_memory.core.neuron import NeuronType
         from surreal_memory.core.synapse import Direction, Synapse, SynapseType
         from surreal_memory.engine.consolidation_progress import ConsolidationProgressError
-        from surreal_memory.engine.semantic_discovery import discover_semantic_synapses
+        from surreal_memory.engine.semantic_discovery import (
+            discover_semantic_synapses,
+            staged_source_state_ref,
+            verify_staged_discovery_source,
+        )
 
         logger = logging.getLogger(__name__)
 
@@ -10518,6 +10522,26 @@ class ConsolidationEngine:
         def canonical_synapse_id(synapse_id: str) -> str:
             """Match the store's public spelling for record ids with underscores."""
             return synapse_id.replace("_", "-")
+
+        def written_edge_is_intact(existing: Synapse, saved: Synapse) -> bool:
+            """The stored edge is the checkpointed one, give or take what recall does to it.
+
+            Reinforcement may only raise the weight and the count and stamp the activation time
+            (discovery writes a fresh edge, count 0); every other field must still equal what
+            discovery produced.
+            """
+            return (
+                canonical_synapse_id(existing.id) == canonical_synapse_id(saved.id)
+                and existing.weight >= saved.weight
+                and dc_replace(
+                    existing,
+                    id=saved.id,
+                    weight=saved.weight,
+                    reinforced_count=saved.reinforced_count,
+                    last_activated=saved.last_activated,
+                )
+                == saved
+            )
 
         async def source_fingerprint(excluded_synapses: Sequence[Synapse]) -> str:
             excluded_edges = {
@@ -10682,7 +10706,28 @@ class ConsolidationEngine:
                             "semantic-link pending snapshot reference_time changed"
                         )
                     source_token = manifest.get("source_token")
-                    if source_token is not None:
+                    verified_from_staged_state = False
+                    if (
+                        source_token is not None
+                        and reference_time is not None
+                        and manifest.get("source_state_ref") is not None
+                    ):
+                        # The manifest names the staged discovery it came from, so only what
+                        # the result depends on is re-verified; recall traffic that arrived while
+                        # the stage was paused cannot fail it.
+                        try:
+                            verified_from_staged_state = await verify_staged_discovery_source(
+                                self._storage,
+                                manifest["source_state_ref"],
+                                source_token=source_token,
+                                reference_time=reference_time,
+                                run_id=str(self._progress_session.state["run_id"]),
+                            )
+                        except RuntimeError as exc:
+                            raise ConsolidationProgressError(
+                                f"semantic-link source fence failed: {exc}"
+                            ) from exc
+                    if source_token is not None and not verified_from_staged_state:
                         verify_source = getattr(
                             self._storage, "assert_semantic_source_unchanged", None
                         )
@@ -10700,7 +10745,7 @@ class ConsolidationEngine:
                                 f"semantic-link source fence failed: {exc}"
                             ) from exc
                     fingerprint_value = manifest.get("source_fingerprint")
-                    if fingerprint_value is not None:
+                    if fingerprint_value is not None and not verified_from_staged_state:
                         current_fingerprint = await source_fingerprint(synapses)
                         if current_fingerprint != fingerprint_value:
                             raise ConsolidationProgressError(
@@ -10798,6 +10843,9 @@ class ConsolidationEngine:
                 "metrics": metrics,
                 "synapses": [encode_synapse(synapse) for synapse in synapses],
             }
+            staged_ref = staged_source_state_ref(result)
+            if reference_time is not None and staged_ref is not None:
+                manifest["source_state_ref"] = staged_ref
             serialized = json.dumps(
                 manifest, ensure_ascii=False, sort_keys=True, separators=(",", ":")
             )
@@ -10866,10 +10914,7 @@ class ConsolidationEngine:
                 raise
             existing = await self._storage.get_synapse(synapse.id)
             if existing is not None:
-                if (
-                    canonical_synapse_id(existing.id) != canonical_synapse_id(synapse.id)
-                    or dc_replace(existing, id=synapse.id) != synapse
-                ):
+                if not written_edge_is_intact(existing, synapse):
                     raise ConsolidationProgressError(
                         f"semantic-link synapse {synapse.id!r} changed after its checkpoint"
                     )
