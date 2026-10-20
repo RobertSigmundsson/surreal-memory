@@ -265,7 +265,18 @@ async def detect_db_version(conn: Any) -> int:
 
 
 async def _stamp_version(conn: Any, version: int) -> None:
-    await conn.query(f"UPSERT {VERSION_ID} SET version = $v", {"v": version})
+    try:
+        await conn.query(f"UPSERT {VERSION_ID} SET version = $v", {"v": version})
+    except Exception as exc:
+        # Concurrent initializers can both observe the already-current stamp
+        # and UPSERT the same singleton record. SurrealDB may reject the loser
+        # with a transaction write conflict; accept that only when a fresh read
+        # proves the peer committed this exact version.
+        message = str(exc).lower()
+        if "transaction conflict" not in message or "write conflict" not in message:
+            raise
+        if await _read_stamped_version(conn) != version:
+            raise
 
 
 # --------------------------------------------------------------------------- #
