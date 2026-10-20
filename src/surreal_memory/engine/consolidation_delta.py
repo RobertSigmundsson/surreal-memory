@@ -186,6 +186,7 @@ async def run_with_delta(
     reference_time: datetime | None = None,
     tier_config: TierConfig | None = None,
     on_progress: Callable[[str], None] | None = None,
+    semantic_auto_restarts: int = 0,
 ) -> ConsolidationDelta:
     """Run consolidation and compute a before/after health delta.
 
@@ -201,6 +202,8 @@ async def run_with_delta(
         dry_run: If True, preview only.
         config: Optional consolidation config overrides.
         reference_time: Reference time for consolidation.
+        semantic_auto_restarts: How many times a semantic_link discovery whose source changed
+            may start over within the run (0 = fail as before).
 
     Returns:
         ConsolidationDelta with before/after snapshots and report.
@@ -209,7 +212,12 @@ async def run_with_delta(
     from surreal_memory.engine.diagnostics import DiagnosticsEngine
 
     diagnostics = DiagnosticsEngine(storage)
-    engine = ConsolidationEngine(storage, config, tier_config=tier_config)
+    engine = ConsolidationEngine(
+        storage,
+        config,
+        tier_config=tier_config,
+        semantic_auto_restarts=semantic_auto_restarts,
+    )
 
     # Step 1: Before snapshot
     before_report = await diagnostics.analyze(brain_id)

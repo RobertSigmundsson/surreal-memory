@@ -150,6 +150,18 @@ class _PatternCandidate:
     neuron_ids: frozenset[str]
 
 
+class _StagedSourceUnusableError(Exception):
+    """Internal: a pending semantic_link manifest cannot be trusted any more.
+
+    Carries the message the run fails with when the discovery may not be restarted.
+    """
+
+    def __init__(self, final_message: str, reason: str) -> None:
+        super().__init__(final_message)
+        self.final_message = final_message
+        self.reason = reason
+
+
 def _summary_source_signature(fiber: Fiber) -> str:
     return options_fingerprint(
         {
@@ -666,6 +678,12 @@ class ConsolidationReport:
         dedup_resume = self.extra.get("dedup_resumed_checkpoint")
         if dedup_resume:
             lines.append(f"  Dedup resumed from saved checkpoint: {dedup_resume}")
+        auto_restarts = self.extra.get("semantic_link_auto_restarts")
+        if auto_restarts:
+            lines.append(
+                f"  Semantic-link discovery restarted {len(auto_restarts)} time(s) "
+                f"after its source changed: {auto_restarts[-1]}"
+            )
         if self.extra.get("semantic_link_stage_rebuilt_for_reference_time"):
             lines.append(
                 "  Semantic-link stage rebuilt from the frozen reference time "
@@ -811,8 +829,13 @@ class ConsolidationEngine:
         config: ConsolidationConfig | None = None,
         dream_decay_multiplier: float = 10.0,
         tier_config: TierConfig | None = None,
+        semantic_auto_restarts: int = 0,
     ) -> None:
         self._storage = storage
+        # How many times a semantic_link discovery whose source changed may start over within one
+        # run. Deliberately not part of the options fingerprint: it changes what a run may do
+        # about a failure, not what a resumed run has to match.
+        self._semantic_auto_restarts = max(0, int(semantic_auto_restarts))
         self._config = config or self._config_from_settings()
         self._dream_decay_multiplier = dream_decay_multiplier
         self._tier_config = tier_config
@@ -868,16 +891,19 @@ class ConsolidationEngine:
         cursor: str | None = None,
         pending: Sequence[str] | None = None,
         counters: dict[str, int | float] | None = None,
+        extra: dict[str, Any] | None = None,
     ) -> None:
         """Persist one committed unit boundary for the active strategy."""
         if self._progress_session is None or self._active_strategy is None:
             return
+        optional: dict[str, Any] = {"extra": extra} if extra else {}
         await self._progress_session.checkpoint(
             self._active_strategy.value,
             phase,
             cursor=cursor,
             pending=pending,
             counters=counters,
+            **optional,
         )
         await self._check_progress_budget()
 
@@ -10471,9 +10497,14 @@ class ConsolidationEngine:
         from surreal_memory.core.synapse import Direction, Synapse, SynapseType
         from surreal_memory.engine.consolidation_progress import ConsolidationProgressError
         from surreal_memory.engine.semantic_discovery import (
+            SemanticSourceStaleError,
             discover_semantic_synapses,
             staged_source_state_ref,
             verify_staged_discovery_source,
+        )
+        from surreal_memory.storage.surrealdb.semantic_source_revision import (
+            SemanticSourceChangedError,
+            SemanticSourceFenceExpiredError,
         )
 
         logger = logging.getLogger(__name__)
@@ -10621,6 +10652,63 @@ class ConsolidationEngine:
 
         state = self._strategy_progress_state()
         reference_time = getattr(self._progress_session, "reference_time", None)
+        raw_strategy_counters = state.get("counters")
+        semantic_written = (
+            raw_strategy_counters.get("semantic_synapses_created")
+            if isinstance(raw_strategy_counters, dict)
+            else None
+        )
+        auto_restart_history: list[dict[str, Any]] = [
+            dict(item) for item in state.get("auto_recovery") or [] if isinstance(item, dict)
+        ]
+
+        def source_change_is_restartable(exc: BaseException) -> bool:
+            """A changed or expired source can be redone; an unreadable fence is a database fault."""
+            return isinstance(
+                exc,
+                (
+                    SemanticSourceChangedError,
+                    SemanticSourceFenceExpiredError,
+                    SemanticSourceStaleError,
+                ),
+            )
+
+        async def begin_auto_restart(reason: str) -> bool:
+            """Record one restart and park the stage so the discovery starts over; False = give up."""
+            restarts_exhausted = len(auto_restart_history) >= self._semantic_auto_restarts
+            edges_already_written = semantic_written not in (None, 0)
+            if restarts_exhausted or edges_already_written:
+                return False
+            auto_restart_history.append(
+                {
+                    "attempt": len(auto_restart_history) + 1,
+                    "limit": self._semantic_auto_restarts,
+                    "reason": reason[:300],
+                    "at": utcnow().isoformat(),
+                }
+            )
+            report.extra["semantic_link_auto_restarts"] = [
+                str(item["reason"]) for item in auto_restart_history
+            ]
+            logger.warning(
+                "semantic_link discovery restarted with a fresh source token (%d/%d): %s",
+                len(auto_restart_history),
+                self._semantic_auto_restarts,
+                reason,
+            )
+            await self._checkpoint_progress(
+                "semantic_link_restart_pending",
+                cursor=None,
+                pending=[],
+                counters={
+                    "semantic_synapses_created": 0,
+                    "semantic_synapses_skipped": 0,
+                    "semantic_link_failures": 0,
+                },
+                extra={"auto_recovery": list(auto_restart_history)},
+            )
+            return True
+
         if dry_run:
             result = await discover_semantic_synapses(self._storage, brain.config)
             report.semantic_synapses_skipped += result.skipped_existing
@@ -10724,6 +10812,11 @@ class ConsolidationEngine:
                                 run_id=str(self._progress_session.state["run_id"]),
                             )
                         except RuntimeError as exc:
+                            if source_change_is_restartable(exc):
+                                raise _StagedSourceUnusableError(
+                                    f"semantic-link source fence failed: {exc}",
+                                    f"{type(exc).__name__}: {exc}",
+                                ) from exc
                             raise ConsolidationProgressError(
                                 f"semantic-link source fence failed: {exc}"
                             ) from exc
@@ -10741,6 +10834,11 @@ class ConsolidationEngine:
                             else:
                                 await verify_source(source_token, created_before=reference_time)
                         except RuntimeError as exc:
+                            if source_change_is_restartable(exc):
+                                raise _StagedSourceUnusableError(
+                                    f"semantic-link source fence failed: {exc}",
+                                    f"{type(exc).__name__}: {exc}",
+                                ) from exc
                             raise ConsolidationProgressError(
                                 f"semantic-link source fence failed: {exc}"
                             ) from exc
@@ -10748,8 +10846,9 @@ class ConsolidationEngine:
                     if fingerprint_value is not None and not verified_from_staged_state:
                         current_fingerprint = await source_fingerprint(synapses)
                         if current_fingerprint != fingerprint_value:
-                            raise ConsolidationProgressError(
-                                "semantic-link source data changed after its pending checkpoint"
+                            raise _StagedSourceUnusableError(
+                                "semantic-link source data changed after its pending checkpoint",
+                                "source data changed after the pending checkpoint",
                             )
                     metrics = manifest["metrics"]
                     if not isinstance(metrics, dict):
@@ -10761,15 +10860,16 @@ class ConsolidationEngine:
                     raise ValueError("unsupported pending checkpoint")
             except ConsolidationProgressError:
                 raise
+            except _StagedSourceUnusableError as exc:
+                # Nothing of this manifest was applied yet when the run may start over: drop it
+                # and let the discovery below compute it again from a fresh source token.
+                if not await begin_auto_restart(exc.reason):
+                    raise ConsolidationProgressError(exc.final_message) from exc.__cause__
+                manifest = None
+                resume_discovery = None
             except (KeyError, TypeError, ValueError) as exc:
                 raise ConsolidationProgressError("invalid semantic-link pending snapshot") from exc
 
-        raw_strategy_counters = state.get("counters")
-        semantic_written = (
-            raw_strategy_counters.get("semantic_synapses_created")
-            if isinstance(raw_strategy_counters, dict)
-            else None
-        )
         discovery_only_checkpoint = (
             resume_discovery is not None
             and str(state.get("phase") or "").startswith("semantic_link_discovery_")
@@ -10800,24 +10900,32 @@ class ConsolidationEngine:
                     },
                 )
 
-            try:
-                result = await discover_semantic_synapses(
-                    self._storage,
-                    brain.config,
-                    checkpoint=checkpoint_discovery,
-                    resume_state=resume_discovery,
-                    budget_check=self._check_progress_budget,
-                    run_id=str(self._progress_session.state["run_id"]),
-                    owner_token=self._progress_session.owner_token,
-                    reference_time=reference_time,
-                    allow_reference_time_rebuild=discovery_only_checkpoint,
-                )
-            except ConsolidationProgressError:
-                raise
-            except RuntimeError as exc:
-                raise ConsolidationProgressError(
-                    f"semantic_link discovery requires optimization or a safe restart: {exc}"
-                ) from exc
+            while True:
+                try:
+                    result = await discover_semantic_synapses(
+                        self._storage,
+                        brain.config,
+                        checkpoint=checkpoint_discovery,
+                        resume_state=resume_discovery,
+                        budget_check=self._check_progress_budget,
+                        run_id=str(self._progress_session.state["run_id"]),
+                        owner_token=self._progress_session.owner_token,
+                        reference_time=reference_time,
+                        allow_reference_time_rebuild=discovery_only_checkpoint,
+                    )
+                    break
+                except ConsolidationProgressError:
+                    raise
+                except RuntimeError as exc:
+                    if source_change_is_restartable(exc) and await begin_auto_restart(
+                        f"{type(exc).__name__}: {exc}"
+                    ):
+                        resume_discovery = None
+                        discovery_only_checkpoint = False
+                        continue
+                    raise ConsolidationProgressError(
+                        f"semantic_link discovery requires optimization or a safe restart: {exc}"
+                    ) from exc
             synapses = sorted(result.synapses, key=lambda synapse: synapse.id)
             metrics = {
                 "skipped_existing": result.skipped_existing,

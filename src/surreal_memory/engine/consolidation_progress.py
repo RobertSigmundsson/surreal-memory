@@ -1081,8 +1081,13 @@ class ConsolidationProgressSession:
         cursor: str | None = None,
         pending: Sequence[str] | None = None,
         counters: Mapping[str, int | float] | None = None,
+        extra: Mapping[str, Any] | None = None,
     ) -> None:
-        """Persist the latest committed unit boundary for one strategy."""
+        """Persist the latest committed unit boundary for one strategy.
+
+        ``extra`` adds named keys to the strategy's state (e.g. the auto-restart history); the
+        keys the checkpoint itself owns cannot be overwritten through it.
+        """
         if self._lease_lost:
             raise ConsolidationLeaseLostError(
                 f"lease for brain {self.brain_id!r} was lost; stopping before more work"
@@ -1094,6 +1099,14 @@ class ConsolidationProgressSession:
         states = dict(self.state.get("strategy_states") or {})
         strategy_state = dict(states.get(strategy) or {})
         strategy_state.update(phase=phase, cursor=cursor, updated_at=utcnow())
+        if extra:
+            strategy_state.update(
+                {
+                    key: value
+                    for key, value in extra.items()
+                    if key not in {"phase", "cursor", "updated_at", "pending", "counters"}
+                }
+            )
         if pending is not None:
             strategy_state["pending"] = list(pending)
         elif "pending" in strategy_state:

@@ -64,6 +64,7 @@ class _Progress:
         cursor: str | None = None,
         pending: list[str] | None = None,
         counters: dict[str, int | float] | None = None,
+        extra: dict[str, Any] | None = None,
     ) -> None:
         state = self.strategy_state(strategy)
         state.update(
@@ -72,6 +73,8 @@ class _Progress:
             pending=list(pending or []),
             counters=dict(counters or {}),
         )
+        if extra:
+            state.update(extra)
         self.writes.append(dict(state))
         self.phase_calls[phase] = self.phase_calls.get(phase, 0) + 1
         if phase == self.pause_phase and self.phase_calls[phase] == self.pause_after_phase_calls:

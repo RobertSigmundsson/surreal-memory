@@ -684,6 +684,18 @@ def consolidate(
             ),
         ),
     ] = False,
+    semantic_auto_restarts: Annotated[
+        int,
+        typer.Option(
+            "--semantic-auto-restarts",
+            min=0,
+            help=(
+                "How many times a semantic_link discovery whose source changed may start over "
+                "with a fresh source token within one run (0 = fail as before). Only before "
+                "any edge was written."
+            ),
+        ),
+    ] = 0,
 ) -> None:
     """Consolidate brain memories by pruning, merging, or summarizing.
 
@@ -780,6 +792,7 @@ def consolidate(
             dry_run=dry_run,
             config=cons_config,
             on_progress=lambda message: typer.echo(message),
+            semantic_auto_restarts=semantic_auto_restarts,
         )
 
         typer.echo("")
