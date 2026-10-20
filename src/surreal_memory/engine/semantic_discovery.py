@@ -1031,6 +1031,13 @@ async def _discover_semantic_synapses_resumable(
         saved = dict(legacy_checkpoint)
     else:
         saved = manifest
+    if durable_neuron_state is not None:
+        # Every owner epoch writes its snapshots under a fresh state_id. A previous epoch may
+        # have saved revision N+1 and died before publishing the manifest pointer; re-saving
+        # (state_id, N+1) with different content would collide with that orphan ("immutable
+        # state revision was retried with conflicting content"). The snapshot loaded above stays
+        # reachable through the manifest pointer until this epoch's first publish re-points it.
+        state_id, state_revision = str(uuid.uuid4()), 0
     saved_stage = str(saved.get("stage") or "")
     saved_version = saved.get("version")
     saved_cursor = saved.get("cursor")
@@ -1209,8 +1216,8 @@ async def _discover_semantic_synapses_resumable(
     source_rebuild: dict[str, Any]
     if isinstance(durable_neuron_state, Mapping):
         source_rebuild = dict(durable_neuron_state)
-        source_rebuild.setdefault("state_id", state_id)
-        source_rebuild.setdefault("state_revision", state_revision)
+        source_rebuild["state_id"] = state_id
+        source_rebuild["state_revision"] = state_revision
     else:
         source_rebuild = {
             "state_id": state_id,
