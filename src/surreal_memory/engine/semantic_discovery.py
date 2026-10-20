@@ -17,6 +17,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import heapq
+import inspect
 import json
 import logging
 import math
@@ -82,6 +83,8 @@ _MAX_SIMILARITY_CHECKPOINTS = 64
 _MAX_SIMILARITY_CHECKPOINT_BYTES = 512 * 1024
 _MAX_NEURON_CHECKPOINT_BYTES = 512 * 1024
 _MAX_REBUILD_STATE_BYTES = 1_000_000
+_CANDIDATE_DIGEST_CHARS = 16
+_CANDIDATE_DIGESTS_FORMAT = 1
 
 # Ceiling for the pure-python similarity fallback. The vectorised path is O(n*d)
 # per row in C; the fallback is O(n*d) per row in interpreted Python, roughly
@@ -126,6 +129,8 @@ class SemanticDiscoveryResult:
     source_fingerprint: str | None = None
     source_token: str | None = None
     reference_time_rebuilt: bool = False
+    source_state_id: str | None = None
+    source_state_revision: int | None = None
 
 
 def _cosine_similarity(a: list[float], b: list[float]) -> float:
@@ -907,6 +912,111 @@ class _SemanticFingerprintBuilder:
         return self._digest.hexdigest()
 
 
+class SemanticSourceStaleError(RuntimeError):
+    """The working set of a staged run changed after it was read.
+
+    The run cannot continue under its source token; it must restart with a fresh one. A
+    ``RuntimeError`` subclass, so every existing ``except RuntimeError`` keeps working.
+    """
+
+
+def _neuron_projection(neuron: Neuron) -> str:
+    """16-hex digest of exactly what semantic_link reads from a neuron: id, type, content, vector.
+
+    Fields that recall and the lifecycle rewrite (metadata other than the vector, timestamps,
+    counters) are deliberately outside it. The vector is hashed as little-endian float64 so the
+    digest is independent of how the value was decoded.
+    """
+    embedding = neuron.metadata.get("_embedding")
+    head = json.dumps(
+        [neuron.id, neuron.type.value, neuron.content], ensure_ascii=False, separators=(",", ":")
+    ).encode("utf-8")
+    tail = struct.pack(f"<{len(embedding)}d", *map(float, embedding)) if embedding else b""
+    return hashlib.sha256(head + b"\0" + tail).hexdigest()[:_CANDIDATE_DIGEST_CHARS]
+
+
+class _WorkingSet:
+    """The neurons whose type, content and vector decide the result of ONE discovery run.
+
+    ``tolerate`` is the predicate handed to the source fence: a change it accepts provably cannot
+    alter this run's result. Anything outside the working set (unread, read-and-dropped, evicted,
+    another brain) cannot; a candidate is tolerated only while its digest is unchanged; synapse
+    events are tolerated only when the degree guard is active (candidate degrees are re-verified
+    at restore and at the final gate).
+    """
+
+    def __init__(self) -> None:
+        self.digests: dict[str, str] = {}
+        self.tolerant = False
+        self.degree_guard = False
+
+    def tolerate(
+        self, table: str, action: str, public_id: str, _brain: str | None, domain: Any | None
+    ) -> bool:
+        if not self.tolerant:
+            return False
+        if table == "synapse":
+            return self.degree_guard
+        digest = self.digests.get(public_id)
+        if digest is None:
+            return True
+        # The projection includes the id and is compared by value, so a same-named record of
+        # another brain can only be tolerated when it is identical to ours, which is harmless.
+        return (
+            action == "update"
+            and isinstance(domain, Neuron)
+            and _neuron_projection(domain) == digest
+        )
+
+
+@dataclass
+class _FenceProgress:
+    """Duck-typed twin of the storage module's SemanticSourceFenceProgress (engine stays storage-agnostic)."""
+
+    token: str
+    created_before: datetime
+    cursors: dict[str, int] = field(default_factory=dict)
+    post_reference_ids: dict[str, set[str]] = field(default_factory=dict)
+
+
+def _fence_supports_tolerance(verify: Any) -> bool:
+    try:
+        parameters = inspect.signature(verify).parameters
+    except (TypeError, ValueError):
+        return False
+    return "tolerate" in parameters and "progress" in parameters
+
+
+def _load_candidate_digests(state: Mapping[str, Any]) -> dict[str, str] | None:
+    """Digests saved with the candidates, ``None`` for a snapshot written before they existed."""
+    blob = state.get("candidate_digests")
+    if blob is None and state.get("candidate_digests_format") is None:
+        return None
+    candidates = state.get("candidates")
+    if (
+        state.get("candidate_digests_format") != _CANDIDATE_DIGESTS_FORMAT
+        or not isinstance(blob, str)
+        or not isinstance(candidates, list)
+        or len(blob) != _CANDIDATE_DIGEST_CHARS * len(candidates)
+        or not all(
+            isinstance(item, list) and item and isinstance(item[0], str) for item in candidates
+        )
+    ):
+        raise SemanticSourceStaleError("semantic_link candidate digests are malformed")
+    width = _CANDIDATE_DIGEST_CHARS
+    return {
+        item[0]: blob[index * width : (index + 1) * width] for index, item in enumerate(candidates)
+    }
+
+
+def _degree_digest(candidate_ids: list[str], degrees: Mapping[str, int]) -> str:
+    """Digest of the candidates' degrees, for graphs small enough not to rank by degree."""
+    digest = hashlib.sha256(b"semantic-link-candidate-degrees-v1")
+    for candidate_id in sorted(candidate_ids):
+        digest.update(f"{candidate_id}\0{degrees.get(candidate_id, 0)}\n".encode())
+    return digest.hexdigest()[:32]
+
+
 async def _capture_source_token(storage: NeuralStorage) -> Any:
     capture = getattr(storage, "capture_semantic_source_token", None)
     if not callable(capture):
@@ -918,7 +1028,12 @@ async def _capture_source_token(storage: NeuralStorage) -> Any:
 
 
 async def _assert_source_unchanged(
-    storage: NeuralStorage, token: Any, *, created_before: datetime | None = None
+    storage: NeuralStorage,
+    token: Any,
+    *,
+    created_before: datetime | None = None,
+    working_set: _WorkingSet | None = None,
+    progress: _FenceProgress | None = None,
 ) -> None:
     verify = getattr(storage, "assert_semantic_source_unchanged", None)
     if not callable(verify):
@@ -927,6 +1042,13 @@ async def _assert_source_unchanged(
         raise RuntimeError("semantic source rebuild checkpoint has no valid mutation token")
     if created_before is None:
         await verify(token)
+    elif working_set is not None and _fence_supports_tolerance(verify):
+        await verify(
+            token,
+            created_before=created_before,
+            tolerate=working_set.tolerate,
+            progress=progress,
+        )
     else:
         await verify(token, created_before=created_before)
 
@@ -1086,8 +1208,54 @@ async def _discover_semantic_synapses_resumable(
     capture_fence = getattr(storage, "capture_semantic_source_token", None)
     verify_fence = getattr(storage, "assert_semantic_source_unchanged", None)
     fence_available = callable(capture_fence) and callable(verify_fence)
+    # Tolerance needs a frozen cutoff and a fence that can take the working-set predicate; anything
+    # else keeps today's strict fence untouched.
+    tolerance_active = (
+        reference_time is not None and fence_available and _fence_supports_tolerance(verify_fence)
+    )
+    working_set = _WorkingSet()
+    working_set.degree_guard = tolerance_active and callable(
+        getattr(storage, "get_synapse_degrees", None)
+    )
+    snapshot_digests: dict[str, str] | None = None
+    if tolerance_active and isinstance(durable_neuron_state, Mapping):
+        snapshot_digests = _load_candidate_digests(durable_neuron_state)
+    # Strict until the working set is known. A fresh run has read nothing yet, so it may tolerate
+    # whatever it has not read. A snapshot with digests names its set. A snapshot from before
+    # digests has none: its first check (nothing may have changed since the token) is strict and
+    # the candidates restored after it are adopted as the set.
+    working_set.tolerant = tolerance_active and (
+        snapshot_digests is not None or not isinstance(durable_neuron_state, Mapping)
+    )
+    if snapshot_digests is not None:
+        working_set.digests = dict(snapshot_digests)
+    fence_progress: _FenceProgress | None = None
+
+    async def _fence(*, final: bool = False) -> None:
+        """Verify the source token; in-run checks are incremental, the last one is a full scan."""
+        nonlocal fence_progress
+        if token is None:
+            return
+        if not tolerance_active:
+            await _assert_source_unchanged(storage, token, created_before=reference_time)
+            return
+        progress: _FenceProgress | None = None
+        if working_set.tolerant and not final:
+            if fence_progress is None:
+                fence_progress = _FenceProgress(token, cast("datetime", reference_time))
+            progress = fence_progress
+        await _assert_source_unchanged(
+            storage,
+            token,
+            created_before=reference_time,
+            working_set=working_set if working_set.tolerant else None,
+            progress=progress,
+        )
+        if final:
+            await _verify_degree_guard()
+
     if token is not None:
-        await _assert_source_unchanged(storage, token, created_before=reference_time)
+        await _fence()
     elif fence_available:
         token = await _capture_source_token(storage)
     else:
@@ -1169,7 +1337,16 @@ async def _discover_semantic_synapses_resumable(
                 if neuron is not None:
                     restored[candidate_id] = neuron
         if set(restored) != set(restore_candidate_ids):
-            raise RuntimeError("semantic_link candidate source changed during rebuild")
+            raise SemanticSourceStaleError("semantic_link candidate source changed during rebuild")
+        if tolerance_active:
+            for candidate_id in restore_candidate_ids:
+                digest = _neuron_projection(restored[candidate_id])
+                if snapshot_digests is not None and snapshot_digests[candidate_id] != digest:
+                    raise SemanticSourceStaleError(
+                        "semantic_link candidate changed while the run was paused"
+                    )
+                working_set.digests[candidate_id] = digest
+            working_set.tolerant = True
         bounded = bool(durable_neuron_state.get("bounded"))
         degree_mode = bool(durable_neuron_state.get("degree_mode"))
         if bounded and degree_mode:
@@ -1180,7 +1357,7 @@ async def _discover_semantic_synapses_resumable(
                 neuron = restored[candidate_id]
                 embedding = neuron.metadata.get("_embedding")
                 if not embedding:
-                    raise RuntimeError("semantic_link candidate embedding disappeared")
+                    raise SemanticSourceStaleError("semantic_link candidate embedding disappeared")
                 vector = (
                     embedding
                     if isinstance(embedding, list)
@@ -1191,7 +1368,9 @@ async def _discover_semantic_synapses_resumable(
                 if degree_mode:
                     degree = degree_by_id.get(candidate_id, 0) if degree_by_id else 0
                     if stored_degree != degree:
-                        raise RuntimeError("semantic_link candidate degree changed during rebuild")
+                        raise SemanticSourceStaleError(
+                            "semantic_link candidate degree changed during rebuild"
+                        )
                     candidate_heap.append((-degree, -priority, candidate_id))
                 else:
                     candidate_heap.append((0, -priority, candidate_id))
@@ -1201,7 +1380,7 @@ async def _discover_semantic_synapses_resumable(
                 neuron = restored[candidate_id]
                 embedding = neuron.metadata.get("_embedding")
                 if not embedding:
-                    raise RuntimeError("semantic_link candidate embedding disappeared")
+                    raise SemanticSourceStaleError("semantic_link candidate embedding disappeared")
                 eligible.append(neuron)
                 vectors.append(
                     embedding
@@ -1269,7 +1448,7 @@ async def _discover_semantic_synapses_resumable(
                 for neuron, priority in zip(eligible, candidate_priorities, strict=True)
             ]
             bounded = False
-        return {
+        snapshot: dict[str, Any] = {
             **source_rebuild,
             "reference_time": (
                 reference_time.isoformat(timespec="microseconds")
@@ -1283,6 +1462,12 @@ async def _discover_semantic_synapses_resumable(
             "bounded": bounded,
             "degree_mode": bool(degree_by_id),
         }
+        if tolerance_active:
+            snapshot["candidate_digests_format"] = _CANDIDATE_DIGESTS_FORMAT
+            snapshot["candidate_digests"] = "".join(
+                working_set.digests[str(item[0])] for item in candidates
+            )
+        return snapshot
 
     async def write_source_checkpoint(
         stage: str, cursor: str | None, *, preserve_legacy_cursor: bool = False
@@ -1329,6 +1514,35 @@ async def _discover_semantic_synapses_resumable(
             raise RuntimeError("semantic_link staged source manifest exceeds 512 KiB")
         await checkpoint(checkpoint_stage or stage, checkpoint_cursor, details)
 
+    def _candidate_ids() -> list[str]:
+        return sorted(candidate_map) if candidate_map else [item.id for item in eligible]
+
+    async def _capture_degree_baseline() -> None:
+        """Without degree ranking, record the candidates' degrees once their set is final."""
+        if not (tolerance_active and working_set.degree_guard) or degree_by_id:
+            return
+        digest = _degree_digest(_candidate_ids(), await _get_degrees())
+        stored = source_rebuild.get("candidate_degree_digest")
+        if stored is None:
+            source_rebuild["candidate_degree_digest"] = digest
+        elif stored != digest:
+            raise SemanticSourceStaleError("semantic_link candidate degree changed during rebuild")
+
+    async def _verify_degree_guard() -> None:
+        """Synapse events are tolerated only because candidate degrees are re-verified here."""
+        if not (tolerance_active and working_set.degree_guard and working_set.tolerant):
+            return
+        candidate_ids = _candidate_ids()
+        fresh = await _get_degrees()
+        if degree_by_id:
+            if any(fresh.get(cid, 0) != degree_by_id.get(cid, 0) for cid in candidate_ids):
+                raise SemanticSourceStaleError(
+                    "semantic_link candidate degree changed during rebuild"
+                )
+            return
+        if source_rebuild.get("candidate_degree_digest") != _degree_digest(candidate_ids, fresh):
+            raise SemanticSourceStaleError("semantic_link candidate degree changed during rebuild")
+
     async def record_neuron(neuron: Neuron) -> None:
         nonlocal eligible_total, degree_by_id, degree_probe_complete, candidate_heap
         fingerprint.add_neuron(neuron)
@@ -1351,6 +1565,8 @@ async def _discover_semantic_synapses_resumable(
         eligible_total += 1
 
         if eligible_total <= MAX_NEURONS_TO_LINK:
+            if tolerance_active:
+                working_set.digests[neuron.id] = _neuron_projection(neuron)
             eligible.append(neuron)
             vectors.append(
                 embedding
@@ -1416,6 +1632,9 @@ async def _discover_semantic_synapses_resumable(
             return
         evicted = heapq.heapreplace(candidate_heap, entry)
         candidate_map.pop(evicted[2])
+        if tolerance_active:
+            working_set.digests.pop(evicted[2], None)
+            working_set.digests[neuron.id] = _neuron_projection(neuron)
         candidate_map[neuron.id] = (
             priority,
             neuron,
@@ -1475,7 +1694,7 @@ async def _discover_semantic_synapses_resumable(
                 eligible_neurons=eligible_total,
             )
         if token is not None:
-            await _assert_source_unchanged(storage, token, created_before=reference_time)
+            await _fence()
         if budget_check is not None and source_rebuild is not None:
             await budget_check()
         neuron_page_options: dict[str, Any] = {
@@ -1488,7 +1707,9 @@ async def _discover_semantic_synapses_resumable(
         page = await neuron_fetch(neuron_cursor, **neuron_page_options)
         if not page:
             if replay_neuron and not replay_neuron_found:
-                raise RuntimeError("semantic_link neuron cursor disappeared during resume")
+                raise SemanticSourceStaleError(
+                    "semantic_link neuron cursor disappeared during resume"
+                )
             source_rebuild["neuron_complete"] = True
             break
         replayed_this_page = False
@@ -1499,7 +1720,7 @@ async def _discover_semantic_synapses_resumable(
                 and replay_neuron_cursor is not None
                 and neuron_id > replay_neuron_cursor
             ):
-                raise RuntimeError("semantic_link neuron cursor changed during resume")
+                raise SemanticSourceStaleError("semantic_link neuron cursor changed during resume")
             await record_neuron(neuron)
             # Fingerprinting a neuron is CPU-bound pure Python; hand the loop back every neuron so
             # the lease heartbeat is never starved for a whole page.
@@ -1510,17 +1731,19 @@ async def _discover_semantic_synapses_resumable(
             if replay_neuron and neuron_id == replay_neuron_cursor:
                 replay_neuron_found = True
                 if fingerprint.prefix_digest() != legacy_neuron_digest:
-                    raise RuntimeError("semantic_link neuron source changed before its cursor")
+                    raise SemanticSourceStaleError(
+                        "semantic_link neuron source changed before its cursor"
+                    )
                 replay_neuron = False
                 legacy_prefix_verified = True
                 source_rebuild["legacy_neuron_verified"] = True
                 replayed_this_page = True
                 break
         if not replay_neuron and not replay_neuron_found:
-            raise RuntimeError("semantic_link neuron cursor disappeared during resume")
+            raise SemanticSourceStaleError("semantic_link neuron cursor disappeared during resume")
         if replay_neuron:
             if token is not None:
-                await _assert_source_unchanged(storage, token, created_before=reference_time)
+                await _fence()
                 await emit(
                     "neurons",
                     neuron_cursor,
@@ -1531,7 +1754,7 @@ async def _discover_semantic_synapses_resumable(
         if not replay_neuron_found:
             continue
         if token is not None:
-            await _assert_source_unchanged(storage, token, created_before=reference_time)
+            await _fence()
         await emit(
             "neurons",
             neuron_cursor,
@@ -1552,7 +1775,7 @@ async def _discover_semantic_synapses_resumable(
         saved_stage in {"selection", "synapses", "similarity"}
         and saved.get("neuron_digest") != neuron_digest
     ):
-        raise RuntimeError("semantic_link neuron source changed after its checkpoint")
+        raise SemanticSourceStaleError("semantic_link neuron source changed after its checkpoint")
 
     # Restore the original per-type interleave when the complete set fits the
     # cap. Above the cap, match _select_candidates: degree order with stable
@@ -1575,6 +1798,7 @@ async def _discover_semantic_synapses_resumable(
         eligible = [item[1] for item in interleaved]
         vectors = [item[2] for item in interleaved]
 
+    await _capture_degree_baseline()
     eligible_before_resample = eligible_total if eligible_total > MAX_NEURONS_TO_LINK else 0
     if eligible_before_resample and saved_stage not in {"synapses", "similarity"}:
         await emit(
@@ -1608,10 +1832,10 @@ async def _discover_semantic_synapses_resumable(
         and not legacy_edge_verified
         and fingerprint.prefix_digest() != legacy_edge_digest
     ):
-        raise RuntimeError("semantic_link neuron source changed before synapse scan")
+        raise SemanticSourceStaleError("semantic_link neuron source changed before synapse scan")
     while not bool(source_rebuild.get("edge_complete")):
         if token is not None:
-            await _assert_source_unchanged(storage, token, created_before=reference_time)
+            await _fence()
         if budget_check is not None:
             await budget_check()
         synapse_page_options: dict[str, Any] = {"limit": min(_SYNAPSE_PAGE_SIZE, 2000)}
@@ -1620,13 +1844,15 @@ async def _discover_semantic_synapses_resumable(
         page = await synapse_fetch(edge_cursor, **synapse_page_options)
         if not page:
             if replay_edge and not replay_edge_found:
-                raise RuntimeError("semantic_link synapse cursor disappeared during resume")
+                raise SemanticSourceStaleError(
+                    "semantic_link synapse cursor disappeared during resume"
+                )
             source_rebuild["edge_complete"] = True
             break
         for synapse in page:
             synapse_id = str(synapse.id)
             if replay_edge and replay_edge_cursor is not None and synapse_id > replay_edge_cursor:
-                raise RuntimeError("semantic_link synapse cursor changed during resume")
+                raise SemanticSourceStaleError("semantic_link synapse cursor changed during resume")
             fingerprint.add_synapse(synapse)
             edge_scanned += 1
             if edge_scanned % 100 == 0:
@@ -1636,7 +1862,9 @@ async def _discover_semantic_synapses_resumable(
             if replay_edge and synapse_id == replay_edge_cursor:
                 replay_edge_found = True
                 if fingerprint.prefix_digest() != legacy_edge_digest:
-                    raise RuntimeError("semantic_link synapse source changed before its cursor")
+                    raise SemanticSourceStaleError(
+                        "semantic_link synapse source changed before its cursor"
+                    )
                 replay_edge = False
                 source_rebuild["legacy_edge_verified"] = True
                 break
@@ -1644,7 +1872,7 @@ async def _discover_semantic_synapses_resumable(
             # Even an unvalidated legacy prefix advances only the staged source
             # cursor; the pending manifest continues to name its old cursor.
             if token is not None:
-                await _assert_source_unchanged(storage, token, created_before=reference_time)
+                await _fence()
             await emit(
                 "synapses",
                 edge_cursor,
@@ -1654,7 +1882,7 @@ async def _discover_semantic_synapses_resumable(
             )
             continue
         if token is not None:
-            await _assert_source_unchanged(storage, token, created_before=reference_time)
+            await _fence()
         await emit(
             "synapses",
             edge_cursor,
@@ -1667,7 +1895,7 @@ async def _discover_semantic_synapses_resumable(
             break
 
     if token is not None:
-        await _assert_source_unchanged(storage, token, created_before=reference_time)
+        await _fence()
     source_fingerprint = fingerprint.finish()
     source_rebuild["source_complete"] = True
     source_rebuild["source_fingerprint"] = source_fingerprint
@@ -1680,15 +1908,19 @@ async def _discover_semantic_synapses_resumable(
             existing_pairs=0,
         )
     if saved_stage == "similarity" and saved.get("source_fingerprint") != source_fingerprint:
-        raise RuntimeError("semantic_link source changed after its similarity checkpoint")
+        raise SemanticSourceStaleError(
+            "semantic_link source changed after its similarity checkpoint"
+        )
 
     if len(eligible) < 2:
         if token is not None:
-            await _assert_source_unchanged(storage, token, created_before=reference_time)
+            await _fence(final=True)
         return SemanticDiscoveryResult(
             source_fingerprint=source_fingerprint,
             source_token=token,
             reference_time_rebuilt=reference_time_rebuilt,
+            source_state_id=state_id,
+            source_state_revision=state_revision,
         )
 
     logger.debug(
@@ -1971,7 +2203,7 @@ async def _discover_semantic_synapses_resumable(
             "pairs_evaluated": pairs_evaluated,
         }
         if token is not None:
-            await _assert_source_unchanged(storage, token, created_before=reference_time)
+            await _fence()
             details["source_token"] = token
         source_rebuild["similarity_rebuild"] = None
         source_rebuild["legacy_checkpoint"] = details
@@ -1980,7 +2212,7 @@ async def _discover_semantic_synapses_resumable(
 
     async def persist_v1_similarity_rebuild(next_row: int, *, cursor_verified: bool) -> None:
         if token is not None:
-            await _assert_source_unchanged(storage, token, created_before=reference_time)
+            await _fence()
         source_rebuild["similarity_rebuild"] = {
             "next_row": next_row,
             "cursor_verified": cursor_verified,
@@ -2144,7 +2376,7 @@ async def _discover_semantic_synapses_resumable(
     if resume_row is not None and not resumed_row_found:
         raise RuntimeError("semantic_link similarity cursor is beyond the candidate rows")
     if token is not None:
-        await _assert_source_unchanged(storage, token, created_before=reference_time)
+        await _fence(final=True)
     return SemanticDiscoveryResult(
         neurons_embedded=len(vectors),
         pairs_evaluated=pairs_evaluated,
@@ -2157,4 +2389,6 @@ async def _discover_semantic_synapses_resumable(
         source_fingerprint=source_fingerprint,
         source_token=token,
         reference_time_rebuilt=reference_time_rebuilt,
+        source_state_id=state_id,
+        source_state_revision=state_revision,
     )
