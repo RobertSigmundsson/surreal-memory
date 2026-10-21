@@ -673,7 +673,8 @@ smem consolidate [OPTIONS]
 |--------|------|----------|---------|-------------|
 | `strategy_positional` | text | No | — | (positional argument) |
 | `--brain / -b` | text | No | — | Brain to consolidate |
-| `--strategy / -s` | text | No | `all` | Consolidation strategy. Valid values: prune, merge, summarize, mature, infer, enrich, dream, learn_habits, dedup, sem... |
+| `--strategy / -s` | text | No | — | Consolidation strategy. Valid values: prune, merge, summarize, mature, infer, enrich, dream, learn_habits, dedup, sem... |
+| `--resume` | boolean | No | `False` | Resume the incomplete strategies from this brain's saved checkpoint |
 | `--dry-run / -n` | boolean | No | `False` | Preview changes without applying |
 | `--prune-threshold` | float | No | `0.05` | Weight threshold for pruning synapses |
 | `--merge-overlap` | float | No | `0.5` | Jaccard overlap threshold for merging fibers |

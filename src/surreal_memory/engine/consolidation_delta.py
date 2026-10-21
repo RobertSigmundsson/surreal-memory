@@ -78,6 +78,8 @@ class ConsolidationDelta:
 
     def summary(self) -> str:
         """Human-readable delta summary."""
+        if self.report.extra.get("consolidation_status") == "blocked":
+            return self.report.summary()
         lines = [self.report.summary(), "", "Health Delta:"]
 
         metrics = [
@@ -186,6 +188,7 @@ async def run_with_delta(
     reference_time: datetime | None = None,
     tier_config: TierConfig | None = None,
     on_progress: Callable[[str], None] | None = None,
+    resume_run_id: str | None = None,
 ) -> ConsolidationDelta:
     """Run consolidation and compute a before/after health delta.
 
@@ -201,6 +204,7 @@ async def run_with_delta(
         dry_run: If True, preview only.
         config: Optional consolidation config overrides.
         reference_time: Reference time for consolidation.
+        resume_run_id: Require this unfinished run under the consolidation lease.
 
     Returns:
         ConsolidationDelta with before/after snapshots and report.
@@ -221,6 +225,7 @@ async def run_with_delta(
         dry_run=dry_run,
         reference_time=reference_time,
         on_progress=on_progress,
+        resume_run_id=resume_run_id,
     )
 
     # Step 3: After snapshot

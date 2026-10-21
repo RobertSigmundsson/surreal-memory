@@ -35,6 +35,7 @@ from __future__ import annotations
 import asyncio
 import os
 from collections.abc import AsyncIterator
+from dataclasses import replace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
@@ -66,6 +67,19 @@ def _make_client(storage: Any) -> httpx.AsyncClient:
     app.include_router(router)
     app.dependency_overrides[get_storage] = lambda: storage
     return httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://localhost")
+
+
+@pytest.fixture
+def _force_surrealdb_backend(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep live tests on SurrealDB if an earlier test left config cached as memory."""
+    import surreal_memory.unified_config as unified_config
+
+    config = unified_config.get_config()
+    monkeypatch.setattr(
+        unified_config,
+        "_config",
+        replace(config, storage_backend="surrealdb", current_brain=BOUND_BRAIN),
+    )
 
 
 class TestListBrainsDoesNotLeakBrainState:
@@ -345,6 +359,7 @@ class TestGetStatsDoesNotLeakBrainState:
     not SURREALDB_URL,
     reason="requires SURREALDB_URL env var pointing to a running SurrealDB",
 )
+@pytest.mark.usefixtures("_force_surrealdb_backend")
 class TestListBrainsScopeLive:
     @pytest.fixture(autouse=True)
     async def _drain_background_refreshes(self) -> AsyncIterator[None]:
@@ -425,6 +440,7 @@ class TestListBrainsScopeLive:
     not SURREALDB_URL,
     reason="requires SURREALDB_URL env var pointing to a running SurrealDB",
 )
+@pytest.mark.usefixtures("_force_surrealdb_backend")
 class TestGetStatsScopeLive:
     @pytest.fixture(autouse=True)
     async def _drain_background_refreshes(self) -> AsyncIterator[None]:

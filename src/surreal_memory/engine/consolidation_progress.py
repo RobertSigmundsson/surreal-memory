@@ -52,6 +52,20 @@ def options_fingerprint(options: Mapping[str, Any]) -> str:
     return sha256(encoded.encode("utf-8")).hexdigest()
 
 
+def stored_form(value: Any) -> Any:
+    """Return ``value`` as SurrealDB stores it.
+
+    The Python SDK sends ``None`` as NONE, and SurrealDB keeps no object key whose
+    value is NONE, at any depth; array elements are kept. Census rows are
+    fingerprinted and compared in this form, so the row read back is the row written.
+    """
+    if isinstance(value, dict):
+        return {key: stored_form(item) for key, item in value.items() if item is not None}
+    if isinstance(value, list):
+        return [stored_form(item) for item in value]
+    return value
+
+
 def _parse_reference_time(value: Any) -> datetime:
     if isinstance(value, datetime):
         return ensure_naive_utc(value)
@@ -943,9 +957,14 @@ class ConsolidationProgressSession:
         reference_time: datetime,
         *,
         explicit_reference_time: datetime | None = None,
+        resume_run_id: str | None = None,
     ) -> ConsolidationProgressSession | None:
         """Acquire the brain lease, then resume or initialize its active record."""
         if not supports_persistent_progress(storage):
+            if resume_run_id is not None:
+                raise ConsolidationResumeMismatchError(
+                    "explicit resume requires durable consolidation progress"
+                )
             return None
 
         brain_id = str(storage.current_brain_id)
@@ -961,6 +980,15 @@ class ConsolidationProgressSession:
         try:
             requested = sorted(set(requested_strategies))
             existing = await storage.get_consolidation_progress(brain_id)
+            if resume_run_id is not None and (
+                not existing
+                or existing.get("run_id") != resume_run_id
+                or str(existing.get("status")) not in INCOMPLETE_STATUSES
+            ):
+                raise ConsolidationResumeMismatchError(
+                    f"resume checkpoint {resume_run_id!r} changed or is no longer unfinished; "
+                    "its checkpoint was left untouched"
+                )
             if existing and str(existing.get("status")) in INCOMPLETE_STATUSES:
                 if existing.get("engine_version") != CONSOLIDATION_ENGINE_VERSION:
                     raise ConsolidationResumeMismatchError(
@@ -980,7 +1008,12 @@ class ConsolidationProgressSession:
                 if existing.get("options_fingerprint") != fingerprint:
                     raise ConsolidationResumeMismatchError(
                         "unfinished consolidation has different strategy/configuration "
-                        "parameters; its checkpoint was left untouched"
+                        "parameters; its checkpoint was left untouched. "
+                        f"Run: {existing.get('run_id')}; "
+                        f"saved strategies: {sorted(existing.get('requested_strategies') or [])}; "
+                        f"requested strategies: {requested}. "
+                        "Use smem consolidate --resume with the original configuration "
+                        "to finish the saved run before starting another strategy set"
                     )
                 if sorted(existing.get("requested_strategies") or []) != requested:
                     raise ConsolidationResumeMismatchError(
@@ -1003,6 +1036,12 @@ class ConsolidationProgressSession:
                     )
                 session = cls(storage, brain_id, owner_token, dict(claimed))
                 session.resumed = True
+                # This lease holder starts a new attempt at the same saved work.
+                # A later ordinary budget pause must not retain the prior
+                # attempt's failure. Persist through the existing owner fence
+                # before any strategy executes; a new failure is recorded anew.
+                session.state.update(status="running", last_error=None)
+                await session._save()
             else:
                 state: dict[str, Any] = {
                     "brain_id": brain_id,

@@ -64,6 +64,16 @@ from surreal_memory.utils.geo import GeoFilter, fiber_within
 from surreal_memory.utils.timeutils import utcnow
 
 logger = logging.getLogger(__name__)
+_CONNECTION_CLOSE_TIMEOUT_SECONDS = 2.0
+
+
+class _DeadWebSocketReceiverError(RuntimeError):
+    """A request failed after the SDK WebSocket receiver stopped.
+
+    This is deliberately not an OSError/ConnectionError: the request may have
+    reached the server, so the adapter must not retry it.
+    """
+
 
 # HNSW search width floor. The index is built with EFC 150. This backend used
 # to search with 100, and at that width the index quietly drops neighbours:
@@ -869,7 +879,9 @@ class SurrealDBStorage(
         if self._conn is None:
             return
         try:
-            await self._conn.close()
+            await asyncio.wait_for(self._conn.close(), timeout=_CONNECTION_CLOSE_TIMEOUT_SECONDS)
+        except TimeoutError:
+            logger.debug("Timed out closing SurrealDB connection; dropping its reference")
         except Exception:
             logger.debug(
                 "Connection transport does not support close(); ignoring",
@@ -958,7 +970,7 @@ class SurrealDBStorage(
                 await self._reconnect(close_previous=False)
 
     async def _run_query(self, sql: str, params: dict[str, Any]) -> Any:
-        """One query attempt, with a peer-induced cancellation made retryable.
+        """One query attempt, translating peer-induced cancellation.
 
         Closing a WebSocket connection cancels the SDK's receive task, and its
         cleanup cancels EVERY future still pending on that connection — not just
@@ -971,9 +983,10 @@ class SurrealDBStorage(
         `return_exceptions=True` then tears down the whole batch.
 
         A cancellation this task did not ask for is really "the connection went
-        away underneath me", which is precisely what the retry path exists to
-        absorb. Translate it. A cancellation the task DID ask for (`task.cancel()`,
-        `asyncio.wait_for` expiring) still propagates untouched.
+        away underneath me". Translate it to a connection error; the caller
+        retries only if the receiver still appears active. A cancellation the
+        task DID ask for (`task.cancel()`, `asyncio.wait_for` expiring) propagates
+        untouched.
         """
         try:
             return await self._ensure_conn().query(sql, params)
@@ -1012,15 +1025,41 @@ class SurrealDBStorage(
         from surreal_memory.storage.surrealdb.connection import StorageAuthError
 
         generation = self._conn_generation
-
         try:
             # Inside the try on purpose: rebuilding for a loop change can hit the
             # very same transient reset as any other connect, and it deserves the
             # same three attempts with backoff as the rest of this method rather
             # than failing the caller on the first blip.
             await self._ensure_conn_on_current_loop()
+            await self._reconnect_if_websocket_receiver_stopped()
+            generation = self._conn_generation
             result = await self._run_query(sql, params)
         except Exception as exc:
+            failed_conn = self._ensure_conn()
+            receiver_stopped = self._websocket_receiver_stopped(failed_conn)
+            if isinstance(exc, KeyError) and getattr(failed_conn, "recv_task", None) is not None:
+                # The SDK can raise from _send's finally while the receive task
+                # is finishing its own cleanup. Give that task one loop turn so
+                # we can distinguish its cleared request map from an unrelated
+                # KeyError without treating arbitrary KeyErrors as retryable.
+                await asyncio.sleep(0)
+                failed_conn = self._ensure_conn()
+                receiver_stopped = self._websocket_receiver_stopped(failed_conn)
+            connection_changed = self._conn_generation != generation
+            if receiver_stopped or connection_changed:
+                receiver_cause = self._websocket_receiver_cause(failed_conn)
+                cause = receiver_cause or exc
+                logger.warning(
+                    "SurrealDB connection failed or changed during a query; "
+                    "query was not retried (failure type: %s)",
+                    type(exc).__name__,
+                )
+                # The request may have reached the server. Surface the failure
+                # and let the next independent operation replace this connection.
+                raise _DeadWebSocketReceiverError(
+                    "SurrealDB connection stopped or changed while a query was in flight; "
+                    "the query was not replayed"
+                ) from cause
             if not (_is_auth_error(exc) or _is_connection_error(exc)):
                 raise
             # A dropped transport often needs a moment before it accepts a new
@@ -1068,6 +1107,50 @@ class SurrealDBStorage(
             else:
                 raise last_exc
         return result
+
+    @staticmethod
+    def _websocket_receiver_stopped(conn: Any) -> bool:
+        """Return whether an SDK WebSocket receiver exited or is cancelling."""
+        receiver = getattr(conn, "recv_task", None)
+        if receiver is None:
+            return False
+        done = getattr(receiver, "done", None)
+        if callable(done) and done() is True:
+            return True
+        cancelling = getattr(receiver, "cancelling", None)
+        if not callable(cancelling):
+            return False
+        cancellation_count = cancelling()
+        return type(cancellation_count) is int and cancellation_count > 0
+
+    @staticmethod
+    def _websocket_receiver_cause(conn: Any) -> BaseException | None:
+        """Read a completed receiver's exception without masking cancellation."""
+        receiver = getattr(conn, "recv_task", None)
+        if receiver is None:
+            return None
+        done = getattr(receiver, "done", None)
+        if not callable(done) or done() is not True or receiver.cancelled():
+            return None
+        try:
+            cause = receiver.exception()
+            return cause if isinstance(cause, BaseException) else None
+        except (asyncio.CancelledError, Exception):
+            return None
+
+    async def _reconnect_if_websocket_receiver_stopped(self) -> None:
+        """Replace a dead SDK WebSocket connection before starting a new query."""
+        conn = self._ensure_conn()
+        if not self._websocket_receiver_stopped(conn):
+            return
+
+        generation = self._conn_generation
+        async with self._lock_for_current_loop():
+            # Another waiter may already have replaced the dead connection.
+            if generation != self._conn_generation:
+                return
+            if self._ensure_conn() is conn and self._websocket_receiver_stopped(conn):
+                await self._reconnect()
 
     async def _query(self, sql: str, **params: Any) -> list[dict[str, Any]]:
         """Execute a row query and return its rows.
@@ -1163,7 +1246,9 @@ class SurrealDBStorage(
             # down and raises. A failure to close must never mask the successful
             # reconnect the caller is waiting for.
             try:
-                await previous.close()
+                await asyncio.wait_for(previous.close(), timeout=_CONNECTION_CLOSE_TIMEOUT_SECONDS)
+            except TimeoutError:
+                logger.debug("Timed out closing replaced SurrealDB connection")
             except Exception:
                 logger.debug(
                     "Could not close the replaced SurrealDB connection; dropping it",
@@ -1345,18 +1430,17 @@ class SurrealDBStorage(
         async def _fetch_one(nid: str) -> tuple[str, Neuron | None]:
             sid = _to_surreal_id(nid)
             async with semaphore:
-                try:
-                    rows = await self._query(
-                        f"SELECT * FROM neuron:{sid} WHERE brain_id = $brain_id",
-                        brain_id=brain_id,
-                    )
-                except Exception:
-                    return nid, None
+                rows = await self._query(
+                    f"SELECT * FROM neuron:{sid} WHERE brain_id = $brain_id",
+                    brain_id=brain_id,
+                )
             if rows:
                 return nid, _row_to_neuron(rows[0])
             return nid, None
 
-        pairs = await asyncio.gather(*(_fetch_one(nid) for nid in neuron_ids))
+        async with asyncio.TaskGroup() as group:
+            tasks = [group.create_task(_fetch_one(nid)) for nid in neuron_ids]
+        pairs = [task.result() for task in tasks]
         return {nid: neuron for nid, neuron in pairs if neuron is not None}
 
     async def find_neurons(
@@ -2349,8 +2433,10 @@ class SurrealDBStorage(
             batch = unique_ids[start : start + 256]
             params: dict[str, Any] = {"brain_id": brain_id}
             record_ids = self._record_id_list("synapse", batch, "synapse_id", params)
+            # A table source lets the planner scan every edge in the brain before
+            # filtering IDs. Address the bounded record list directly instead.
             rows = await self._query(
-                f"SELECT * FROM synapse WHERE brain_id = $brain_id AND id IN {record_ids}",
+                f"SELECT * FROM {record_ids} WHERE brain_id = $brain_id",
                 **params,
             )
             synapses.extend(_row_to_synapse(row) for row in rows)
@@ -2596,8 +2682,7 @@ class SurrealDBStorage(
             params: dict[str, Any] = {"brain_id": brain_id}
             record_ids = self._record_id_list("synapse", batch, "synapse_id", params)
             rows = await self._query(
-                "DELETE FROM synapse WHERE brain_id = $brain_id "
-                f"AND id IN {record_ids} RETURN BEFORE",
+                f"DELETE FROM {record_ids} WHERE brain_id = $brain_id RETURN BEFORE",
                 **params,
             )
             deleted = [_row_to_synapse(row) for row in rows]
@@ -4009,16 +4094,15 @@ class SurrealDBStorage(
             if seq > newest.get(key, -1):
                 newest[key] = seq
 
-        # Keep the raw RecordID the driver handed back: stringifying it turns
-        # `change_log:abc` into a plain string, and `WHERE id IN $ids` then
-        # matches nothing at all while still reporting a successful delete.
-        doomed: list[str] = [
-            str(row["id"])
+        # Keep the typed RecordIDs the driver handed back. The same IDs can be
+        # bound as a record-list DELETE source; stringifying them loses their
+        # record type and a string-valued id predicate silently matches nothing.
+        doomed: list[Any] = [
+            row["id"]
             for row in candidates
             if row.get("id") is not None
-            # Ids are inlined into DELETE statements, so each one is validated
-            # against a strict charset first rather than trusted because it came
-            # back from the database.
+            # IDs are passed back to the database, so keep the existing strict
+            # charset validation rather than trusting arbitrary returned values.
             and _CHANGE_LOG_ID_SAFE.match(str(row["id"]))
             and int(row.get("sequence", 0) or 0)
             != newest.get((str(row.get("entity_type", "")), str(row.get("entity_id", ""))), -1)
@@ -4026,16 +4110,22 @@ class SurrealDBStorage(
         if not doomed:
             return 0
 
-        # Delete by primary key, batched as separate statements, NOT with
-        # `WHERE id IN $ids`. The IN form does not scale: a list of a few
-        # thousand ids stops returning entirely, while the same ids as
-        # individual keyed deletes complete in one round-trip in milliseconds.
-        deleted = 0
+        # Use the native IDs as the table source so SurrealDB addresses the
+        # selected records directly. Repeat all eligibility guards at deletion
+        # time in case a selected row was changed while this method was in flight.
+        # RETURN BEFORE.id makes the result reflect rows actually deleted,
+        # including a concurrent sync or replay that made candidates ineligible,
+        # without transferring their potentially large payloads back to Python.
+        deleted_count = 0
         for chunk in _chunked(doomed, _COLLAPSE_DELETE_CHUNK):
-            statements = "".join(f"DELETE {rid};" for rid in chunk)
-            await self._query(statements)
-            deleted += len(chunk)
-        return deleted
+            deleted_ids = await self._query_values(
+                "DELETE FROM $record_ids WHERE brain_id = $brain_id "
+                "AND operation = 'update' AND synced = false RETURN BEFORE.id",
+                record_ids=chunk,
+                brain_id=self._get_brain_id(),
+            )
+            deleted_count += len(deleted_ids)
+        return deleted_count
 
     async def seed_change_log(self, device_id: str = "") -> dict[str, int]:
         brain_id = self._get_brain_id()

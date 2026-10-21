@@ -14,6 +14,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   entries, so on a busy database the barrier search stopped early ("semantic source
   barrier was not found within the bounded changefeed scan") and the source checks
   could miss neuron/synapse changes queued behind other tables' writes.
+- Census rows are fingerprinted and compared in the form SurrealDB stores them,
+  without any key whose value is null, and merge treats fiber `metadata` the
+  same way. Fibers whose stored `metadata` holds a null are merged instead of
+  stopping merge with "fiber census staged page is invalid".
+- The dedup census accepts its own completion marker when a late owner writes it
+  a second time, instead of refusing it as a stale overwrite.
+
+### Changed
+
+- Fiber-census pages are staged with a fingerprint of their stored form. Pages
+  staged by 3.12.0 and 3.12.1 are still accepted, apart from pages holding such
+  a metadata null, which never validated. A page staged by this release can in
+  general not be read by 3.12.1.
+- A null value in a source fiber's `metadata` no longer wins a key collision
+  when fibers are merged. It counts as a missing key.
+
+## [3.12.1] — 2026-10-12 — consolidation resume validates saved work
+
+Explicit resume now checks that a saved checkpoint still belongs to the same
+incomplete run before work continues. Fiber-census retries also tolerate
+SurrealDB omitting nullable fields while retaining the immutable page checks.
+
+### Fixed
+
+- `smem consolidate --resume` resumes the saved strategy set and original
+  reference time, and refuses missing, completed, replaced, or invalid
+  checkpoints without changing their stored state. It cannot be combined with
+  `--strategy` or `--dry-run`.
+- Blocked runs explain that strategies were not executed and suppress health
+  deltas and eligibility hints that could misattribute unrelated snapshot
+  differences to consolidation.
+- Fiber-census page hashing and duplicate-page comparison restore nullable
+  fields omitted by SurrealDB. Tests cover a null-field round trip, an empty
+  census completion marker, and rejection of changed page contents.
 
 ## [3.12.0] — 2026-09-25 — consolidation can resume its committed work
 
