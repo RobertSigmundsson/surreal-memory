@@ -938,11 +938,17 @@ def _neuron_projection(neuron: Neuron) -> str:
 class _WorkingSet:
     """The neurons whose type, content and vector decide the result of ONE discovery run.
 
-    ``tolerate`` is the predicate handed to the source fence: a change it accepts provably cannot
-    alter this run's result. Anything outside the working set (unread, read-and-dropped, evicted,
-    another brain) cannot; a candidate is tolerated only while its digest is unchanged; synapse
-    events are tolerated only when the degree guard is active (candidate degrees are re-verified
-    at restore and at the final gate).
+    ``tolerate`` is the predicate handed to the source fence. A candidate is tolerated only while
+    its digest is unchanged; synapse events are tolerated only when the degree guard is active
+    (candidate degrees are re-verified at restore and at the final gate); a change to a neuron
+    outside the working set (unread, read-and-dropped, evicted, another brain) is tolerated.
+
+    That last rule is a deliberate trade, not a proof of equality with a silent run. Such a neuron
+    can still change which pairs exist (the vector worker fills the vector of a neuron the scan had
+    already dropped, or of one it has not reached yet), so the result lies between a silent run at
+    the token and a silent run at the end: every pair it holds is a pair the silent run at the end
+    would hold, and it can miss pairs of neurons that changed while the run was in flight, which the
+    next run picks up. Making those changes fatal would fail every run that overlaps the worker.
     """
 
     def __init__(self) -> None:
@@ -1116,8 +1122,11 @@ async def verify_staged_discovery_source(
 ) -> bool:
     """Re-verify, from its staged snapshot, the source a finished discovery computed its result from.
 
-    ``True``: verified; anything that can alter the result raises (a ``RuntimeError``). ``False``:
-    this store or snapshot cannot do it and the caller must keep its strict verification. The
+    ``True``: verified; anything that can alter the result raises (a ``RuntimeError``), including a
+    snapshot the store does not hand back: it answers the same ``None`` for a snapshot that is gone
+    and for one this run's manifest does not name, and the two must not be told apart by guessing.
+    ``False``: this store, or a snapshot written before the digests, cannot do it and the caller
+    must keep its strict verification. The
     result depends on the candidates' type, content and vector (their digests) and on their
     degrees; nothing else a recall or the vector worker rewrites matters, so nothing else is
     compared. The scan always starts at the token: there is no incremental memory to trust.
@@ -1412,6 +1421,10 @@ async def _discover_semantic_synapses_resumable(
         if set(restored) != set(restore_candidate_ids):
             raise SemanticSourceStaleError("semantic_link candidate source changed during rebuild")
         if tolerance_active:
+            if snapshot_digests is None:
+                # These digests are adopted from the read above, so a write that landed between
+                # the strict check and that read would become the baseline. Close the window.
+                await _fence()
             for candidate_id in restore_candidate_ids:
                 digest = _neuron_projection(restored[candidate_id])
                 if snapshot_digests is not None and snapshot_digests[candidate_id] != digest:
@@ -1868,6 +1881,7 @@ async def _discover_semantic_synapses_resumable(
             zip(candidate_priorities, eligible, vectors, strict=True),
             key=lambda item: item[0],
         )
+        candidate_priorities = [item[0] for item in interleaved]
         eligible = [item[1] for item in interleaved]
         vectors = [item[2] for item in interleaved]
 

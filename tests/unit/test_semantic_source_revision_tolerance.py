@@ -301,3 +301,31 @@ async def test_incremental_memory_gives_the_same_verdict_as_a_full_scan(tolerant
         assert second == full, (feed, split, full, second)
         seen_verdicts.add(full)
     assert {"pass", "changed"} <= seen_verdicts  # the generator exercises both outcomes
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("action", ["update", "delete"])
+async def test_a_letterless_record_id_reaches_the_predicate_without_guillemets(action: str) -> None:
+    # SurrealDB renders an id part with no letter quoted: neuron:⟨1234_5678⟩. The predicate looks
+    # candidates up by their public id (1234-5678); the quoted spelling never matches, and an
+    # unknown id is tolerated, so a change to that candidate used to pass unnoticed.
+    storage, cutoff, token = _setup()
+    quoted = "neuron:⟨1234_5678⟩"
+    storage.change_rows["neuron"] = [
+        _event(
+            101,
+            action,
+            _neuron_record("1234_5678", created=OLD) | {"id": quoted}
+            if action == "update"
+            else {"id": quoted},
+        )
+    ]
+    seen: list[str] = []
+
+    def predicate(table: str, action: str, public_id: str, brain: str | None, domain: Any) -> bool:
+        seen.append(public_id)
+        return True
+
+    await storage.assert_semantic_source_unchanged(token, created_before=cutoff, tolerate=predicate)
+
+    assert seen == ["1234-5678"]

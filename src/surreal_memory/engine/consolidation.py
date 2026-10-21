@@ -10688,7 +10688,11 @@ class ConsolidationEngine:
         async def begin_auto_restart(reason: str) -> bool:
             """Record one restart and park the stage so the discovery starts over; False = give up."""
             restarts_exhausted = len(auto_restart_history) >= self._semantic_auto_restarts
-            edges_already_written = semantic_written not in (None, 0)
+            # The durable counter trails the writes by up to one checkpoint batch, so once the
+            # apply stage has begun edges may exist that it does not know about.
+            edges_already_written = semantic_written not in (None, 0) or str(
+                state.get("phase") or ""
+            ).startswith("semantic_link_apply")
             if restarts_exhausted or edges_already_written:
                 return False
             auto_restart_history.append(
@@ -11005,6 +11009,19 @@ class ConsolidationEngine:
         skipped = int(raw_skipped) if isinstance(raw_skipped, (int, float)) else 0
         failures = int(counters.get("semantic_link_failures", 0))
         applied_since_checkpoint = 0
+
+        if not str(state.get("phase") or "").startswith("semantic_link_apply"):
+            # Durable before the first edge: from here on a crash may leave edges no counter saw.
+            await self._checkpoint_progress(
+                "semantic_link_apply_started",
+                cursor=cursor,
+                pending=[serialized],
+                counters={
+                    "semantic_synapses_created": created,
+                    "semantic_synapses_skipped": skipped,
+                    "semantic_link_failures": failures,
+                },
+            )
 
         async def checkpoint_apply() -> None:
             nonlocal applied_since_checkpoint

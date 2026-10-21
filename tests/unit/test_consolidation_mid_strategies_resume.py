@@ -827,8 +827,12 @@ async def test_semantic_link_lease_loss_stops_after_uncheckpointed_apply_group(
         )
 
     assert len(storage.added_synapses) == 50
-    assert progress.strategy_state("semantic_link")["phase"] == "semantic_link_pending"
-    assert [write["phase"] for write in progress.writes] == ["semantic_link_pending"]
+    # the stage is marked as begun before its first edge, so a crash cannot look unapplied
+    assert progress.strategy_state("semantic_link")["phase"] == "semantic_link_apply_started"
+    assert [write["phase"] for write in progress.writes] == [
+        "semantic_link_pending",
+        "semantic_link_apply_started",
+    ]
 
 
 @pytest.mark.asyncio
@@ -862,7 +866,7 @@ async def test_semantic_link_rejects_changed_row_after_apply_checkpoint(
         await _engine(storage, ConsolidationStrategy.SEMANTIC_LINK, progress)._semantic_link(
             ConsolidationReport(), dry_run=False
         )
-    assert progress.strategy_state("semantic_link")["phase"] == "semantic_link_pending"
+    assert progress.strategy_state("semantic_link")["phase"] == "semantic_link_apply_started"
 
 
 @pytest.mark.asyncio

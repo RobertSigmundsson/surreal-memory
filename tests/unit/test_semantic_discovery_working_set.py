@@ -711,3 +711,27 @@ async def test_snapshot_with_digests_stays_inside_the_state_budget_for_ten_thous
     assert len(state["candidate_digests"]) == 16 * 10_000
     size = len(json.dumps(state, ensure_ascii=False, separators=(",", ":")).encode())
     assert size < semantic_discovery_module._MAX_REBUILD_STATE_BYTES, size
+
+
+@pytest.mark.asyncio
+async def test_snapshot_without_digests_rejects_a_write_between_its_check_and_its_read(
+    kind: str,
+) -> None:
+    """The digests of a legacy snapshot are adopted from a read; nothing may slip in before it."""
+    storage = _world(kind)
+    manifest = await _pause_after_neuron_scan(storage)
+    ref = manifest["source_state_ref"]
+    state = storage.semantic_discovery_states[(ref["state_id"], ref["revision"])]
+    state.pop("candidate_digests")
+    state.pop("candidate_digests_format")
+    state.pop("candidate_degree_digest", None)
+    read = storage.get_neurons_batch
+
+    async def racing(ids: Any) -> Any:
+        storage.update_neuron(_candidates(kind)[0], content="rewritten after the strict check")
+        return await read(ids)
+
+    storage.get_neurons_batch = racing  # type: ignore[method-assign]
+
+    with pytest.raises(SemanticSourceChangedError):
+        await _resume(storage, manifest)

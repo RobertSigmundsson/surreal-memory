@@ -527,9 +527,10 @@ class SurrealDBSemanticSourceRevisionMixin:
 
     @staticmethod
     def _source_change_public_id(record: Mapping[str, Any]) -> str:
-        from ._ids import _to_public_id
+        from ._ids import _record_id_part, _to_public_id
 
-        return _to_public_id(str(record["id"]))
+        # An id part with no letter is rendered quoted (neuron:⟨1234_5678⟩); strip the quotes first.
+        return _to_public_id(_record_id_part(str(record["id"])))
 
     @staticmethod
     def _source_change_domain(table: str, record: Mapping[str, Any]) -> Any:
@@ -712,7 +713,10 @@ class SurrealDBSemanticSourceRevisionMixin:
                         break
 
                 if scanned >= _SOURCE_CHANGEFEED_MAX_ROWS:
-                    raise SemanticSourceFenceUnavailableError(
+                    # Tolerated traffic accumulates, so a long run (or an apply stage resumed after
+                    # days) can outgrow the bound: the token can no longer be verified, which a
+                    # fresh token fixes. That is expiry, not a database fault.
+                    raise SemanticSourceFenceExpiredError(
                         f"{table} changefeed exceeded the bounded scan limit"
                     )
                 if len(events) < limit:
