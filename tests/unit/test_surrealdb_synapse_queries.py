@@ -222,7 +222,8 @@ class TestBatchedPruneQueries:
         assert st._query.await_count == 2
         first_sql = st._query.await_args_list[0].args[0]
         first_params = st._query.await_args_list[0].kwargs
-        assert first_sql.startswith("DELETE FROM synapse")
+        assert first_sql.startswith("DELETE FROM [type::record(")
+        assert "id IN" not in first_sql
         assert "brain_id = $brain_id" in first_sql
         assert "RETURN BEFORE" in first_sql
         assert "type::record('synapse', $synapse_id_0)" in first_sql
@@ -240,7 +241,9 @@ class TestBatchedPruneQueries:
 
         sql = st._query.await_args.args[0]
         params = st._query.await_args.kwargs
-        assert "id IN [type::record('synapse', $synapse_id_0)]" in sql
+        assert "FROM [type::record('synapse', $synapse_id_0)]" in sql
+        assert "WHERE brain_id = $brain_id" in sql
+        assert "id IN" not in sql
         assert params["synapse_id_0"] == "edge_1"
 
     @pytest.mark.asyncio

@@ -559,6 +559,7 @@ class CompressionEngine:
         dry_run: bool = False,
         brain: Brain | None = None,
         run_id: str | None = None,
+        _pinned_neuron_ids: set[str] | None = None,
     ) -> CompressionResult:
         """Compress a single fiber to *target_tier*.
 
@@ -584,7 +585,32 @@ class CompressionEngine:
             if pending is not None:
                 if not isinstance(pending, dict):
                     raise ValueError(f"Invalid compression intent for fiber {fiber.id}")
-                return await self._resume_prepared_fiber(fiber, pending, brain=brain)
+                replay_pinned_neuron_ids = (
+                    _pinned_neuron_ids
+                    if _pinned_neuron_ids is not None
+                    else await self._storage.get_pinned_neuron_ids()
+                )
+                return await self._resume_prepared_fiber(
+                    fiber, pending, brain=brain, pinned_neuron_ids=replay_pinned_neuron_ids
+                )
+
+        if fiber.pinned or fiber.metadata.get("_verbatim"):
+            return CompressionResult(
+                fiber_id=fiber.id,
+                original_tier=fiber.compression_tier,
+                new_tier=fiber.compression_tier,
+                original_token_count=0,
+                compressed_token_count=0,
+                entities_preserved=0,
+                backup_created=False,
+                skipped=True,
+                skip_reason="pinned_fiber" if fiber.pinned else "verbatim_fiber",
+            )
+
+        pinned_neuron_ids: set[str] | None = _pinned_neuron_ids
+        if pinned_neuron_ids is None:
+            # Direct callers receive the same fail-closed protection as a full run.
+            pinned_neuron_ids = await self._storage.get_pinned_neuron_ids()
 
         current_tier = CompressionTier(fiber.compression_tier)
 
@@ -600,6 +626,30 @@ class CompressionEngine:
                 skipped=True,
                 skip_reason="already_at_or_beyond_target_tier",
             )
+
+        if pinned_neuron_ids is not None:
+            write_neuron_ids = (
+                set(fiber.neuron_ids)
+                if target_tier == CompressionTier.GRAPH_ONLY
+                else {fiber.anchor_neuron_id}
+            )
+            protected = write_neuron_ids & pinned_neuron_ids
+            if protected:
+                logger.info(
+                    "Skipping compression for fiber %s because pinned neurons would change",
+                    fiber.id,
+                )
+                return CompressionResult(
+                    fiber_id=fiber.id,
+                    original_tier=fiber.compression_tier,
+                    new_tier=fiber.compression_tier,
+                    original_token_count=0,
+                    compressed_token_count=0,
+                    entities_preserved=0,
+                    backup_created=False,
+                    skipped=True,
+                    skip_reason="pinned_neuron_protected",
+                )
 
         # Fetch neurons in this fiber.
         neurons = await self._storage.get_neurons_batch(list(fiber.neuron_ids))
@@ -891,6 +941,7 @@ class CompressionEngine:
         intent: dict[str, Any],
         *,
         brain: Brain | None,
+        pinned_neuron_ids: set[str],
     ) -> CompressionResult:
         """Finish an already prepared compression without regenerating its output."""
         from dataclasses import replace as dc_replace
@@ -941,6 +992,14 @@ class CompressionEngine:
                 )
             if target_tier == CompressionTier.GRAPH_ONLY or neuron_id == fiber.anchor_neuron_id:
                 to_refresh.append((neuron, expected))
+
+        pending_writes = {neuron.id for neuron, _content in to_refresh}
+        pending_writes.update(neuron.id for neuron in to_stamp)
+        protected_writes = pending_writes & pinned_neuron_ids
+        if protected_writes:
+            raise RuntimeError(
+                f"Pinned neuron {min(protected_writes)} blocks compression replay for fiber {fiber.id}"
+            )
 
         if to_refresh:
             refreshed = await contents_refreshed(self._storage, to_refresh, brain=brain)
@@ -1165,6 +1224,10 @@ class CompressionEngine:
             if len(legacy_fibers) >= 10000:
                 raise RuntimeError("compression requires get_fibers_after_id for 10000+ fibers")
 
+        # This one bounded census protects the entire pass. Backends implement it
+        # as a current-brain lookup; failure aborts rather than weakening pinning.
+        pinned_neuron_ids = await self._storage.get_pinned_neuron_ids()
+
         # One brain lookup for the whole pass: the derived-field refresh needs
         # the brain's embedding config, which cannot change mid-run, and paying
         # a per-fiber lookup would contradict this path's own round-trip budget.
@@ -1239,9 +1302,15 @@ class CompressionEngine:
 
                 try:
                     result = await self.compress_fiber(
-                        fiber, target_tier, dry_run=dry_run, brain=brain
+                        fiber,
+                        target_tier,
+                        dry_run=dry_run,
+                        brain=brain,
+                        _pinned_neuron_ids=pinned_neuron_ids,
                     )
                 except Exception:
+                    if pending is not None:
+                        raise
                     logger.error("Compression failed for fiber %s", fiber.id, exc_info=True)
                     report.fibers_skipped += 1
                     continue

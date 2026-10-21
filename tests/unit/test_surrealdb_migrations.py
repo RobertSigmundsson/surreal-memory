@@ -451,6 +451,52 @@ class TestResume:
 # --------------------------------------------------------------------------- #
 # apply_migrations orchestration (fresh / already-migrated / lock)
 # --------------------------------------------------------------------------- #
+class TestStampVersion:
+    @pytest.mark.asyncio
+    async def test_concurrent_write_conflict_is_ok_when_peer_stamped_same_version(self):
+        conn = ScriptedConn()
+        conn.route(
+            "UPSERT schema_meta:version",
+            lambda sql, params: (_ for _ in ()).throw(
+                RuntimeError("Transaction conflict: Write conflict, retry the transaction")
+            ),
+        )
+        conn.route("SELECT version FROM schema_meta:version", [{"version": M.TARGET_VERSION}])
+
+        await M._stamp_version(conn, M.TARGET_VERSION)
+
+        assert conn.sqls() == [
+            "UPSERT schema_meta:version SET version = $v",
+            "SELECT version FROM schema_meta:version",
+        ]
+
+    @pytest.mark.asyncio
+    async def test_write_conflict_propagates_when_peer_did_not_stamp_same_version(self):
+        conn = ScriptedConn()
+        conflict = RuntimeError("Transaction conflict: Write conflict, retry the transaction")
+        conn.route(
+            "UPSERT schema_meta:version", lambda sql, params: (_ for _ in ()).throw(conflict)
+        )
+        conn.route("SELECT version FROM schema_meta:version", [{"version": M.VERSION_11}])
+
+        with pytest.raises(RuntimeError, match="Write conflict") as raised:
+            await M._stamp_version(conn, M.TARGET_VERSION)
+
+        assert raised.value is conflict
+
+    @pytest.mark.asyncio
+    async def test_non_conflict_stamp_error_propagates_without_recheck(self):
+        conn = ScriptedConn()
+        error = RuntimeError("permission denied")
+        conn.route("UPSERT schema_meta:version", lambda sql, params: (_ for _ in ()).throw(error))
+
+        with pytest.raises(RuntimeError, match="permission denied") as raised:
+            await M._stamp_version(conn, M.TARGET_VERSION)
+
+        assert raised.value is error
+        assert len(conn.sqls()) == 1
+
+
 class TestApplyMigrations:
     @pytest.mark.asyncio
     async def test_fresh_db_stamps_and_skips_migration(self, monkeypatch):
