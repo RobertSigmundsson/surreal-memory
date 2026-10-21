@@ -304,6 +304,85 @@ async def test_explicit_reference_time_mismatch_is_rejected() -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("paused_after_failure", [False, True])
+async def test_resumed_attempt_clears_prior_error_without_resetting_work(
+    paused_after_failure: bool,
+) -> None:
+    storage = FakeProgressStorage()
+    first = await ConsolidationProgressSession.open(
+        storage, ["prune", "semantic_link"], "same", REFERENCE_TIME
+    )
+    assert first is not None
+    await first.checkpoint("prune", "done", counters={"synapses_pruned": 17})
+    await first.complete_strategy("prune")
+    await first.checkpoint(
+        "semantic_link", "discovery_neurons", cursor="neuron:example", pending=["saved-source"]
+    )
+    await first.fail("previous receiver failure")
+    if paused_after_failure:
+        await first.pause()
+    await first.close()
+    before = deepcopy(storage.progress)
+    assert before is not None
+
+    resumed = await ConsolidationProgressSession.open(
+        storage,
+        ["prune", "semantic_link"],
+        "same",
+        REFERENCE_TIME + timedelta(days=3),
+        resume_run_id=before["run_id"],
+    )
+    assert resumed is not None
+    try:
+        assert storage.progress is not None
+        assert storage.progress["status"] == "running"
+        assert storage.progress.get("last_error") is None
+        for key in (
+            "run_id",
+            "reference_time",
+            "options_fingerprint",
+            "requested_strategies",
+            "completed_strategies",
+            "strategy_states",
+            "phase",
+            "cursor",
+            "counters",
+        ):
+            assert storage.progress[key] == before[key]
+        await resumed.pause()
+        assert storage.progress["status"] == "paused"
+        assert storage.progress.get("last_error") is None
+        await resumed.fail("new coordination failure")
+        assert storage.progress["last_error"] == "new coordination failure"
+    finally:
+        await resumed.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("reject_save", [False, True])
+async def test_rejected_resume_preserves_prior_error(reject_save: bool) -> None:
+    storage = FakeProgressStorage()
+    first = await ConsolidationProgressSession.open(storage, ["prune"], "same", REFERENCE_TIME)
+    assert first is not None
+    await first.checkpoint("prune", "synapse_pending", cursor="example", pending=["pending"])
+    await first.fail("unresolved prior failure")
+    await first.close()
+    before = deepcopy(storage.progress)
+    storage.reject_saves = reject_save
+
+    with pytest.raises(
+        ConsolidationLeaseLostError if reject_save else ConsolidationResumeMismatchError
+    ):
+        await ConsolidationProgressSession.open(
+            storage, ["prune"], "same" if reject_save else "different", REFERENCE_TIME
+        )
+    assert storage.progress is not None and before is not None
+    for key in ("last_error", "phase", "cursor", "strategy_states", "counters", "run_id"):
+        assert storage.progress[key] == before[key]
+    assert storage.lease_owner is None
+
+
+@pytest.mark.asyncio
 async def test_live_lease_rejects_second_worker() -> None:
     storage = FakeProgressStorage()
     first = await ConsolidationProgressSession.open(storage, ["prune"], "same", REFERENCE_TIME)
