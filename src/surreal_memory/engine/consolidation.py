@@ -896,6 +896,7 @@ class ConsolidationEngine:
         pending: Sequence[str] | None = None,
         counters: dict[str, int | float] | None = None,
         extra: dict[str, Any] | None = None,
+        check_budget: bool = True,
     ) -> None:
         """Persist one committed unit boundary for the active strategy."""
         if self._progress_session is None or self._active_strategy is None:
@@ -909,7 +910,8 @@ class ConsolidationEngine:
             counters=counters,
             **optional,
         )
-        await self._check_progress_budget()
+        if check_budget:
+            await self._check_progress_budget()
 
     async def _run_strategy(
         self,
@@ -11000,7 +11002,8 @@ class ConsolidationEngine:
         if metrics.get("truncated"):
             report.extra["semantic_link_truncated"] = True
 
-        raw_counters = state.get("counters")
+        # Re-read: a restart in this call rewrote the counters, and the session hands out copies.
+        raw_counters = self._strategy_progress_state().get("counters")
         counters = raw_counters if isinstance(raw_counters, dict) else {}
         created = int(counters.get("semantic_synapses_created", 0))
         raw_skipped = counters.get("semantic_synapses_skipped")
@@ -11010,18 +11013,9 @@ class ConsolidationEngine:
         failures = int(counters.get("semantic_link_failures", 0))
         applied_since_checkpoint = 0
 
-        if not str(state.get("phase") or "").startswith("semantic_link_apply"):
-            # Durable before the first edge: from here on a crash may leave edges no counter saw.
-            await self._checkpoint_progress(
-                "semantic_link_apply_started",
-                cursor=cursor,
-                pending=[serialized],
-                counters={
-                    "semantic_synapses_created": created,
-                    "semantic_synapses_skipped": skipped,
-                    "semantic_link_failures": failures,
-                },
-            )
+        apply_marked = str(self._strategy_progress_state().get("phase") or "").startswith(
+            "semantic_link_apply"
+        )
 
         async def checkpoint_apply() -> None:
             nonlocal applied_since_checkpoint
@@ -11058,6 +11052,22 @@ class ConsolidationEngine:
                 # The write may have committed before the previous checkpoint.
                 created += 1
             else:
+                if not apply_marked:
+                    # Durable before the first possible edge, and without the budget check that
+                    # ends a normal checkpoint: a pause here would leave a marker for a stage that
+                    # wrote nothing and forbid a restart that is still safe.
+                    await self._checkpoint_progress(
+                        "semantic_link_apply_started",
+                        cursor=cursor,
+                        pending=[serialized],
+                        counters={
+                            "semantic_synapses_created": created,
+                            "semantic_synapses_skipped": skipped,
+                            "semantic_link_failures": failures,
+                        },
+                        check_budget=False,
+                    )
+                    apply_marked = True
                 try:
                     await self._storage.add_synapse(synapse)
                     created += 1

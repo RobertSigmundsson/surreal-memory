@@ -943,12 +943,15 @@ class _WorkingSet:
     (candidate degrees are re-verified at restore and at the final gate); a change to a neuron
     outside the working set (unread, read-and-dropped, evicted, another brain) is tolerated.
 
-    That last rule is a deliberate trade, not a proof of equality with a silent run. Such a neuron
-    can still change which pairs exist (the vector worker fills the vector of a neuron the scan had
-    already dropped, or of one it has not reached yet), so the result lies between a silent run at
-    the token and a silent run at the end: every pair it holds is a pair the silent run at the end
-    would hold, and it can miss pairs of neurons that changed while the run was in flight, which the
-    next run picks up. Making those changes fatal would fail every run that overlaps the worker.
+    That last rule is a deliberate trade, not a proof of equality with a silent run. A neuron
+    outside the working set can still change which pairs exist (the vector worker fills the vector
+    of a neuron the scan had already dropped, or of one it has not reached yet). The pair SET a run
+    returns may therefore differ from the silent run at the token and from the one at the end, in
+    both directions (the top-K cut per neuron, the candidate cap by degree, ``max_pairs`` and the
+    type ranks that fix an edge's direction all depend on which neurons were present when). What
+    holds is a guarantee per edge: every edge written is valid against the neurons as they are at
+    the end of the run, and a pair that was missed is found by the next run. Making those changes
+    fatal would fail every run that overlaps the worker.
     """
 
     def __init__(self) -> None:
