@@ -2349,8 +2349,10 @@ class SurrealDBStorage(
             batch = unique_ids[start : start + 256]
             params: dict[str, Any] = {"brain_id": brain_id}
             record_ids = self._record_id_list("synapse", batch, "synapse_id", params)
+            # A table source lets the planner scan every edge in the brain before
+            # filtering IDs. Address the bounded record list directly instead.
             rows = await self._query(
-                f"SELECT * FROM synapse WHERE brain_id = $brain_id AND id IN {record_ids}",
+                f"SELECT * FROM {record_ids} WHERE brain_id = $brain_id",
                 **params,
             )
             synapses.extend(_row_to_synapse(row) for row in rows)
@@ -2596,8 +2598,7 @@ class SurrealDBStorage(
             params: dict[str, Any] = {"brain_id": brain_id}
             record_ids = self._record_id_list("synapse", batch, "synapse_id", params)
             rows = await self._query(
-                "DELETE FROM synapse WHERE brain_id = $brain_id "
-                f"AND id IN {record_ids} RETURN BEFORE",
+                f"DELETE FROM {record_ids} WHERE brain_id = $brain_id RETURN BEFORE",
                 **params,
             )
             deleted = [_row_to_synapse(row) for row in rows]
