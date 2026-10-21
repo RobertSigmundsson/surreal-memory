@@ -4010,16 +4010,15 @@ class SurrealDBStorage(
             if seq > newest.get(key, -1):
                 newest[key] = seq
 
-        # Keep the raw RecordID the driver handed back: stringifying it turns
-        # `change_log:abc` into a plain string, and `WHERE id IN $ids` then
-        # matches nothing at all while still reporting a successful delete.
-        doomed: list[str] = [
-            str(row["id"])
+        # Keep the typed RecordIDs the driver handed back. The same IDs can be
+        # bound as a record-list DELETE source; stringifying them loses their
+        # record type and a string-valued id predicate silently matches nothing.
+        doomed: list[Any] = [
+            row["id"]
             for row in candidates
             if row.get("id") is not None
-            # Ids are inlined into DELETE statements, so each one is validated
-            # against a strict charset first rather than trusted because it came
-            # back from the database.
+            # IDs are passed back to the database, so keep the existing strict
+            # charset validation rather than trusting arbitrary returned values.
             and _CHANGE_LOG_ID_SAFE.match(str(row["id"]))
             and int(row.get("sequence", 0) or 0)
             != newest.get((str(row.get("entity_type", "")), str(row.get("entity_id", ""))), -1)
@@ -4027,16 +4026,22 @@ class SurrealDBStorage(
         if not doomed:
             return 0
 
-        # Delete by primary key, batched as separate statements, NOT with
-        # `WHERE id IN $ids`. The IN form does not scale: a list of a few
-        # thousand ids stops returning entirely, while the same ids as
-        # individual keyed deletes complete in one round-trip in milliseconds.
-        deleted = 0
+        # Use the native IDs as the table source so SurrealDB addresses the
+        # selected records directly. Repeat all eligibility guards at deletion
+        # time in case a selected row was changed while this method was in flight.
+        # RETURN BEFORE.id makes the result reflect rows actually deleted,
+        # including a concurrent sync or replay that made candidates ineligible,
+        # without transferring their potentially large payloads back to Python.
+        deleted_count = 0
         for chunk in _chunked(doomed, _COLLAPSE_DELETE_CHUNK):
-            statements = "".join(f"DELETE {rid};" for rid in chunk)
-            await self._query(statements)
-            deleted += len(chunk)
-        return deleted
+            deleted_ids = await self._query_values(
+                "DELETE FROM $record_ids WHERE brain_id = $brain_id "
+                "AND operation = 'update' AND synced = false RETURN BEFORE.id",
+                record_ids=chunk,
+                brain_id=self._get_brain_id(),
+            )
+            deleted_count += len(deleted_ids)
+        return deleted_count
 
     async def seed_change_log(self, device_id: str = "") -> dict[str, int]:
         brain_id = self._get_brain_id()
