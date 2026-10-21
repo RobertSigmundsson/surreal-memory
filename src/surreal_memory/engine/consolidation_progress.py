@@ -1022,6 +1022,12 @@ class ConsolidationProgressSession:
                     )
                 session = cls(storage, brain_id, owner_token, dict(claimed))
                 session.resumed = True
+                # This lease holder starts a new attempt at the same saved work.
+                # A later ordinary budget pause must not retain the prior
+                # attempt's failure. Persist through the existing owner fence
+                # before any strategy executes; a new failure is recorded anew.
+                session.state.update(status="running", last_error=None)
+                await session._save()
             else:
                 state: dict[str, Any] = {
                     "brain_id": brain_id,
