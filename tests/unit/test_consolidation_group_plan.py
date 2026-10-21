@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import re
 from datetime import UTC, datetime
 from types import SimpleNamespace
@@ -290,6 +291,132 @@ class _PlanStorage:
             )
             return found[: int(params["limit"])]
         raise AssertionError(f"unexpected planner query: {sql}")
+
+
+_SUMMARY_REFERENCE_TIME = datetime(2027, 9, 24, 12, 0)
+
+
+class _SummaryProgress:
+    def __init__(self, phase: str = "starting") -> None:
+        self.reference_time = _SUMMARY_REFERENCE_TIME
+        self.brain_id = "brain"
+        self.lease_lost = False
+        self.pause_at: str | None = None
+        self.state: dict[str, Any] = {
+            "run_id": "summary-phase-run",
+            "strategy_states": {
+                "summarize": {
+                    "phase": phase,
+                    "cursor": None,
+                    "pending": [],
+                    "counters": {},
+                }
+            },
+        }
+
+    def strategy_state(self, strategy: str) -> dict[str, Any]:
+        return self.state["strategy_states"].setdefault(strategy, {})
+
+    async def checkpoint(
+        self,
+        strategy: str,
+        phase: str,
+        *,
+        cursor: str | None = None,
+        pending: list[str] | None = None,
+        counters: dict[str, int | float] | None = None,
+    ) -> None:
+        self.strategy_state(strategy).update(
+            phase=phase,
+            cursor=cursor,
+            pending=list(pending or []),
+            counters=dict(counters or {}),
+            updated_at=datetime.now(UTC),
+        )
+        if phase == self.pause_at and pending:
+            self.pause_at = None
+            raise ConsolidationPausedError("simulated interruption before summary apply")
+
+
+class _SummaryStorage(_PlanStorage):
+    current_brain_id = "brain"
+
+    def __init__(self, fibers: list[Fiber]) -> None:
+        super().__init__()
+        self.fibers = {fiber.id: fiber for fiber in fibers}
+        self.neurons = {
+            fiber.anchor_neuron_id: SimpleNamespace(id=fiber.anchor_neuron_id) for fiber in fibers
+        }
+        self.synapses: dict[str, Any] = {}
+
+    def _get_brain_id(self) -> str:
+        return self.current_brain_id
+
+    async def get_fibers_after_id(
+        self,
+        after_id: str | None,
+        *,
+        limit: int,
+        created_before: datetime | None = None,
+    ) -> list[Fiber]:
+        ordered = sorted(self.fibers.values(), key=lambda fiber: fiber.id)
+        return [
+            fiber
+            for fiber in ordered
+            if (after_id is None or fiber.id > after_id)
+            and (created_before is None or fiber.created_at <= created_before)
+        ][:limit]
+
+    async def get_fiber(self, fiber_id: str) -> Fiber | None:
+        return self.fibers.get(fiber_id)
+
+    async def get_neuron(self, neuron_id: str) -> Any:
+        return self.neurons.get(neuron_id)
+
+    async def get_synapse(self, synapse_id: str) -> Any:
+        return self.synapses.get(synapse_id)
+
+    async def add_neuron(self, neuron: Any) -> str:
+        self.neurons[neuron.id] = neuron
+        return neuron.id
+
+    async def add_synapse(self, synapse: Any) -> str:
+        self.synapses[synapse.id] = synapse
+        return synapse.id
+
+    async def add_fiber(self, fiber: Fiber) -> str:
+        self.fibers[fiber.id] = fiber
+        return fiber.id
+
+
+def _summary_phase_fibers(count: int = 3) -> list[Fiber]:
+    return [
+        Fiber(
+            id=f"fiber-{index:04d}",
+            neuron_ids={f"anchor-{index:04d}"},
+            synapse_ids=set(),
+            anchor_neuron_id=f"anchor-{index:04d}",
+            summary=f"source {index}" if index < 3 else None,
+            agent_tags={"shared"} if index < 3 else set(),
+            created_at=_SUMMARY_REFERENCE_TIME,
+        )
+        for index in range(count)
+    ]
+
+
+def _summary_phase_engine(
+    storage: _SummaryStorage, progress: _SummaryProgress
+) -> ConsolidationEngine:
+    engine = ConsolidationEngine(
+        storage,
+        ConsolidationConfig(
+            summarize_min_cluster_size=3,
+            summarize_tag_overlap_threshold=0.2,
+        ),
+    )
+    engine._active_strategy = ConsolidationStrategy.SUMMARIZE
+    engine._progress_session = progress  # type: ignore[assignment]
+    return engine
 
 
 def _plan(storage: _PlanStorage) -> SurrealDBConsolidationGroupPlan:
@@ -644,3 +771,116 @@ async def test_durable_summarize_handles_component_larger_than_group_page() -> N
     assert source_ids == [fiber.id for fiber in sorted(fibers, key=lambda item: item.id)]
     assert summaries[0].tags == set().union(*(fiber.tags for fiber in fibers))
     assert len(summaries[0].neuron_ids) == count + 1
+
+
+@pytest.mark.asyncio
+async def test_summarize_starting_phase_uses_durable_group_plan() -> None:
+    storage = _SummaryStorage(_summary_phase_fibers())
+    progress = _SummaryProgress("starting")
+    engine = _summary_phase_engine(storage, progress)
+
+    report = ConsolidationReport()
+    await engine._summarize(report, dry_run=False)
+
+    assert progress.strategy_state("summarize")["phase"] == "summarize_plan_complete"
+    assert sum(row.get("kind") == "candidate" for row in storage.records.values()) == 3
+    assert report.summaries_created == 1
+    assert (
+        sum(
+            fiber.metadata.get("_consolidation") == "summary_fiber"
+            for fiber in storage.fibers.values()
+        )
+        == 1
+    )
+
+
+@pytest.mark.asyncio
+async def test_summarize_resumes_incomplete_census_and_replays_frozen_plan() -> None:
+    storage = _SummaryStorage(_summary_phase_fibers(501))
+    progress = _SummaryProgress("starting")
+    engine = _summary_phase_engine(storage, progress)
+
+    async def pause_after_first_census_page() -> None:
+        state = progress.strategy_state("summarize")
+        if state.get("phase") == "fiber_census" and state.get("counters", {}).get("pages") == 1:
+            raise ConsolidationPausedError("simulated incomplete census")
+
+    engine._check_progress_budget = pause_after_first_census_page  # type: ignore[method-assign]
+    with pytest.raises(ConsolidationPausedError, match="incomplete census"):
+        await engine._all_fibers_paged()
+    checkpoint = json.loads(progress.strategy_state("summarize")["cursor"])
+    assert checkpoint["complete"] is False
+    assert checkpoint["next_page_index"] == 1
+
+    progress.pause_at = "summarize_plan_units"
+    resumed = _summary_phase_engine(storage, progress)
+    with pytest.raises(ConsolidationPausedError, match="before summary apply"):
+        await resumed._summarize(ConsolidationReport(), dry_run=False)
+    assert progress.strategy_state("summarize")["phase"] == "summarize_plan_units"
+
+    # A row added after the census snapshot must not change the immutable plan.
+    late = Fiber(
+        id="fiber-late",
+        neuron_ids={"anchor-late"},
+        synapse_ids=set(),
+        anchor_neuron_id="anchor-late",
+        summary="late source",
+        agent_tags={"shared"},
+        created_at=_SUMMARY_REFERENCE_TIME,
+    )
+    storage.fibers[late.id] = late
+    storage.neurons[late.anchor_neuron_id] = SimpleNamespace(id=late.anchor_neuron_id)
+    report = ConsolidationReport()
+    await _summary_phase_engine(storage, progress)._summarize(report, dry_run=False)
+    await _summary_phase_engine(storage, progress)._summarize(report, dry_run=False)
+
+    summaries = [
+        fiber
+        for fiber in storage.fibers.values()
+        if fiber.metadata.get("_consolidation") == "summary_fiber"
+    ]
+    assert progress.strategy_state("summarize")["phase"] == "summarize_plan_complete"
+    assert len(summaries) == 1
+    assert summaries[0].metadata["source_fibers_manifest"]["source_count"] == 3
+    assert report.summaries_created == 1
+
+
+@pytest.mark.asyncio
+async def test_summarize_resumes_complete_census_before_planning() -> None:
+    storage = _SummaryStorage(_summary_phase_fibers())
+    progress = _SummaryProgress("starting")
+    engine = _summary_phase_engine(storage, progress)
+
+    await engine._all_fibers_paged()
+    checkpoint = json.loads(progress.strategy_state("summarize")["cursor"])
+    assert progress.strategy_state("summarize")["phase"] == "fiber_census"
+    assert checkpoint["complete"] is True
+
+    report = ConsolidationReport()
+    await _summary_phase_engine(storage, progress)._summarize(report, dry_run=False)
+
+    assert progress.strategy_state("summarize")["phase"] == "summarize_plan_complete"
+    assert report.summaries_created == 1
+    assert sum(row.get("kind") == "candidate" for row in storage.records.values()) == 3
+
+
+@pytest.mark.asyncio
+async def test_summarize_resumed_census_still_rejects_corrupt_staging() -> None:
+    storage = _SummaryStorage(_summary_phase_fibers())
+    progress = _SummaryProgress("starting")
+    engine = _summary_phase_engine(storage, progress)
+
+    await engine._all_fibers_paged()
+    staged_page = next(row for row in storage.census.values() if not row.get("complete"))
+    staged_page["page_fingerprint"] = "corrupt"
+    before_plan_rows = len(storage.records)
+
+    with pytest.raises(ConsolidationProgressError, match="fiber census staged page is invalid"):
+        await _summary_phase_engine(storage, progress)._summarize(
+            ConsolidationReport(), dry_run=False
+        )
+
+    assert len(storage.records) == before_plan_rows
+    assert not any(
+        fiber.metadata.get("_consolidation") == "summary_fiber" for fiber in storage.fibers.values()
+    )

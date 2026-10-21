@@ -174,8 +174,8 @@ class SurrealDBKeywordEntityMixin:
         conn = self._ensure_conn()
         updated = 0
         for r in rows:
-            rid = str(r.get("id", ""))
-            if not rid:
+            rid = r.get("id")
+            if rid is None or rid == "":
                 continue
             await conn.merge(rid, {"promoted": True})
             updated += 1
@@ -198,8 +198,8 @@ class SurrealDBKeywordEntityMixin:
         conn = self._ensure_conn()
         deleted = 0
         for r in rows:
-            rid = str(r.get("id", ""))
-            if not rid:
+            rid = r.get("id")
+            if rid is None or rid == "":
                 continue
             await conn.delete(rid)
             deleted += 1

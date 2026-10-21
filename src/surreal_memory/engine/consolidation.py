@@ -36,6 +36,7 @@ from surreal_memory.engine.consolidation_progress import (
     ConsolidationProgressError,
     ConsolidationProgressSession,
     options_fingerprint,
+    stored_form,
     supports_persistent_progress,
     supports_storage_methods,
 )
@@ -229,12 +230,13 @@ def _merged_metadata(member_fibers: Sequence[Fiber]) -> dict[str, Any]:
 
     Replacing metadata wholesale dropped essence, conductivity, coherence,
     compression_tier and _verbatim. Sources are applied in ascending salience so the
-    most salient fiber wins a key collision.
+    most salient fiber wins a key collision. A null value counts as a missing key and
+    never wins one.
     """
     merged: dict[str, Any] = {}
     for fiber in sorted(member_fibers, key=lambda f: f.salience):
         for key, value in fiber.metadata.items():
-            if key == "merged_from":
+            if key == "merged_from" or value is None:
                 continue
             merged[key] = value
     merged["merged_from"] = [f.id for f in member_fibers]
@@ -1033,6 +1035,7 @@ class ConsolidationEngine:
         self._total_deadline = time.perf_counter() + total_timeout
         paused = False
         lease_lost = False
+        progress_failed = False
 
         try:
             if resume_message is not None and on_progress is not None:
@@ -1137,6 +1140,13 @@ class ConsolidationEngine:
                         )
                         break
                     except ConsolidationProgressError as exc:
+                        progress_failed = True
+                        logger.error(
+                            "Consolidation progress coordination failed in %s: %s",
+                            strategy.value,
+                            exc,
+                            exc_info=True,
+                        )
                         failed_strategies.append(
                             f"{strategy.value} (progress coordination: {type(exc).__name__})"
                         )
@@ -1165,7 +1175,7 @@ class ConsolidationEngine:
                         self._active_strategy = None
                         self._strategy_deadline = None
 
-                if paused or lease_lost:
+                if paused or lease_lost or progress_failed:
                     break
 
             if timed_out_strategies:
@@ -2113,7 +2123,9 @@ class ConsolidationEngine:
                     "last_ghost_shown_at": fiber.last_ghost_shown_at,
                     "auto_tags": fiber.auto_tags,
                     "agent_tags": fiber.agent_tags,
-                    "metadata": fiber.metadata,
+                    # A stored null inside metadata is read back from the fiber but
+                    # not from its census copy; both must give the same fingerprint.
+                    "metadata": stored_form(_normalize(fiber.metadata)),
                     "compression_tier": fiber.compression_tier,
                     "pinned": fiber.pinned,
                     "created_at": fiber.created_at,
@@ -2603,7 +2615,7 @@ class ConsolidationEngine:
                         created_at = fiber.created_at
 
                     for key, value in fiber.metadata.items():
-                        if key == "merged_from":
+                        if key == "merged_from" or value is None:
                             continue
                         current = metadata_winners.get(key)
                         rank = (fiber.salience, fiber.id)
@@ -4351,10 +4363,9 @@ class ConsolidationEngine:
             )
 
         def restore_nullable_fields(row: dict[str, Any]) -> dict[str, Any]:
-            # SurrealDB omits null object fields; restore the encoder's exact hash input.
+            # Pages staged by 3.12.0 and 3.12.1 were fingerprinted with these fields
+            # present as null. Rebuild that hash input so those pages still validate.
             restored = dict(row)
-            restored.setdefault("first_fiber_id", None)
-            restored.setdefault("last_fiber_id", None)
             raw_fibers = row.get("fibers")
             if isinstance(raw_fibers, list) and all(isinstance(item, dict) for item in raw_fibers):
                 fibers = [dict(item) for item in raw_fibers]
@@ -4371,24 +4382,47 @@ class ConsolidationEngine:
                 restored["fibers"] = fibers
             return restored
 
+        def page_fingerprints(row: dict[str, Any]) -> set[str]:
+            # The page as stored, plus the form 3.12.0 and 3.12.1 hashed it in.
+            found: set[str] = set()
+            for fibers in (
+                stored_form(row.get("fibers")),
+                restore_nullable_fields(row).get("fibers"),
+            ):
+                if isinstance(fibers, list):
+                    found.add(
+                        hashlib.sha256(
+                            json.dumps(
+                                fibers, sort_keys=True, separators=(",", ":"), default=str
+                            ).encode("utf-8")
+                        ).hexdigest()
+                    )
+            return found
+
+        def same_staged_row(existing: dict[str, Any], row: dict[str, Any]) -> bool:
+            # Compare both rows as stored. A page staged by 3.12.0 or 3.12.1 carries
+            # the earlier fingerprint of the same content, which is accepted as well.
+            stored = stored_form(existing)
+            wanted = stored_form(row)
+            stored_fingerprint = stored.pop("page_fingerprint", None)
+            wanted_fingerprint = wanted.pop("page_fingerprint", None)
+            if json.dumps(stored, sort_keys=True, separators=(",", ":"), default=str) != json.dumps(
+                wanted, sort_keys=True, separators=(",", ":"), default=str
+            ):
+                return False
+            return stored_fingerprint == wanted_fingerprint or str(
+                stored_fingerprint
+            ) in page_fingerprints(existing)
+
         def validate_page(row: dict[str, Any], page_index: int) -> list[Fiber]:
-            raw_fibers = restore_nullable_fields(row).get("fibers")
-            fingerprint = (
-                hashlib.sha256(
-                    json.dumps(
-                        raw_fibers, sort_keys=True, separators=(",", ":"), default=str
-                    ).encode("utf-8")
-                ).hexdigest()
-                if isinstance(raw_fibers, list)
-                else ""
-            )
+            raw_fibers = row.get("fibers")
             if (
                 int(row.get("page_index", -1)) != page_index
                 or not isinstance(raw_fibers, list)
                 or not raw_fibers
                 or not all(isinstance(item, dict) for item in raw_fibers)
                 or len(raw_fibers) > page_size
-                or str(row.get("page_fingerprint")) != fingerprint
+                or str(row.get("page_fingerprint")) not in page_fingerprints(row)
                 or str(row.get("first_fiber_id")) != str(raw_fibers[0].get("id"))
                 or str(row.get("last_fiber_id")) != str(raw_fibers[-1].get("id"))
                 or str(row.get("run_id")) != run_id
@@ -4425,14 +4459,7 @@ class ConsolidationEngine:
                     ) from exc
                 existing = dict(existing_rows[0])
                 existing.pop("id", None)
-                if json.dumps(
-                    restore_nullable_fields(existing),
-                    sort_keys=True,
-                    separators=(",", ":"),
-                    default=str,
-                ) != json.dumps(
-                    restore_nullable_fields(row), sort_keys=True, separators=(",", ":"), default=str
-                ):
+                if not same_staged_row(existing, row):
                     raise ConsolidationProgressError(
                         "immutable fiber census page conflicts with this source page; "
                         "refusing a stale-owner overwrite"
@@ -4553,12 +4580,14 @@ class ConsolidationEngine:
                     raise RuntimeError("fiber keyset page did not advance")
                 if page != sorted(page, key=lambda item: item.id):
                     raise RuntimeError("fiber keyset page is not ordered by fiber id")
-                serialized = json.loads(
-                    json.dumps(
-                        [encode_fiber(fiber) for fiber in page],
-                        sort_keys=True,
-                        separators=(",", ":"),
-                        default=str,
+                serialized = stored_form(
+                    json.loads(
+                        json.dumps(
+                            [encode_fiber(fiber) for fiber in page],
+                            sort_keys=True,
+                            separators=(",", ":"),
+                            default=str,
+                        )
                     )
                 )
                 page_fingerprint = hashlib.sha256(
@@ -5344,12 +5373,13 @@ class ConsolidationEngine:
             and callable(getattr(self._storage, "_query", None))
             and callable(getattr(self._storage, "get_fibers_after_id", None))
             and (
-                progress_phase in {"", "summarize_plan_stage"}
+                progress_phase in {"", "starting", "fiber_census", "summarize_plan_stage"}
                 or progress_phase.startswith("summarize_plan_")
             )
         )
         if durable_group_mode:
-            await self._summarize_durable(report, run_id=run_id, phase=progress_phase)
+            durable_phase = "" if progress_phase in {"starting", "fiber_census"} else progress_phase
+            await self._summarize_durable(report, run_id=run_id, phase=durable_phase)
             return
         import json
 
@@ -10971,6 +11001,11 @@ class ConsolidationEngine:
         start = _time.perf_counter()
         time_budget = self._config.strategy_timeout_seconds * 0.8
         page_size = 250
+        # Share one current-brain protection snapshot across this strategy pass.
+        # Per-fiber pin scans would turn the stable keyset traversal into an
+        # unbounded repeated census; a lookup failure must abort before progress.
+        # Concurrent pin changes after this snapshot take effect next pass.
+        pinned_neuron_ids = await self._storage.get_pinned_neuron_ids()
 
         try:
             brain = await self._storage.get_brain(brain_id)
@@ -11085,6 +11120,7 @@ class ConsolidationEngine:
                     CompressionTier(target_tier),
                     dry_run=dry_run,
                     brain=brain,
+                    _pinned_neuron_ids=pinned_neuron_ids,
                     **({"run_id": run_id} if run_id else {}),
                 )
             except Exception:

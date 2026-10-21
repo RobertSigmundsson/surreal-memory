@@ -30,6 +30,7 @@ from typing import TYPE_CHECKING, Any, Protocol, cast
 from surreal_memory.core.constants import GRAPH_ONLY_PLACEHOLDER
 from surreal_memory.core.neuron import Neuron, NeuronType
 from surreal_memory.core.synapse import Synapse, SynapseType
+from surreal_memory.engine._sha256_native import compress_sha256_blocks
 from surreal_memory.engine.consolidation_progress import ConsolidationPausedError
 from surreal_memory.engine.edge_identity import deterministic_edge_id
 
@@ -734,23 +735,24 @@ class _SerializableSHA256:
     def _ror(value: int, bits: int) -> int:
         return ((value >> bits) | (value << (32 - bits))) & 0xFFFFFFFF
 
-    def _compress(self, block: bytes) -> None:
+    @classmethod
+    def _compress_words(cls, words: list[int], block: bytes) -> list[int]:
         schedule = list(struct.unpack(">16I", block))
         for index in range(16, 64):
             x = schedule[index - 15]
             y = schedule[index - 2]
-            sigma0 = self._ror(x, 7) ^ self._ror(x, 18) ^ (x >> 3)
-            sigma1 = self._ror(y, 17) ^ self._ror(y, 19) ^ (y >> 10)
+            sigma0 = cls._ror(x, 7) ^ cls._ror(x, 18) ^ (x >> 3)
+            sigma1 = cls._ror(y, 17) ^ cls._ror(y, 19) ^ (y >> 10)
             schedule.append(
                 (schedule[index - 16] + sigma0 + schedule[index - 7] + sigma1) & 0xFFFFFFFF
             )
 
-        a, b, c, d, e, f, g, h = self._words
+        a, b, c, d, e, f, g, h = words
         for index in range(64):
-            sum1 = self._ror(e, 6) ^ self._ror(e, 11) ^ self._ror(e, 25)
+            sum1 = cls._ror(e, 6) ^ cls._ror(e, 11) ^ cls._ror(e, 25)
             choose = (e & f) ^ (~e & g)
-            t1 = (h + sum1 + choose + self._K[index] + schedule[index]) & 0xFFFFFFFF
-            sum0 = self._ror(a, 2) ^ self._ror(a, 13) ^ self._ror(a, 22)
+            t1 = (h + sum1 + choose + cls._K[index] + schedule[index]) & 0xFFFFFFFF
+            sum0 = cls._ror(a, 2) ^ cls._ror(a, 13) ^ cls._ror(a, 22)
             majority = (a & b) ^ (a & c) ^ (b & c)
             t2 = (sum0 + majority) & 0xFFFFFFFF
             a, b, c, d, e, f, g, h = (
@@ -763,10 +765,13 @@ class _SerializableSHA256:
                 f,
                 g,
             )
-        self._words = [
+        return [
             (left + right) & 0xFFFFFFFF
-            for left, right in zip(self._words, (a, b, c, d, e, f, g, h), strict=True)
+            for left, right in zip(words, (a, b, c, d, e, f, g, h), strict=True)
         ]
+
+    def _compress(self, block: bytes) -> None:
+        self._words = self._compress_words(self._words, block)
 
     def update(self, data: bytes) -> None:
         if not data:
@@ -774,8 +779,12 @@ class _SerializableSHA256:
         self._count += len(data)
         data = self._buffer + data
         block_end = len(data) - (len(data) % 64)
-        for offset in range(0, block_end, 64):
-            self._compress(data[offset : offset + 64])
+        if block_end:
+            self._words = compress_sha256_blocks(
+                self._words,
+                data[:block_end],
+                self._compress_words,
+            )
         self._buffer = data[block_end:]
 
     def copy(self) -> _SerializableSHA256:

@@ -477,3 +477,257 @@ class TestCancellationFromAPeerReconnect:
 
         with pytest.raises(asyncio.TimeoutError):
             await asyncio.wait_for(store._query("SELECT 1"), timeout=0.05)
+
+
+class TestBatchNeuronFetchErrors:
+    @pytest.mark.asyncio
+    async def test_transport_error_is_not_reported_as_missing_neuron(self) -> None:
+        from surreal_memory.storage.surrealdb.store import SurrealDBStorage
+
+        store = SurrealDBStorage.__new__(SurrealDBStorage)
+        store._current_brain_id = "default"
+        sibling_started = asyncio.Event()
+        sibling_cancelled = asyncio.Event()
+
+        async def query(sql: str, **_params: Any) -> list[Any]:
+            if "neuron:fail" in sql:
+                await sibling_started.wait()
+                raise ConnectionResetError(104, "synthetic transport failure")
+            sibling_started.set()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                sibling_cancelled.set()
+                raise
+
+        store._query = query  # type: ignore[method-assign]
+
+        with pytest.raises(ExceptionGroup) as exc_info:
+            await store.get_neurons_batch(["fail", "sibling"])
+
+        assert any(isinstance(error, ConnectionResetError) for error in exc_info.value.exceptions)
+        assert sibling_cancelled.is_set(), "the sibling database request was left running"
+
+    @pytest.mark.asyncio
+    async def test_external_cancellation_drains_batch_requests(self) -> None:
+        from surreal_memory.storage.surrealdb.store import SurrealDBStorage
+
+        store = SurrealDBStorage.__new__(SurrealDBStorage)
+        store._current_brain_id = "default"
+        started = 0
+        all_started = asyncio.Event()
+        cancelled = 0
+
+        async def query(_sql: str, **_params: Any) -> list[Any]:
+            nonlocal started, cancelled
+            started += 1
+            if started == 2:
+                all_started.set()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                cancelled += 1
+                raise
+
+        store._query = query  # type: ignore[method-assign]
+        batch = asyncio.create_task(store.get_neurons_batch(["first", "second"]))
+        await all_started.wait()
+        batch.cancel()
+
+        with pytest.raises(asyncio.CancelledError):
+            await batch
+        assert cancelled == 2
+
+    @pytest.mark.asyncio
+    async def test_empty_select_still_means_missing_neuron(self) -> None:
+        from surreal_memory.storage.surrealdb.store import SurrealDBStorage
+
+        store = SurrealDBStorage.__new__(SurrealDBStorage)
+        store._current_brain_id = "default"
+
+        async def query(_sql: str, **_params: Any) -> list[Any]:
+            return []
+
+        store._query = query  # type: ignore[method-assign]
+
+        assert await store.get_neurons_batch(["missing"]) == {}
+
+
+class TestDeadWebSocketReceiver:
+    @pytest.mark.asyncio
+    async def test_mock_receiver_attributes_are_not_treated_as_dead(self, monkeypatch: Any) -> None:
+        conn = _StubConn(alive=True)
+        conn.recv_task = MagicMock()
+        store = _store_with(conn)
+        factory = _ConnFactory(alive=True)
+        monkeypatch.setattr("surrealdb.AsyncSurreal", factory, raising=False)
+
+        rows = await store._query("SELECT 1")
+
+        assert rows == [{"ok": True}]
+        assert conn.queries == 1
+        assert factory.calls == 0
+
+    @pytest.mark.asyncio
+    async def test_keyerror_is_not_replayed_and_next_query_reconnects(
+        self, monkeypatch: Any
+    ) -> None:
+        class _ReceiverFailureConn(_StubConn):
+            def __init__(self) -> None:
+                super().__init__(alive=True)
+                self.fail_receiver = asyncio.Event()
+                self.recv_task = asyncio.create_task(self._receive())
+                self.qry = {"request": object()}
+
+            async def _receive(self) -> None:
+                await self.fail_receiver.wait()
+                raise RuntimeError("synthetic receiver failure")
+
+            async def query(self, _sql: str, _params: Any) -> list[Any]:
+                self.queries += 1
+                self.qry.clear()
+                self.fail_receiver.set()
+                raise KeyError("request")
+
+        dead = _ReceiverFailureConn()
+        store = _store_with(dead)
+        factory = _ConnFactory(alive=True)
+        monkeypatch.setattr("surrealdb.AsyncSurreal", factory, raising=False)
+
+        await asyncio.sleep(0)
+        with pytest.raises(RuntimeError, match="query was not replayed") as exc_info:
+            await store._query("CREATE test CONTENT { value: 1 }")
+        assert str(exc_info.value.__cause__) == "synthetic receiver failure"
+        assert isinstance(exc_info.value.__context__, KeyError)
+
+        assert dead.queries == 1, "the uncertain mutation was replayed"
+        assert factory.calls == 0
+
+        rows = await store._query("SELECT 1")
+
+        assert rows == [{"ok": True}]
+        assert factory.calls == 1
+        assert dead.closed is True
+        assert factory.built[0].queries == 1
+
+    @pytest.mark.asyncio
+    async def test_peer_cancel_during_receiver_cleanup_is_not_replayed(
+        self, monkeypatch: Any
+    ) -> None:
+        class _CancellingReceiverConn(_StubConn):
+            def __init__(self) -> None:
+                super().__init__(alive=True)
+                self.cleanup_started = asyncio.Event()
+                self.finish_cleanup = asyncio.Event()
+                self.recv_task = asyncio.create_task(self._receive())
+
+            async def _receive(self) -> None:
+                try:
+                    await asyncio.Event().wait()
+                except asyncio.CancelledError:
+                    self.cleanup_started.set()
+                    await self.finish_cleanup.wait()
+                    raise
+
+            async def query(self, _sql: str, _params: Any) -> list[Any]:
+                self.queries += 1
+                self.recv_task.cancel()
+                await self.cleanup_started.wait()
+                raise asyncio.CancelledError
+
+            async def close(self) -> None:
+                self.closed = True
+                self.finish_cleanup.set()
+                try:
+                    await self.recv_task
+                except asyncio.CancelledError:
+                    pass
+
+        dead = _CancellingReceiverConn()
+        store = _store_with(dead)
+        factory = _ConnFactory(alive=True)
+        monkeypatch.setattr("surrealdb.AsyncSurreal", factory, raising=False)
+
+        await asyncio.sleep(0)
+        with pytest.raises(RuntimeError, match="query was not replayed") as exc_info:
+            await store._query("CREATE test CONTENT { value: 1 }")
+
+        assert isinstance(exc_info.value.__cause__, ConnectionResetError)
+        assert dead.queries == 1
+        assert not dead.recv_task.done(), "the test must cover in-progress receiver cleanup"
+        assert factory.calls == 0
+
+        rows = await store._query("SELECT 1")
+
+        assert rows == [{"ok": True}]
+        assert factory.calls == 1
+        assert dead.closed is True
+        assert factory.built[0].queries == 1
+
+    @pytest.mark.asyncio
+    async def test_arbitrary_keyerror_is_not_retried(self, monkeypatch: Any) -> None:
+        class _KeyErrorConn(_StubConn):
+            async def query(self, _sql: str, _params: Any) -> list[Any]:
+                self.queries += 1
+                raise KeyError("synthetic application error")
+
+        conn = _KeyErrorConn(alive=True)
+        store = _store_with(conn)
+        factory = _ConnFactory(alive=True)
+        monkeypatch.setattr("surrealdb.AsyncSurreal", factory, raising=False)
+
+        with pytest.raises(KeyError, match="synthetic application error"):
+            await store._query("SELECT 1")
+
+        assert conn.queries == 1
+        assert factory.calls == 0
+
+    @pytest.mark.asyncio
+    async def test_request_is_not_replayed_after_peer_replaces_connection(
+        self, monkeypatch: Any
+    ) -> None:
+        replacement = _StubConn(alive=True)
+        store = _store_with(None)
+
+        class _ReplacedDuringQueryConn(_StubConn):
+            async def query(self, _sql: str, _params: Any) -> list[Any]:
+                self.queries += 1
+                store._conn = replacement
+                store._conn_generation += 1
+                raise ConnectionResetError(104, "synthetic peer reconnect")
+
+        original = _ReplacedDuringQueryConn(alive=True)
+        store._conn = original
+        factory = _ConnFactory(alive=True)
+        monkeypatch.setattr("surrealdb.AsyncSurreal", factory, raising=False)
+
+        with pytest.raises(RuntimeError, match="query was not replayed"):
+            await store._query("CREATE test CONTENT { value: 1 }")
+
+        assert original.queries == 1
+        assert replacement.queries == 0
+        assert factory.calls == 0
+
+        assert await store._query("SELECT 1") == [{"ok": True}]
+        assert replacement.queries == 1
+
+    @pytest.mark.asyncio
+    async def test_close_is_bounded_and_drops_connection_reference(self, monkeypatch: Any) -> None:
+        from surreal_memory.storage.surrealdb.store import SurrealDBStorage
+
+        class _HangingCloseConn:
+            async def close(self) -> None:
+                await asyncio.Event().wait()
+
+        store = SurrealDBStorage.__new__(SurrealDBStorage)
+        store._conn = _HangingCloseConn()
+        store._conn_loop = asyncio.get_running_loop()
+        monkeypatch.setattr(
+            "surreal_memory.storage.surrealdb.store._CONNECTION_CLOSE_TIMEOUT_SECONDS",
+            0.01,
+        )
+
+        await asyncio.wait_for(store.close(), timeout=0.2)
+
+        assert store._conn is None
+        assert store._conn_loop is None
