@@ -472,6 +472,70 @@ async def test_progress_validation_failure_is_persisted_not_misreported_as_lease
 
 
 @pytest.mark.asyncio
+async def test_progress_failure_stops_later_tiers_and_resume_preserves_committed_work(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    storage = FakeProgressStorage()
+    engine = ConsolidationEngine(storage)
+    strategies = [
+        ConsolidationStrategy.PRUNE,
+        ConsolidationStrategy.MATURE,
+        ConsolidationStrategy.SUMMARIZE,
+        ConsolidationStrategy.ENRICH,
+        ConsolidationStrategy.SEMANTIC_LINK,
+    ]
+    seen: list[str] = []
+
+    async def fail_summarize(
+        strategy: ConsolidationStrategy,
+        report: ConsolidationReport,
+        reference_time: datetime,
+        dry_run: bool,
+    ) -> None:
+        seen.append(strategy.value)
+        if strategy == ConsolidationStrategy.SUMMARIZE:
+            await engine._checkpoint_progress(
+                "fiber_census", cursor="synthetic-census-page", counters={"fiber_pages": 2}
+            )
+            raise ConsolidationProgressError("synthetic census integrity failure")
+
+    monkeypatch.setattr(engine, "_run_strategy", fail_summarize)
+    first = await engine.run(strategies, reference_time=REFERENCE_TIME)
+
+    assert seen == ["prune", "mature", "summarize"]
+    assert first.extra["consolidation_status"] == "failed"
+    assert "synthetic census integrity failure" in first.summary()
+    assert storage.progress is not None
+    assert storage.progress["status"] == "failed"
+    assert storage.progress["completed_strategies"] == ["prune", "mature"]
+    committed = deepcopy(storage.progress["strategy_states"])
+    assert committed["summarize"]["phase"] == "fiber_census"
+    assert committed["summarize"]["cursor"] == "synthetic-census-page"
+    assert committed["summarize"]["counters"] == {"fiber_pages": 2}
+    run_id = storage.progress["run_id"]
+    seen.clear()
+
+    async def recovered(
+        strategy: ConsolidationStrategy,
+        report: ConsolidationReport,
+        reference_time: datetime,
+        dry_run: bool,
+    ) -> None:
+        assert reference_time == REFERENCE_TIME
+        seen.append(strategy.value)
+        if strategy == ConsolidationStrategy.SUMMARIZE:
+            assert engine._progress_session.strategy_state("summarize") == committed["summarize"]
+
+    monkeypatch.setattr(engine, "_run_strategy", recovered)
+    second = await engine.run(strategies, resume_run_id=run_id)
+    assert seen == ["summarize", "enrich", "semantic_link"]
+    assert second.extra["consolidation_status"] == "completed"
+    assert storage.progress["run_id"] == run_id
+    assert storage.progress["strategy_states"]["prune"] == committed["prune"]
+    assert storage.progress["strategy_states"]["mature"] == committed["mature"]
+
+
+@pytest.mark.asyncio
 async def test_explicit_engine_resume_skips_finished_strategies_in_original_set(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
