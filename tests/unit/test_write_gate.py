@@ -442,3 +442,92 @@ class TestAutoCaptureMode:
         assert loaded.write_gate.auto_capture_mode == "enforce"
         assert loaded.write_gate.effective_auto_mode == "enforce"
         assert loaded.write_gate.effective_mode == "shadow"
+
+
+# ---------------------------------------------------------------------------
+# Auto-capture context (provenance instead of a bare score)
+# ---------------------------------------------------------------------------
+
+
+class TestCaptureContext:
+    """The stop/pre-compact hooks must pass structured context to the gate.
+
+    Regression: until 2026-10-20 the hooks passed no context, capping auto
+    fragments at 4 points against ``auto_capture_min_score`` 5, so the enforce
+    gate accepted nothing for 13 days.
+    """
+
+    def test_context_carries_detector_provenance(self) -> None:
+        from surreal_memory.mcp.auto_capture import build_capture_context
+
+        ctx = build_capture_context(
+            {"type": "preference", "confidence": 0.854, "priority": 7},
+            source="stop_hook",
+        )
+        assert ctx == {
+            "captured_by": "stop_hook",
+            "detected_type": "preference",
+            "confidence": 0.85,
+        }
+
+    def test_context_survives_missing_fields(self) -> None:
+        from surreal_memory.mcp.auto_capture import build_capture_context
+
+        assert build_capture_context({}, source="pre_compact_hook") == {
+            "captured_by": "pre_compact_hook"
+        }
+
+    def test_structured_fragment_passes_auto_capture_gate(self) -> None:
+        from surreal_memory.mcp.auto_capture import build_capture_context
+
+        content = "Preference: mogl zlapac wycieku ua — buduje igly tylko z wartosci"
+        cfg = WriteGateConfig()
+        tags = ["stop_hook", "session_end"]
+        ctx = build_capture_context({"type": "preference", "confidence": 0.85}, source="stop_hook")
+
+        without = check_write_gate(
+            content,
+            gate_config=cfg,
+            is_auto_capture=True,
+            memory_type="preference",
+            tags=tags,
+        )
+        with_ctx = check_write_gate(
+            content,
+            gate_config=cfg,
+            is_auto_capture=True,
+            memory_type="preference",
+            tags=tags,
+            context=ctx,
+        )
+
+        assert without.rejected and without.score < cfg.auto_capture_min_score
+        assert not with_ctx.rejected
+        assert with_ctx.score >= cfg.auto_capture_min_score
+
+    def test_short_junk_still_rejected_with_context(self) -> None:
+        from surreal_memory.mcp.auto_capture import build_capture_context
+
+        ctx = build_capture_context({"type": "error", "confidence": 0.85}, source="stop_hook")
+        result = check_write_gate(
+            "Error: nie wspominajac",
+            gate_config=WriteGateConfig(),
+            is_auto_capture=True,
+            memory_type="error",
+            tags=["stop_hook"],
+            context=ctx,
+        )
+        assert result.rejected
+        assert "too short" in (result.rejection_reason or "")
+
+    def test_context_is_merged_into_stored_text(self) -> None:
+        from surreal_memory.engine.context_merger import merge_context
+
+        merged = merge_context(
+            "Preference: nie ruszaj configu",
+            {"captured_by": "stop_hook", "detected_type": "preference"},
+            "preference",
+        )
+        assert merged.startswith("Preference: nie ruszaj configu")
+        assert "Captured by: stop_hook" in merged
+        assert "Detected type: preference" in merged

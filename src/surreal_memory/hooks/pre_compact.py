@@ -136,7 +136,7 @@ async def flush_text(text: str, project_name: str | None = None) -> dict[str, An
         rejected_key,
         session_key,
     )
-    from surreal_memory.mcp.auto_capture import analyze_text_for_memories
+    from surreal_memory.mcp.auto_capture import analyze_text_for_memories, build_capture_context
     from surreal_memory.safety.input_firewall import check_content
     from surreal_memory.safety.sensitive import auto_redact_content
     from surreal_memory.unified_config import get_config, get_shared_storage
@@ -240,6 +240,7 @@ async def flush_text(text: str, project_name: str | None = None) -> dict[str, An
             try:
                 # Auto-redact sensitive content
                 content = item["content"]
+                capture_context = build_capture_context(item, source="pre_compact_hook")
 
                 if gate_mode in ("shadow", "enforce"):
                     from surreal_memory.engine.gate_telemetry import log_gate_decision
@@ -251,6 +252,7 @@ async def flush_text(text: str, project_name: str | None = None) -> dict[str, An
                         is_auto_capture=True,
                         memory_type=item.get("type"),
                         tags=list(base_tags),
+                        context=capture_context,
                     )
                     await log_gate_decision(
                         storage,
@@ -277,6 +279,14 @@ async def flush_text(text: str, project_name: str | None = None) -> dict[str, An
                 )
                 if matches:
                     logger.debug("Auto-redacted %d matches in flush memory", len(matches))
+
+                # Same contract as the remember path: the structured context
+                # earns its gate points only because it also lands in the text.
+                from surreal_memory.engine.context_merger import merge_context
+
+                redacted_content = merge_context(
+                    redacted_content, capture_context, item.get("type") or "fact"
+                )
 
                 # Encode into neural graph
                 result = await encoder.encode(

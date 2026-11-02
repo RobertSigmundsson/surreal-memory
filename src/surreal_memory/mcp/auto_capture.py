@@ -234,3 +234,28 @@ def analyze_text_for_memories(
         unique_detected.append(item)
 
     return unique_detected
+
+
+def build_capture_context(
+    item: dict[str, Any],
+    *,
+    source: str,
+) -> dict[str, Any]:
+    """Structured context for one auto-captured fragment.
+
+    Carries only what the detector already measured, in the shape the write
+    gate and ``merge_context`` understand. The hooks used to pass no context
+    at all, so a fragment without two cognitive markers could not reach
+    ``auto_capture_min_score`` 5 (length 2 + tags 1 + non-fact type 1 = 4) and
+    the enforce gate rejected every capture from 2026-10-20 onward. These keys
+    are provenance, not padding: they also reach the stored content through
+    ``merge_context``, so the score reflects structure the memory really has.
+    """
+    context: dict[str, Any] = {"captured_by": source}
+    detected_type = item.get("type")
+    if detected_type:
+        context["detected_type"] = detected_type
+    confidence = item.get("confidence")
+    if confidence is not None:
+        context["confidence"] = round(float(confidence), 2)
+    return context

@@ -360,7 +360,7 @@ async def capture_text(text: str, project_name: str | None = None) -> dict[str, 
         rejected_key,
         session_key,
     )
-    from surreal_memory.mcp.auto_capture import analyze_text_for_memories
+    from surreal_memory.mcp.auto_capture import analyze_text_for_memories, build_capture_context
     from surreal_memory.safety.input_firewall import check_content
 
     # Gate 1: Input firewall — block garbage/adversarial content
@@ -454,6 +454,7 @@ async def capture_text(text: str, project_name: str | None = None) -> dict[str, 
         for item in eligible:
             try:
                 content = item["content"]
+                capture_context = build_capture_context(item, source="stop_hook")
 
                 # Apply write gate unless off (uses auto_capture threshold)
                 if gate_mode in ("shadow", "enforce"):
@@ -466,6 +467,7 @@ async def capture_text(text: str, project_name: str | None = None) -> dict[str, 
                         is_auto_capture=True,
                         memory_type=item.get("type"),
                         tags=list(base_tags),
+                        context=capture_context,
                     )
                     await log_gate_decision(
                         storage,
@@ -492,6 +494,14 @@ async def capture_text(text: str, project_name: str | None = None) -> dict[str, 
                 )
                 if matches:
                     logger.debug("Auto-redacted %d matches in stop-hook memory", len(matches))
+
+                # Same contract as the remember path: the structured context
+                # earns its gate points only because it also lands in the text.
+                from surreal_memory.engine.context_merger import merge_context
+
+                redacted_content = merge_context(
+                    redacted_content, capture_context, item.get("type") or "fact"
+                )
 
                 result = await encoder.encode(
                     content=redacted_content,
@@ -542,6 +552,9 @@ async def capture_text(text: str, project_name: str | None = None) -> dict[str, 
                     duplicate_skipped = True
                     summary = None  # type: ignore[assignment]
             if summary and len(summary) > 30:
+                summary_context = build_capture_context(
+                    {"type": "context"}, source="stop_hook_summary"
+                )
                 # Apply write gate to session summary too
                 if gate_mode in ("shadow", "enforce"):
                     from surreal_memory.engine.gate_telemetry import log_gate_decision
@@ -554,6 +567,7 @@ async def capture_text(text: str, project_name: str | None = None) -> dict[str, 
                         is_auto_capture=True,
                         memory_type="context",
                         tags=summary_gate_tags,
+                        context=summary_context,
                     )
                     await log_gate_decision(
                         storage,
@@ -579,6 +593,9 @@ async def capture_text(text: str, project_name: str | None = None) -> dict[str, 
                         redacted_summary, _, _ = auto_redact_content(
                             summary, min_severity=auto_redact_severity
                         )
+                        from surreal_memory.engine.context_merger import merge_context
+
+                        redacted_summary = merge_context(redacted_summary, summary_context, "fact")
                         summary_tags = set(base_tags) | {"session_summary"}
                         result = await encoder.encode(
                             content=redacted_summary,
