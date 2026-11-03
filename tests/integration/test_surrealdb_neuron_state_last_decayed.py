@@ -131,3 +131,62 @@ async def test_brain_epoch_round_trip_keeps_config_and_drives_decay(store) -> No
     assert state is not None
     # Charged 2 days (epoch), not 30: exp(-0.2) ~ 0.8187
     assert abs(state.activation_level - 0.8187) < 0.01
+
+
+async def test_narrow_decay_write_keeps_a_concurrent_reinforce(store) -> None:
+    """C2 r2 / B-2 on the live backend: the two-field merge cannot roll back
+    ``last_activated`` / ``access_frequency`` written between snapshot and write."""
+    now = utcnow()
+    neuron = Neuron.create(type=NeuronType.ENTITY, content="narrow-merge-it")
+    await store.add_neuron(neuron)
+    old = now - timedelta(days=20)
+    await store.update_neuron_state(
+        NeuronState(
+            neuron_id=neuron.id,
+            activation_level=1.0,
+            access_frequency=3,
+            last_activated=old,
+            created_at=old,
+        )
+    )
+    snapshot = await store.get_all_neuron_states()  # decay's start-of-pass read
+    # a reinforce lands after the snapshot
+    await store.update_neuron_state(
+        NeuronState(
+            neuron_id=neuron.id, activation_level=1.0, access_frequency=4, last_activated=now
+        )
+    )
+    stale = next(s for s in snapshot if s.neuron_id == neuron.id)
+    assert stale.access_frequency == 3
+    await store.update_neuron_decay_fields(neuron.id, activation_level=0.5, last_decayed=now)
+    after = await store.get_neuron_state(neuron.id)
+    assert after is not None
+    assert after.access_frequency == 4
+    assert after.last_activated is not None
+    assert abs((after.last_activated - now).total_seconds()) < 1
+    assert after.activation_level == 0.5
+    assert after.last_decayed is not None
+
+
+async def test_brain_strict_read_fingerprint_and_epoch_guard(store) -> None:
+    """C2 r2 / B-3 + fingerprint on the live backend."""
+    brain_id = store.brain_id
+    assert (await store.get_brain_strict(brain_id)) is not None
+    assert (await store.get_brain_strict("no-such-brain-xyz")) is None
+
+    fp = await store.brain_row_fingerprint(brain_id, ignore_metadata_key="decay_not_before")
+    assert fp is not None and len(fp) == 64
+    brain = await store.get_brain(brain_id)
+    assert brain is not None
+    brain.metadata["decay_not_before"] = "2026-11-03T12:00:00"
+    await store.save_brain(brain)
+    assert await store.brain_row_fingerprint(brain_id, ignore_metadata_key="decay_not_before") == fp
+    brain.metadata["something_else"] = 1
+    await store.save_brain(brain)
+    assert await store.brain_row_fingerprint(brain_id, ignore_metadata_key="decay_not_before") != fp
+
+    await store.close()  # a dead connection must read as a refusal, not "no epoch"
+    from surreal_memory.engine.lifecycle import DecayEpochError
+
+    with pytest.raises(DecayEpochError):
+        await DecayManager().apply_decay(store, dry_run=True)
