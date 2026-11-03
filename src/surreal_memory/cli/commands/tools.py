@@ -449,7 +449,13 @@ def decay(
             prune_threshold=prune_threshold,
         )
 
-        report = await manager.apply_decay(storage, dry_run=dry_run)
+        from surreal_memory.engine.lifecycle import DecayRefusedError
+
+        try:
+            report = await manager.apply_decay(storage, dry_run=dry_run)
+        except DecayRefusedError as exc:
+            typer.echo(f"Decay refused: {exc}", err=True)
+            raise typer.Exit(code=3) from exc
 
         typer.echo("")
         typer.echo(report.summary())

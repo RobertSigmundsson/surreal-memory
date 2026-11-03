@@ -100,6 +100,10 @@ class DecayReport:
         return "\n".join(lines)
 
 
+class DecayRefusedError(RuntimeError):
+    """A real decay pass was refused because it is not provably safe to run now."""
+
+
 class DecayManager:
     """Manage memory decay using Ebbinghaus forgetting curve.
 
@@ -148,6 +152,9 @@ class DecayManager:
         start_time = time.perf_counter()
         reference_time = reference_time or utcnow()
         report = DecayReport(reference_time=reference_time)
+
+        if not dry_run:
+            await self._refuse_beside_consolidation(storage)
 
         # Preload pinned neuron IDs to skip during decay
         pinned_neuron_ids = await storage.get_pinned_neuron_ids()
@@ -352,6 +359,35 @@ class DecayManager:
         report.duration_ms = (time.perf_counter() - start_time) * 1000
         await self._record_pass(storage, report, dry_run)
         return report
+
+    @staticmethod
+    async def _refuse_beside_consolidation(storage: NeuralStorage) -> None:
+        """Refuse a writing pass while any consolidation run is incomplete.
+
+        A pass rewrites every eligible synapse via single ``update_synapse`` calls;
+        against the strict ``semantic_link`` source fence that turns a running
+        consolidation into ``Changed`` (``Unavailable`` once the changefeed exceeds
+        its row cap). Backends without durable consolidation state raise
+        ``NotImplementedError`` and so cannot have a run to collide with. Any other
+        lookup failure means safety cannot be proven, so the pass is refused.
+        """
+        from surreal_memory.engine.consolidation_progress import INCOMPLETE_STATUSES
+
+        try:
+            run_ids = await storage.get_consolidation_run_ids(statuses=INCOMPLETE_STATUSES)
+        except NotImplementedError:
+            return
+        except Exception as exc:
+            raise DecayRefusedError(
+                f"cannot verify that no consolidation run is incomplete ({exc!r}); "
+                "refusing a writing decay pass (use --dry-run to preview)"
+            ) from exc
+        if run_ids:
+            raise DecayRefusedError(
+                f"{len(run_ids)} consolidation run(s) incomplete "
+                f"({', '.join(sorted(run_ids)[:3])}); refusing a writing decay pass "
+                "(use --dry-run to preview)"
+            )
 
     async def _record_pass(
         self, storage: NeuralStorage, report: DecayReport, dry_run: bool
