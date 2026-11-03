@@ -3195,39 +3195,59 @@ class SurrealDBStorage(
                             "UPDATE $rid SET " + field + " = $value", rid=rid, value=value
                         )
 
+    async def _find_brain_row(self, brain_id: str) -> tuple[dict[str, Any], str] | None:
+        """Matching raw ``brain`` row and its public id, or ``None`` when no row matches.
+
+        Raises on any read error (callers decide whether to swallow).
+        """
+        # Query all brains and filter manually (string matching in SurrealDB is problematic)
+        rows = await self._query("SELECT * FROM brain")
+        if rows and len(rows) > 0:
+            for r in rows:
+                rid = r["id"]
+                name = str(r.get("name") or "")
+                # Compare record ID string
+                rid_str = str(rid) if not hasattr(rid, "id") else f"brain:{rid.id}"
+                # Brains are addressed by name; match the name field first,
+                # then fall back to a record-id match for id-based lookups.
+                # Without the name match, get_brain(name) never resolves a
+                # brain whose record id is a random UUID, so the bootstrap
+                # re-creates a fresh brain on every start (orphan-row leak).
+                if name == brain_id or brain_id in rid_str or rid_str.endswith(f":{brain_id}"):
+                    bid_str = (
+                        str(rid.id).replace("_", "-")
+                        if hasattr(rid, "id")
+                        else str(rid).split(":")[-1].replace("_", "-")
+                    )
+                    return r, bid_str
+        return None
+
+    @staticmethod
+    def _brain_from_row(r: dict[str, Any], bid_str: str) -> Brain:
+        return Brain(
+            id=bid_str,
+            name=str(r.get("name") or ""),
+            config=_deserialize_brain_config(r.get("config")),
+            metadata=dict(r.get("metadata") or {}),
+            created_at=_parse_datetime(r.get("created_at")) or utcnow(),
+            updated_at=_parse_datetime(r.get("updated_at")) or utcnow(),
+        )
+
     async def get_brain(self, brain_id: str) -> Brain | None:
         self._ensure_conn()
         try:
-            # Query all brains and filter manually (string matching in SurrealDB is problematic)
-            rows = await self._query("SELECT * FROM brain")
-            if rows and len(rows) > 0:
-                for r in rows:
-                    rid = r["id"]
-                    name = str(r.get("name") or "")
-                    # Compare record ID string
-                    rid_str = str(rid) if not hasattr(rid, "id") else f"brain:{rid.id}"
-                    # Brains are addressed by name; match the name field first,
-                    # then fall back to a record-id match for id-based lookups.
-                    # Without the name match, get_brain(name) never resolves a
-                    # brain whose record id is a random UUID, so the bootstrap
-                    # re-creates a fresh brain on every start (orphan-row leak).
-                    if name == brain_id or brain_id in rid_str or rid_str.endswith(f":{brain_id}"):
-                        bid_str = (
-                            str(rid.id).replace("_", "-")
-                            if hasattr(rid, "id")
-                            else str(rid).split(":")[-1].replace("_", "-")
-                        )
-                        return Brain(
-                            id=bid_str,
-                            name=name,
-                            config=_deserialize_brain_config(r.get("config")),
-                            metadata=dict(r.get("metadata") or {}),
-                            created_at=_parse_datetime(r.get("created_at")) or utcnow(),
-                            updated_at=_parse_datetime(r.get("updated_at")) or utcnow(),
-                        )
+            found = await self._find_brain_row(brain_id)
+            if found is not None:
+                return self._brain_from_row(*found)
         except Exception:
             pass
         return None
+
+    async def get_brain_strict(self, brain_id: str) -> Brain | None:
+        """Like :meth:`get_brain`, but a read error raises instead of reading as "absent"."""
+        self._ensure_conn()
+        found = await self._find_brain_row(brain_id)
+        return None if found is None else self._brain_from_row(*found)
 
     async def export_brain(self, brain_id: str) -> BrainSnapshot:
         brain = await self.get_brain(brain_id)

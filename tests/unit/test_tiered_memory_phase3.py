@@ -255,6 +255,7 @@ class TestLifecycleDecay:
         # A bare AsyncMock hands back mocks for these; decay now (fail-closed) reads the
         # brain epoch and the incomplete consolidation runs, so state "none of either".
         storage.get_brain = AsyncMock(return_value=None)
+        storage.get_brain_strict = AsyncMock(return_value=None)
         storage.get_consolidation_run_ids = AsyncMock(return_value=[])
 
         ref_time = utcnow()

@@ -87,8 +87,8 @@ class DecayReport:
             f"  Synapses: {self.synapses_decayed}/{self.synapses_processed} decayed, {self.synapses_pruned} pruned",
             f"  Duration: {self.duration_ms:.1f}ms",
         ]
-        if self.not_before is not None:
-            lines.append(f"  Decay epoch (not_before): {self.not_before.isoformat()}")
+        epoch_text = "none" if self.not_before is None else self.not_before.isoformat()
+        lines.append(f"  Decay epoch (not_before): {epoch_text}")
         skipped = (
             self.synapses_skipped_pinned
             + self.synapses_skipped_idle_gate
@@ -153,6 +153,7 @@ class DecayManager:
         prune_threshold: float = 0.01,
         min_age_days: float = 1.0,
         not_before: datetime | str | None = None,
+        require_epoch: bool = False,
     ):
         """Initialize decay manager.
 
@@ -164,23 +165,50 @@ class DecayManager:
                 first pass after a pause does not bill the pause. Wins over the brain's
                 ``metadata["decay_not_before"]``. A malformed value raises
                 :class:`DecayEpochError` here (fail closed).
+            require_epoch: Refuse the pass (:class:`DecayEpochError`) when no epoch is
+                in force, instead of charging the whole life of every row.
         """
         self.decay_rate = decay_rate
         self.prune_threshold = prune_threshold
         self.min_age_days = min_age_days
         self.not_before: datetime | None = parse_decay_epoch(not_before)
+        self.require_epoch = require_epoch
 
     async def _resolve_epoch(self, storage: NeuralStorage) -> datetime | None:
-        """Epoch for this pass: the explicit parameter, else the brain's metadata."""
+        """Epoch for this pass: the explicit parameter, else the brain's metadata.
+
+        Fail closed: a failed read of the brain row is a refusal, never "no epoch"
+        (that would bill the whole life of every row). ``require_epoch`` also refuses
+        when the epoch is genuinely absent.
+        """
+        epoch = await self._lookup_epoch(storage)
+        if epoch is None and self.require_epoch:
+            raise DecayEpochError(
+                f"no {DECAY_EPOCH_KEY} in force and a decay epoch is required "
+                "(--require-epoch); set one with --set-not-before or pass --not-before"
+            )
+        return epoch
+
+    async def _lookup_epoch(self, storage: NeuralStorage) -> datetime | None:
         if self.not_before is not None:
             return self.not_before
         brain_id = getattr(storage, "brain_id", None)
         if not brain_id:
             return None
-        brain = await storage.get_brain(brain_id)
+        try:
+            brain = await storage.get_brain_strict(brain_id)
+        except Exception as exc:
+            raise DecayEpochError(
+                f"cannot read the brain row to resolve {DECAY_EPOCH_KEY} ({exc!r}); "
+                "refusing rather than assuming there is no epoch"
+            ) from exc
         if brain is None:
             return None
         return parse_decay_epoch(brain.metadata.get(DECAY_EPOCH_KEY))
+
+    async def resolve_epoch(self, storage: NeuralStorage) -> datetime | None:
+        """Public wrapper of the fail-closed epoch resolution (CLI prints it up front)."""
+        return await self._resolve_epoch(storage)
 
     async def apply_decay(
         self,

@@ -432,6 +432,13 @@ def decay(
             "WITHOUT running a decay pass",
         ),
     ] = None,
+    require_epoch: Annotated[
+        bool,
+        typer.Option(
+            "--require-epoch",
+            help="Refuse the pass (rc 3) when no decay epoch is in force",
+        ),
+    ] = False,
 ) -> None:
     """Apply memory decay to simulate forgetting.
 
@@ -513,11 +520,21 @@ def decay(
             decay_rate=unified.brain.decay_rate,
             prune_threshold=prune_threshold,
             not_before=epoch_for_pass,
+            require_epoch=require_epoch,
         )
 
         from surreal_memory.engine.lifecycle import DecayRefusedError
 
         try:
+            # Resolve (fail-closed) and print the epoch BEFORE any write, "none" included,
+            # then pin it so the pass uses exactly what was shown.
+            epoch_in_force = await manager.resolve_epoch(storage)
+            typer.echo(
+                "Decay epoch (not_before): "
+                + ("none" if epoch_in_force is None else epoch_in_force.isoformat())
+            )
+            if epoch_in_force is not None:
+                manager.not_before = epoch_in_force
             report = await manager.apply_decay(storage, dry_run=dry_run)
         except DecayRefusedError as exc:
             # Includes DecayEpochError (a malformed stored epoch): never a silent rc 0.

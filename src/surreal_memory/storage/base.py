@@ -1009,6 +1009,15 @@ class NeuralStorage(ABC):
         """
         ...
 
+    async def get_brain_strict(self, brain_id: str) -> Brain | None:
+        """Get brain metadata, letting read errors propagate.
+
+        ``None`` means the row genuinely does not exist. Backends whose
+        :meth:`get_brain` swallows read errors (SurrealDB) override this so safety
+        decisions (the decay epoch) can tell "absent" from "could not read".
+        """
+        return await self.get_brain(brain_id)
+
     async def find_brain_by_name(self, name: str) -> Brain | None:
         """Find a brain by its name.
 
