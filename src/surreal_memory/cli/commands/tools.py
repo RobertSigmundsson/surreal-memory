@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import math
+from datetime import datetime
 from pathlib import Path
 from typing import Annotated, Any
 
@@ -439,6 +441,29 @@ def decay(
             help="Refuse the pass (rc 3) when no decay epoch is in force",
         ),
     ] = False,
+    reference_time: Annotated[
+        str | None,
+        typer.Option(
+            "--reference-time",
+            help="TRIAL: charge decay as of this ISO-8601 time instead of now (a writing pass "
+            "also needs --allow-reference-time)",
+        ),
+    ] = None,
+    rate: Annotated[
+        float | None,
+        typer.Option(
+            "--rate",
+            help="TRIAL: decay rate per day for this pass instead of the configured one "
+            "(a writing pass also needs --allow-reference-time)",
+        ),
+    ] = None,
+    allow_reference_time: Annotated[
+        bool,
+        typer.Option(
+            "--allow-reference-time",
+            help="Permit a WRITING pass with a non-default --reference-time or --rate",
+        ),
+    ] = False,
 ) -> None:
     """Apply memory decay to simulate forgetting.
 
@@ -473,6 +498,32 @@ def decay(
         raise typer.Exit(code=2) from exc
     if epoch_to_store is not None and (dry_run or epoch_for_pass is not None):
         typer.echo("--set-not-before cannot be combined with --dry-run/--not-before", err=True)
+        raise typer.Exit(code=2)
+
+    # Trial instruments (KC-4 needs "reference_time = T0 -> decayed = 0" through the CLI).
+    reference_for_pass: datetime | None = None
+    if reference_time is not None:
+        try:
+            reference_for_pass = _epoch_arg(reference_time)
+        except DecayEpochError as exc:
+            typer.echo(f"Decay refused: --reference-time: {exc}", err=True)
+            raise typer.Exit(code=2) from exc
+        if reference_for_pass is None:
+            typer.echo("Decay refused: --reference-time is empty", err=True)
+            raise typer.Exit(code=2)
+    if rate is not None and not (math.isfinite(rate) and rate > 0):
+        typer.echo(f"Decay refused: --rate must be a finite number > 0 (got {rate})", err=True)
+        raise typer.Exit(code=2)
+    trial = reference_for_pass is not None or rate is not None
+    if trial and epoch_to_store is not None:
+        typer.echo("--reference-time/--rate cannot be combined with --set-not-before", err=True)
+        raise typer.Exit(code=2)
+    if trial and not dry_run and not allow_reference_time:
+        typer.echo(
+            "A writing pass with --reference-time/--rate is refused without "
+            "--allow-reference-time (use --dry-run for trials)",
+            err=True,
+        )
         raise typer.Exit(code=2)
 
     async def _set_epoch(storage: Any, brain_name: str) -> None:
@@ -547,7 +598,7 @@ def decay(
 
         unified = get_unified_config()
         manager = DecayManager(
-            decay_rate=unified.brain.decay_rate,
+            decay_rate=unified.brain.decay_rate if rate is None else rate,
             prune_threshold=prune_threshold,
             not_before=epoch_for_pass,
             require_epoch=require_epoch,
@@ -565,7 +616,9 @@ def decay(
             )
             if epoch_in_force is not None:
                 manager.not_before = epoch_in_force
-            report = await manager.apply_decay(storage, dry_run=dry_run)
+            report = await manager.apply_decay(
+                storage, reference_time=reference_for_pass, dry_run=dry_run
+            )
         except DecayRefusedError as exc:
             # Includes DecayEpochError (a malformed stored epoch): never a silent rc 0.
             typer.echo(f"Decay refused: {exc}", err=True)
