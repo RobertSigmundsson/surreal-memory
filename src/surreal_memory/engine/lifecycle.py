@@ -50,6 +50,8 @@ class DecayReport:
     synapses_pruned: int = 0
     duration_ms: float = 0.0
     reference_time: datetime = field(default_factory=utcnow)
+    # Decay epoch in force for this pass (naive UTC), or None when none was set.
+    not_before: datetime | None = None
 
     # Why a processed synapse was not decayed. Without these, "processed" and
     # "decayed" differ by an unexplained number and no one can tell a healthy
@@ -85,6 +87,8 @@ class DecayReport:
             f"  Synapses: {self.synapses_decayed}/{self.synapses_processed} decayed, {self.synapses_pruned} pruned",
             f"  Duration: {self.duration_ms:.1f}ms",
         ]
+        if self.not_before is not None:
+            lines.append(f"  Decay epoch (not_before): {self.not_before.isoformat()}")
         skipped = (
             self.synapses_skipped_pinned
             + self.synapses_skipped_idle_gate
@@ -101,7 +105,36 @@ class DecayReport:
 
 
 class DecayRefusedError(RuntimeError):
-    """A real decay pass was refused because it is not provably safe to run now."""
+    """A decay pass was refused because it is not provably safe to run now."""
+
+
+class DecayEpochError(DecayRefusedError, ValueError):
+    """The decay epoch (``not_before``) is present but unusable: fail closed."""
+
+
+DECAY_EPOCH_KEY = "decay_not_before"
+
+
+def parse_decay_epoch(raw: Any) -> datetime | None:
+    """Parse a decay epoch into naive UTC; ``None`` means "no epoch".
+
+    Accepts a datetime or an ISO-8601 string (a trailing ``Z`` is allowed). Anything
+    else, including an empty string, raises :class:`DecayEpochError`: a garbled epoch
+    must never degrade into "charge the whole life of every row".
+    """
+    if raw is None:
+        return None
+    if isinstance(raw, datetime):
+        return ensure_naive_utc(raw)
+    if isinstance(raw, str) and raw.strip():
+        text = raw.strip()
+        if text.endswith(("Z", "z")):
+            text = text[:-1] + "+00:00"
+        try:
+            return ensure_naive_utc(datetime.fromisoformat(text))
+        except ValueError as exc:
+            raise DecayEpochError(f"invalid {DECAY_EPOCH_KEY} {raw!r}: {exc}") from exc
+    raise DecayEpochError(f"invalid {DECAY_EPOCH_KEY} {raw!r}: expected ISO-8601 datetime")
 
 
 class DecayManager:
@@ -119,6 +152,7 @@ class DecayManager:
         decay_rate: float = 0.1,
         prune_threshold: float = 0.01,
         min_age_days: float = 1.0,
+        not_before: datetime | str | None = None,
     ):
         """Initialize decay manager.
 
@@ -126,10 +160,27 @@ class DecayManager:
             decay_rate: Rate of decay per day (0.1 = 10% per day)
             prune_threshold: Activation level below which to prune
             min_age_days: Minimum age before applying decay
+            not_before: Decay epoch. No pass charges time earlier than this, so the
+                first pass after a pause does not bill the pause. Wins over the brain's
+                ``metadata["decay_not_before"]``. A malformed value raises
+                :class:`DecayEpochError` here (fail closed).
         """
         self.decay_rate = decay_rate
         self.prune_threshold = prune_threshold
         self.min_age_days = min_age_days
+        self.not_before: datetime | None = parse_decay_epoch(not_before)
+
+    async def _resolve_epoch(self, storage: NeuralStorage) -> datetime | None:
+        """Epoch for this pass: the explicit parameter, else the brain's metadata."""
+        if self.not_before is not None:
+            return self.not_before
+        brain_id = getattr(storage, "brain_id", None)
+        if not brain_id:
+            return None
+        brain = await storage.get_brain(brain_id)
+        if brain is None:
+            return None
+        return parse_decay_epoch(brain.metadata.get(DECAY_EPOCH_KEY))
 
     async def apply_decay(
         self,
@@ -153,6 +204,10 @@ class DecayManager:
         reference_time = reference_time or utcnow()
         report = DecayReport(reference_time=reference_time)
 
+        # Epoch first: a malformed one refuses the pass (dry run included) before any
+        # read-modify-write, so a refusal leaves zero writes behind.
+        epoch = await self._resolve_epoch(storage)
+        report.not_before = epoch
         if not dry_run:
             await self._refuse_beside_consolidation(storage)
 
@@ -213,13 +268,23 @@ class DecayManager:
             else:
                 reference_activated = state.last_activated
 
-            # Calculate time since last activation (or creation)
+            # Eligibility gate: idleness since last activation (or creation). The epoch
+            # does not move it: it limits what may be charged, not whether the neuron
+            # is idle enough to deserve decay at all.
             time_diff = reference_time - reference_activated
             days_elapsed = time_diff.total_seconds() / 86400
 
             # Skip if too recent
             if days_elapsed < self.min_age_days:
                 continue
+
+            # Charge only the stretch at or after the decay epoch.
+            if epoch is not None:
+                days_elapsed = (
+                    reference_time - max(reference_activated, epoch)
+                ).total_seconds() / 86400
+                if days_elapsed <= 0:
+                    continue
 
             # Calculate decay using per-neuron rate (type-aware + tier-aware)
             neuron_tier = neuron_tier_map.get(state.neuron_id, "warm")
@@ -312,6 +377,9 @@ class DecayManager:
             # than today. Repairing anomalous timestamps is not this fix's job.
             last_decayed = synapse.last_decayed
             charge_from = max(idle_since, last_decayed) if last_decayed else idle_since
+            # Decay epoch: never bill time before it (the pause the epoch was set for).
+            if epoch is not None:
+                charge_from = max(charge_from, epoch)
             days_elapsed = (reference_time - charge_from).total_seconds() / 86400
 
             if days_elapsed <= 0:

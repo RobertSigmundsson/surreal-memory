@@ -94,6 +94,12 @@ def test_cli_decay_exits_nonzero_when_refused(monkeypatch: pytest.MonkeyPatch) -
     monkeypatch.setattr(tools, "resolve_brain", lambda *_a, **_k: "decay-guard-test")
     monkeypatch.setattr(tools, "run_async", lambda coro: __import__("asyncio").run(coro))
     with pytest.raises(typer.Exit) as excinfo:
-        tools.decay(brain=None, dry_run=False, prune_threshold=0.01)
+        tools.decay(
+            brain=None,
+            dry_run=False,
+            prune_threshold=0.01,
+            not_before=None,
+            set_not_before=None,
+        )
     assert excinfo.value.exit_code != 0
     assert storage.writes == 0
