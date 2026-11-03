@@ -23,6 +23,10 @@ from surreal_memory.hooks.capture_state import (
 def isolated_state_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     """Every test gets its own capture_state.json, never the real one."""
     monkeypatch.setenv("SURREAL_MEMORY_DIR", str(tmp_path))
+    # Claude Code exports CLAUDE_CODE_SESSION_ID to every child process, this test run
+    # included; the key must come from the test, never from the shell running it.
+    monkeypatch.delenv("CLAUDE_CODE_SESSION_ID", raising=False)
+    monkeypatch.delenv("CLAUDE_SESSION_ID", raising=False)
     return tmp_path
 
 
@@ -71,6 +75,42 @@ class TestSessionKey:
     def test_empty_session_id_env_falls_through(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv("CLAUDE_SESSION_ID", "   ")
         assert session_key(None) == "default"
+
+
+class TestSessionKeyFromClaudeCode:
+    """Claude Code never sets CLAUDE_SESSION_ID. It passes ``session_id`` in every hook's
+    stdin JSON and exports CLAUDE_CODE_SESSION_ID. Reading only the former collapsed every
+    session into one key -- measured 2026-11-03: ~/.surrealmemory/capture_state.json held a
+    single entry, "default", with 632 hashes (589 of them gate rejections) shared by all
+    sessions, so a fragment seen in one session was silently skipped in every later one."""
+
+    def test_hook_input_session_id_wins(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "from-env")
+        monkeypatch.setenv("CLAUDE_SESSION_ID", "legacy-env")
+        assert session_key(session_id="from-stdin") == "from-stdin"
+
+    def test_claude_code_session_id_env_is_read(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "cc-0f3a")
+        assert session_key() == "cc-0f3a"
+
+    def test_claude_code_name_beats_the_legacy_name(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "cc-0f3a")
+        monkeypatch.setenv("CLAUDE_SESSION_ID", "legacy")
+        assert session_key() == "cc-0f3a"
+
+    def test_env_beats_transcript_hash(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "cc-0f3a")
+        assert session_key("/some/transcript.jsonl") == "cc-0f3a"
+
+    def test_blank_values_fall_through_to_default(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "  ")
+        monkeypatch.setenv("CLAUDE_SESSION_ID", "")
+        assert session_key(None, session_id="   ") == "default"
+
+    def test_two_sessions_keep_separate_seen_sets(self) -> None:
+        mark_seen(session_key(session_id="sess-A"), [content_key("fragment seen in A")])
+        assert content_key("fragment seen in A") in load_seen(session_key(session_id="sess-A"))
+        assert load_seen(session_key(session_id="sess-B")) == set()
 
 
 class TestContentKey:

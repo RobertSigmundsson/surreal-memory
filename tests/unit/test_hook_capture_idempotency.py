@@ -80,6 +80,9 @@ def _isolate_storage_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("SURREAL_MEMORY_DIR", raising=False)
     monkeypatch.delenv("SURREALDB_URL", raising=False)
     monkeypatch.delenv("SURREALDB_PASS", raising=False)
+    # Claude Code exports CLAUDE_CODE_SESSION_ID to child processes (this test run
+    # included) and session_key() reads it: each test chooses its own session.
+    monkeypatch.delenv("CLAUDE_CODE_SESSION_ID", raising=False)
 
 
 def _enable_session_summary() -> None:
@@ -575,3 +578,87 @@ class TestRejectedContentNotResubmitted:
             "different content must still be judged -- the refusal cache is "
             "keyed on content, not on 'anything already tried'"
         )
+
+
+class TestHookSessionIdFromStdin:
+    """The seen-set is keyed on the session Claude Code names in the hook's stdin.
+
+    Claude Code does not set CLAUDE_SESSION_ID; the hooks keyed on it, so every session
+    shared one "default" seen-set (prod 2026-11-03: one key, 632 hashes) and a fragment
+    captured or rejected in one session was silently skipped in all later ones.
+    """
+
+    @staticmethod
+    def _state(tmp_path: Path) -> dict[str, object]:
+        import json
+
+        loaded: dict[str, object] = json.loads(
+            (tmp_path / ".surrealmemory" / "capture_state.json").read_text(encoding="utf-8")
+        )
+        return loaded
+
+    async def test_stop_keys_state_by_the_hook_session_id(
+        self, isolated_brain: str, tmp_path: Path
+    ) -> None:
+        result = await stop_hook.capture_text(_TEXT_A, project_name=None, session_id="hook-s1")
+        assert result["saved"] == 1
+        state = self._state(tmp_path)
+        assert "hook-s1" in state, state.keys()
+        assert "default" not in state
+
+    async def test_pre_compact_keys_state_by_the_hook_session_id(
+        self, isolated_brain: str, tmp_path: Path
+    ) -> None:
+        text = "The root cause was a missing null check in the session handler code path."
+        result = await pre_compact_hook.flush_text(text, project_name=None, session_id="hook-s2")
+        assert result["saved"] == 1
+        assert "hook-s2" in self._state(tmp_path)
+
+    async def test_stop_and_pre_compact_share_the_stdin_session(self, isolated_brain: str) -> None:
+        text = "The root cause was a missing null check in the session handler code path."
+        first = await stop_hook.capture_text(text, project_name=None, session_id="hook-s3")
+        assert first["saved"] == 1
+        again = await pre_compact_hook.flush_text(text, project_name=None, session_id="hook-s3")
+        assert again["saved"] == 0
+
+    @pytest.mark.parametrize("hook", ["stop", "pre_compact"])
+    async def test_main_passes_the_stdin_session_id(
+        self, hook: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import io
+        import json
+        import sys
+
+        module = stop_hook if hook == "stop" else pre_compact_hook
+        target = "capture_text" if hook == "stop" else "flush_text"
+        seen: dict[str, object] = {}
+
+        async def _record(text: str, project_name: str | None = None, **kwargs: object) -> dict:
+            seen.update(kwargs)
+            return {"saved": 0, "message": "recorded"}
+
+        monkeypatch.setattr(module, target, _record)
+        monkeypatch.setenv("HOME", str(tmp_path))
+        transcript = tmp_path / ".claude" / "projects" / "p" / "t.jsonl"
+        transcript.parent.mkdir(parents=True)
+        transcript.write_text(
+            json.dumps({"role": "user", "content": _TEXT_A}) + "\n", encoding="utf-8"
+        )
+        stdin = json.dumps(
+            {"transcript_path": str(transcript), "session_id": "stdin-sess", "cwd": str(tmp_path)}
+        )
+        monkeypatch.setattr(sys, "stdin", io.StringIO(stdin))
+        monkeypatch.setattr(sys, "argv", [hook])
+
+        def _run_main() -> None:
+            # main() owns its event loop (asyncio.run), so it runs off this test's loop.
+            try:
+                module.main()
+            except SystemExit:
+                pass
+
+        import asyncio
+
+        await asyncio.to_thread(_run_main)
+
+        assert seen.get("session_id") == "stdin-sess"

@@ -10,6 +10,8 @@ from io import StringIO
 from pathlib import Path
 from unittest.mock import patch
 
+import pytest
+
 from surreal_memory.hooks.post_tool_use import (
     _NOISE_TOOLS,
     _append_to_buffer,
@@ -25,6 +27,49 @@ from surreal_memory.hooks.post_tool_use import (
     _utcnow_iso,
     main,
 )
+
+
+@pytest.fixture(autouse=True)
+def _no_ambient_session_id(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Claude Code exports CLAUDE_CODE_SESSION_ID to this very test run; every test
+    states the session it means instead of inheriting the shell's."""
+    for name in ("CLAUDE_CODE_SESSION_ID", "CLAUDE_SESSION_ID", "CODEX_SESSION_ID"):
+        monkeypatch.delenv(name, raising=False)
+
+
+class TestSessionIdFromHookInput:
+    """Claude Code sends ``session_id`` in every hook's stdin and exports
+    CLAUDE_CODE_SESSION_ID; it never sets CLAUDE_SESSION_ID, the only Claude name
+    this hook read, so every event carried an empty session_id."""
+
+    def test_stdin_session_id_wins_over_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "from-env")
+        assert _get_session_id({"session_id": "from-stdin"}) == "from-stdin"
+
+    def test_claude_code_session_id_env_is_read(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "cc-77")
+        assert _get_session_id({}) == "cc-77"
+
+    def test_claude_code_name_beats_legacy_and_codex(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "cc-77")
+        monkeypatch.setenv("CLAUDE_SESSION_ID", "legacy")
+        monkeypatch.setenv("CODEX_SESSION_ID", "codex")
+        assert _get_session_id() == "cc-77"
+
+    def test_event_carries_the_stdin_session(self) -> None:
+        event = _format_event({"tool_name": "Read", "session_id": "stdin-2"})
+        assert event["session_id"] == "stdin-2"
+
+    def test_main_writes_the_stdin_session(self, tmp_path: Path) -> None:
+        (tmp_path / "config.toml").write_text("[tool_memory]\nenabled = true\n")
+        with (
+            patch.dict(os.environ, {"SURREAL_MEMORY_DIR": str(tmp_path)}, clear=False),
+            patch.object(sys, "stdin", StringIO('{"tool_name": "Read", "session_id": "stdin-3"}')),
+            patch.object(sys, "stdout", StringIO()),
+        ):
+            main()
+        event = json.loads((tmp_path / "tool_events.jsonl").read_text().strip())
+        assert event["session_id"] == "stdin-3"
 
 
 class TestTruncateArgs:

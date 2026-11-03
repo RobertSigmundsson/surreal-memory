@@ -20,7 +20,8 @@ Design notes:
   grow without bound.
 - Atomic-ish write: write to a temp file then ``replace`` to avoid a torn
   state file if two hooks race.
-- Shared key: keyed on ``CLAUDE_SESSION_ID`` so Stop and PreCompact share
+- Shared key: keyed on the session Claude Code names (``session_id`` in the
+  hook's stdin, else ``CLAUDE_CODE_SESSION_ID``) so Stop and PreCompact share
   one seen-set and do not re-capture each other's writes.
 - Backend-agnostic: the state file lives beside the brain config, not in
   SurrealDB/SQLite, so behavior is identical on both storage backends.
@@ -58,16 +59,30 @@ def _state_path() -> Path:
     return data_dir / "capture_state.json"
 
 
-def session_key(transcript_path: str | None = None) -> str:
+# Environment names that carry the session id, most specific first. Claude Code exports
+# CLAUDE_CODE_SESSION_ID and never CLAUDE_SESSION_ID -- the only name this module used to
+# read -- so every session fell through to "default" (measured 2026-11-03: one key with
+# 632 hashes in ~/.surrealmemory/capture_state.json). The legacy name stays as a fallback
+# for callers that export it themselves.
+_SESSION_ENV_VARS = ("CLAUDE_CODE_SESSION_ID", "CLAUDE_SESSION_ID")
+
+
+def session_key(transcript_path: str | None = None, *, session_id: str | None = None) -> str:
     """Stable per-session key.
 
-    Prefers ``CLAUDE_SESSION_ID`` (set by Claude Code); falls back to a hash
-    of the transcript path, then a constant. The fallback degrades safely:
-    worst case the seen-set is shared a bit too broadly within one machine.
+    Order: ``session_id`` from the hook's stdin JSON (Claude Code sends it to every
+    hook event), then ``CLAUDE_CODE_SESSION_ID``, then the legacy
+    ``CLAUDE_SESSION_ID``, then a hash of the transcript path, then a constant.
+    The fallback degrades safely: worst case the seen-set is shared a bit too
+    broadly within one machine.
     """
-    sid = os.environ.get("CLAUDE_SESSION_ID", "").strip()
+    sid = (session_id or "").strip()
     if sid:
         return sid
+    for name in _SESSION_ENV_VARS:
+        sid = os.environ.get(name, "").strip()
+        if sid:
+            return sid
     if transcript_path:
         return "tp_" + hashlib.md5(transcript_path.encode("utf-8")).hexdigest()[:16]
     return "default"

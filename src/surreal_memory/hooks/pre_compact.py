@@ -113,7 +113,9 @@ def _extract_text(entry: dict[str, Any]) -> str:
     return text if isinstance(text, str) else ""
 
 
-async def flush_text(text: str, project_name: str | None = None) -> dict[str, Any]:
+async def flush_text(
+    text: str, project_name: str | None = None, *, session_id: str | None = None
+) -> dict[str, Any]:
     """Detect and save memorable content from text.
 
     Uses the same auto-capture pipeline as the MCP server's flush action,
@@ -122,9 +124,9 @@ async def flush_text(text: str, project_name: str | None = None) -> dict[str, An
     ``project:<name>``) so recall can be filtered per project.
 
     Idempotent per session (upstream #80): fragments whose normalized content
-    was already captured earlier in this ``CLAUDE_SESSION_ID`` (shared with
-    the Stop hook) are skipped, since PreCompact also re-reads an overlapping
-    transcript tail on every compaction.
+    was already captured earlier in this session (``session_id`` from the
+    hook's stdin, shared with the Stop hook) are skipped, since PreCompact
+    also re-reads an overlapping transcript tail on every compaction.
     """
     from surreal_memory.core.memory_types import MemoryType, Priority, TypedMemory
     from surreal_memory.engine.dedup.factory import build_dedup_pipeline
@@ -187,10 +189,10 @@ async def flush_text(text: str, project_name: str | None = None) -> dict[str, An
         ]
 
         # Idempotency at source (#80): drop fragments already captured this
-        # session (shared seen-set with the Stop hook via CLAUDE_SESSION_ID).
+        # session (shared seen-set with the Stop hook via the hook's session_id).
         # PreCompact re-reads an overlapping tail too, so this prevents the
         # same fragments being re-encoded on each compaction.
-        skey = session_key()
+        skey = session_key(session_id=session_id)
         seen = load_seen(skey)
         captured_keys: list[str] = []
         duplicate_skipped = False
@@ -383,6 +385,7 @@ def main() -> None:
 
     text = ""
     project_name: str | None = None
+    session_id: str | None = None
 
     if args.text:
         # Direct text input
@@ -394,6 +397,7 @@ def main() -> None:
         # Read Claude Code hook input from stdin
         hook_input = read_hook_input()
         project_name = derive_project_name(hook_input)
+        session_id = str(hook_input.get("session_id") or "") or None
         transcript_path = hook_input.get("transcript_path", "")
         if transcript_path:
             # Validate stdin transcript path is within Claude data directory
@@ -418,7 +422,7 @@ def main() -> None:
         project_name = derive_project_name(None)
 
     try:
-        result = asyncio.run(flush_text(text, project_name))
+        result = asyncio.run(flush_text(text, project_name, session_id=session_id))
         saved = result.get("saved", 0)
         if saved > 0:
             print(  # noqa: T201

@@ -32,8 +32,8 @@ def stanowisko(tmp_path, monkeypatch):
     zapisane: list[str] = []
 
     async def rejestrator(
-        text, project_name=None
-    ):  # atrapa zapisu do bazy (nazwana w docstringu modułu)
+        text, project_name=None, **_kw
+    ):  # atrapa zapisu do bazy (nazwana w docstringu modułu); **_kw: session_id z wejścia hooka
         zapisane.append(text)
         return {"saved": 1}
 

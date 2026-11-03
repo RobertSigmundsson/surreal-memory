@@ -15,7 +15,8 @@ Performance design (ac2a001 perf subset):
 - _NOISE_TOOLS fast-path skips the highest-frequency no-value tools
 - Lock-safe JSONL append via fcntl.flock (POSIX) with a write-then-rename
   fallback for platforms without flock
-- Session ID: checks CLAUDE_SESSION_ID and CODEX_SESSION_ID
+- Session ID: ``session_id`` from the hook's stdin, then CLAUDE_CODE_SESSION_ID,
+  CLAUDE_SESSION_ID and CODEX_SESSION_ID
 """
 
 from __future__ import annotations
@@ -58,9 +59,21 @@ _NOISE_TOOLS: frozenset[str] = frozenset(
 )
 
 
-def _get_session_id() -> str:
-    """Return the current session ID from env (Claude or Codex)."""
-    return os.environ.get("CLAUDE_SESSION_ID") or os.environ.get("CODEX_SESSION_ID", "")
+# Claude Code sends ``session_id`` in every hook's stdin and exports CLAUDE_CODE_SESSION_ID;
+# it never sets CLAUDE_SESSION_ID, which used to be the only Claude name read here.
+_SESSION_ENV_VARS = ("CLAUDE_CODE_SESSION_ID", "CLAUDE_SESSION_ID", "CODEX_SESSION_ID")
+
+
+def _get_session_id(hook_input: dict[str, Any] | None = None) -> str:
+    """Return the current session ID: hook stdin first, then env (Claude Code, legacy, Codex)."""
+    sid = str((hook_input or {}).get("session_id") or "").strip()
+    if sid:
+        return sid
+    for name in _SESSION_ENV_VARS:
+        sid = os.environ.get(name, "").strip()
+        if sid:
+            return sid
+    return ""
 
 
 def _read_stdin() -> dict[str, Any]:
@@ -152,7 +165,7 @@ def _format_event(hook_input: dict[str, Any]) -> dict[str, Any]:
         "args_summary": _truncate_args(tool_input),
         "success": tool_error is None,
         "duration_ms": int(duration_ms) if isinstance(duration_ms, (int, float)) else 0,
-        "session_id": _get_session_id(),
+        "session_id": _get_session_id(hook_input),
         "task_context": "",  # Populated by processing engine if session is active
         "created_at": _utcnow_iso(),
     }

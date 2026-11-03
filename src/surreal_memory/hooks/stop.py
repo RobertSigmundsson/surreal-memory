@@ -334,7 +334,9 @@ async def _embedding_dedup(
         return items
 
 
-async def capture_text(text: str, project_name: str | None = None) -> dict[str, Any]:
+async def capture_text(
+    text: str, project_name: str | None = None, *, session_id: str | None = None
+) -> dict[str, Any]:
     """Detect and save memorable content from session transcript.
 
     Uses normal (non-emergency) confidence thresholds since this runs
@@ -346,9 +348,10 @@ async def capture_text(text: str, project_name: str | None = None) -> dict[str, 
     project (and tagged ``project:<name>``) for per-project recall.
 
     Idempotent per session (upstream #80): fragments and the session summary
-    whose normalized content was already captured earlier in this
-    ``CLAUDE_SESSION_ID`` are skipped, since this hook re-reads an
-    overlapping transcript tail on every turn.
+    whose normalized content was already captured earlier in this session
+    (``session_id`` from the hook's stdin, see ``capture_state.session_key``)
+    are skipped, since this hook re-reads an overlapping transcript tail on
+    every turn.
     """
     from surreal_memory.core.memory_types import MemoryType, Priority, TypedMemory
     from surreal_memory.engine.dedup.factory import build_dedup_pipeline
@@ -410,7 +413,7 @@ async def capture_text(text: str, project_name: str | None = None) -> dict[str, 
         # session. The Stop hook fires after every assistant turn and
         # re-reads an overlapping transcript tail, so without this the same
         # fragments (and session summary, below) are re-encoded every turn.
-        skey = session_key()
+        skey = session_key(session_id=session_id)
         seen = load_seen(skey)
         captured_keys: list[str] = []
         had_candidate = bool(eligible)
@@ -680,6 +683,7 @@ def main() -> None:
 
     text = ""
     project_name: str | None = None
+    session_id: str | None = None
 
     if args.text:
         text = args.text
@@ -688,6 +692,7 @@ def main() -> None:
     else:
         hook_input = read_hook_input()
         project_name = derive_project_name(hook_input)
+        session_id = str(hook_input.get("session_id") or "") or None
         transcript_path = hook_input.get("transcript_path", "")
         if transcript_path:
             # Validate stdin transcript path is within Claude data directory
@@ -718,7 +723,7 @@ def main() -> None:
         project_name = derive_project_name(None)
 
     try:
-        result = asyncio.run(capture_text(text, project_name))
+        result = asyncio.run(capture_text(text, project_name, session_id=session_id))
         saved = result.get("saved", 0)
         if saved > 0:
             print(  # noqa: T201
