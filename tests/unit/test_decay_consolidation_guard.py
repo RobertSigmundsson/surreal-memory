@@ -41,6 +41,10 @@ class _Storage(InMemoryStorage):
         self.writes += 1
         return await super().update_neuron_state(state)
 
+    async def update_neuron_decay_fields(self, *a: Any, **k: Any) -> None:
+        self.writes += 1
+        return await super().update_neuron_decay_fields(*a, **k)
+
 
 async def test_real_pass_refused_when_run_incomplete() -> None:
     storage = _Storage(["run-1"])
@@ -69,6 +73,68 @@ async def test_adapter_without_durable_state_is_not_blocked() -> None:
     """NotImplementedError = backend has no consolidation runs at all (in-memory)."""
     storage = _Storage(NotImplementedError())
     assert await DecayManager().apply_decay(storage) is not None
+
+
+async def _seed_eligible(storage: _Storage) -> None:
+    """One idle neuron state and one idle synapse: a pass that gets past the guard WRITES."""
+    from dataclasses import replace as dc_replace
+    from datetime import timedelta
+
+    from surreal_memory.core.neuron import Neuron, NeuronState, NeuronType
+    from surreal_memory.core.synapse import Synapse, SynapseType
+    from surreal_memory.utils.timeutils import utcnow
+
+    old = utcnow() - timedelta(days=30)
+    a = Neuron.create(type=NeuronType.ENTITY, content="a")
+    b = Neuron.create(type=NeuronType.ENTITY, content="b")
+    await storage.add_neuron(a)
+    await storage.add_neuron(b)
+    await InMemoryStorage.update_neuron_state(
+        storage,
+        NeuronState(neuron_id=a.id, activation_level=1.0, last_activated=old, created_at=old),
+    )
+    syn = Synapse.create(source_id=a.id, target_id=b.id, type=SynapseType.RELATED_TO)
+    await storage.add_synapse(dc_replace(syn, last_activated=old))
+
+
+async def test_refusal_leaves_zero_writes_even_with_eligible_rows() -> None:
+    """Kills the 'check moved behind the neuron loop' mutant (checker A, M9).
+
+    The earlier zero-write assertion ran on an empty storage, where it is vacuous.
+    """
+    storage = _Storage(["run-1"])
+    await _seed_eligible(storage)
+    with pytest.raises(DecayRefusedError):
+        await DecayManager(min_age_days=0.0).apply_decay(storage)
+    assert storage.writes == 0
+    # control: with the guard satisfied the very same data IS written
+    clear = _Storage([])
+    await _seed_eligible(clear)
+    await DecayManager(min_age_days=0.0).apply_decay(clear)
+    assert clear.writes >= 2
+
+
+async def test_not_implemented_is_refused_for_non_local_backends() -> None:
+    """Only the explicit local list may skip the guard on NotImplementedError."""
+    from unittest.mock import AsyncMock
+
+    from surreal_memory.storage.surrealdb.store import SurrealDBStorage
+
+    surreal = SurrealDBStorage()
+    surreal._current_brain_id = "x"
+    surreal._conn = AsyncMock()
+    surreal.get_consolidation_run_ids = AsyncMock(side_effect=NotImplementedError())  # type: ignore[method-assign]
+    surreal.get_brain_strict = AsyncMock(return_value=None)  # type: ignore[method-assign]
+    surreal.get_pinned_neuron_ids = AsyncMock(return_value=set())  # type: ignore[method-assign]
+    with pytest.raises(DecayRefusedError):
+        await DecayManager().apply_decay(surreal)
+    assert surreal._conn.merge.await_count == 0
+
+    unknown = AsyncMock()
+    unknown.get_brain_strict = AsyncMock(return_value=None)
+    unknown.get_consolidation_run_ids = AsyncMock(side_effect=NotImplementedError())
+    with pytest.raises(DecayRefusedError):
+        await DecayManager().apply_decay(unknown)
 
 
 async def test_lookup_failure_is_fail_closed() -> None:

@@ -137,6 +137,15 @@ def parse_decay_epoch(raw: Any) -> datetime | None:
     raise DecayEpochError(f"invalid {DECAY_EPOCH_KEY} {raw!r}: expected ISO-8601 datetime")
 
 
+# Backends with no durable consolidation state at all (a process-local dict): the only
+# ones for which ``get_consolidation_run_ids`` raising NotImplementedError proves "no run".
+_LOCAL_BACKEND_NAMES = frozenset({"InMemoryStorage"})
+
+
+def _is_local_backend(storage: object) -> bool:
+    return any(cls.__name__ in _LOCAL_BACKEND_NAMES for cls in type(storage).__mro__)
+
+
 class DecayManager:
     """Manage memory decay using Ebbinghaus forgetting curve.
 
@@ -467,16 +476,25 @@ class DecayManager:
         A pass rewrites every eligible synapse via single ``update_synapse`` calls;
         against the strict ``semantic_link`` source fence that turns a running
         consolidation into ``Changed`` (``Unavailable`` once the changefeed exceeds
-        its row cap). Backends without durable consolidation state raise
-        ``NotImplementedError`` and so cannot have a run to collide with. Any other
-        lookup failure means safety cannot be proven, so the pass is refused.
+        its row cap). Only the explicit local backends in ``_LOCAL_BACKEND_NAMES`` may
+        answer ``NotImplementedError`` ("no durable runs") and proceed. Any other
+        lookup failure, and ``NotImplementedError`` from any other backend, means
+        safety cannot be proven, so the pass is refused.
         """
         from surreal_memory.engine.consolidation_progress import INCOMPLETE_STATUSES
 
         try:
             run_ids = await storage.get_consolidation_run_ids(statuses=INCOMPLETE_STATUSES)
-        except NotImplementedError:
-            return
+        except NotImplementedError as exc:
+            # "No durable runs" is only believable for an explicit list of local
+            # backends. A persistent or intermediary backend (SurrealDB, SharedStorage,
+            # anything unknown) that cannot answer has NOT shown there is no run.
+            if _is_local_backend(storage):
+                return
+            raise DecayRefusedError(
+                f"{type(storage).__name__} cannot report consolidation runs and is not a "
+                "known local backend; refusing a writing decay pass (use --dry-run to preview)"
+            ) from exc
         except Exception as exc:
             raise DecayRefusedError(
                 f"cannot verify that no consolidation run is incomplete ({exc!r}); "
