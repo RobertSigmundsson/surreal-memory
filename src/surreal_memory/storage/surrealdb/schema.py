@@ -93,6 +93,10 @@ DEFINE FIELD ephemeral       ON neuron TYPE bool DEFAULT false;
 -- OVERWRITE converges databases that already have the pre-READONLY definition.
 DEFINE FIELD OVERWRITE created_at ON neuron TYPE datetime DEFAULT time::now() READONLY;
 DEFINE FIELD updated_at      ON neuron TYPE datetime DEFAULT time::now();
+-- LEGACY, no writer and no reader (batch_update_last_accessed is a no-op): access_frequency,
+-- last_activated and last_accessed_at below. Truth for recency/frequency is
+-- neuron_state.last_activated / neuron_state.access_frequency. Do not write them: neuron has
+-- a changefeed whose after-image carries the embedding.
 DEFINE FIELD access_frequency ON neuron TYPE int DEFAULT 0;
 DEFINE FIELD last_activated  ON neuron TYPE option<datetime>;
 DEFINE FIELD compression_tier ON neuron TYPE int DEFAULT 0;

@@ -2034,15 +2034,25 @@ class NeuralStorage(ABC):
     # ========== Access Tracking Operations ==========
 
     async def batch_update_last_accessed(self, neuron_ids: list[str]) -> None:
-        """Update last_accessed_at for neurons in batch (single SQL UPDATE).
+        """NO-OP on every shipped backend: nothing is written, nothing reads it.
 
-        Called after successful recall to track which neurons were activated.
-        Default is a no-op; SQLite backend overrides for efficiency.
+        The only implementation was the SQLite one, which disappeared with that
+        backend (#141); the SurrealDB backend inherits this stub. The columns
+        ``neuron.last_accessed_at`` / ``access_frequency`` / ``last_activated`` are
+        legacy: no writer, no reader. The source of truth for recency and frequency is
+        ``neuron_state.last_activated`` / ``neuron_state.access_frequency``, written by
+        reinforcement (and sleep replay) and read by heat scoring, tiering and dormancy.
+
+        Writing ``neuron.last_accessed_at`` here would be harmful, not just useless:
+        ``neuron`` has a changefeed whose after-image carries the embedding (~21 KB),
+        and each event also breaks the strict ``semantic_link`` source fence. Do not
+        "fix" this by writing to ``neuron``; if per-neuron access times are ever needed
+        they belong in ``neuron_state`` (outside the feed) with a consumer.
 
         Args:
-            neuron_ids: List of neuron IDs whose last_accessed_at should be updated.
+            neuron_ids: Ignored.
         """
-        return  # No-op default; SQLite backend overrides.
+        return  # Deliberate no-op; see above.
 
     # ========== Lifecycle State Operations ==========
 
