@@ -5,6 +5,7 @@ from __future__ import annotations
 import random
 from abc import ABC, abstractmethod
 from collections.abc import AsyncIterator
+from dataclasses import replace as dc_replace
 from datetime import datetime
 from typing import TYPE_CHECKING, Any, Literal
 
@@ -330,6 +331,24 @@ class NeuralStorage(ABC):
             state: The state to save
         """
         ...
+
+    async def update_neuron_decay_fields(
+        self, neuron_id: str, *, activation_level: float, last_decayed: datetime
+    ) -> None:
+        """Write ONLY ``activation_level`` and ``last_decayed`` of one neuron state.
+
+        Decay owns exactly these two fields. It must never write back the rest of a
+        state it read earlier (``last_activated``, ``access_frequency``, ...): a
+        reinforce that landed after the read would be rolled back. Backends should
+        override with a field-level merge; this default re-reads the current state
+        right before writing, which narrows (but cannot close) the race.
+        """
+        current = await self.get_neuron_state(neuron_id)
+        if current is None:
+            return
+        await self.update_neuron_state(
+            dc_replace(current, activation_level=activation_level, last_decayed=last_decayed)
+        )
 
     async def update_neuron_states_batch(self, states: list[NeuronState]) -> None:
         """Update multiple neuron states in one batch operation.

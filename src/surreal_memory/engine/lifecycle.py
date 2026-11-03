@@ -308,12 +308,13 @@ class DecayManager:
                     # Apply tier-aware level directly (skip state.decay() to avoid
                     # double-computing — we already have the correct new_level)
                     final_level = 0.0 if (pruned and tier_floor == 0.0) else new_level
-                    decayed_state = dc_replace(
-                        state,
+                    # Narrow write: only the two fields decay owns. Writing back the
+                    # snapshot would roll back a reinforce that landed mid-pass.
+                    await storage.update_neuron_decay_fields(
+                        state.neuron_id,
                         activation_level=final_level,
                         last_decayed=reference_time,
                     )
-                    await storage.update_neuron_state(decayed_state)
 
         # Get all synapses and apply decay
         synapses = await storage.get_all_synapses()

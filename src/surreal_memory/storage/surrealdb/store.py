@@ -2086,6 +2086,17 @@ class SurrealDBStorage(
 
         await conn.merge(f"neuron_state:state_{sid}", update_data)
 
+    async def update_neuron_decay_fields(
+        self, neuron_id: str, *, activation_level: float, last_decayed: datetime
+    ) -> None:
+        """Field-level merge of the two columns decay owns (never the rest of the row)."""
+        conn = self._ensure_conn()
+        sid = _to_surreal_id(neuron_id)
+        await conn.merge(
+            f"neuron_state:state_{sid}",
+            {"activation_level": activation_level, "last_decayed": last_decayed},
+        )
+
     # ================================================================
     # Synapse Operations
     # ================================================================
