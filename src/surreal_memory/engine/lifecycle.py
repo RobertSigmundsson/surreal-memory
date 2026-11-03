@@ -2,6 +2,15 @@
 
 Implements the Ebbinghaus forgetting curve for natural memory decay
 and reinforcement for frequently accessed memories.
+
+Rollback caveat (decay bookmark ``NeuronState.last_decayed``): once even ONE real pass
+has run with this code, neuron decay no longer stamps ``last_activated``; the billed
+stretch lives in ``last_decayed``. Reverting to the previous code does NOT undo that: the
+old code bills from ``last_activated`` again and ignores ``last_decayed``, so every
+neuron is charged twice for the stretch already billed (measured on SurrealDB 3.2.3:
+0.3679 -> 0.1353 instead of 0.3679). After a real pass, a rollback of this change must
+leave decay DISABLED (``decay_enabled = false``, no timer) until the code moves forward
+again. Do not ``REMOVE FIELD last_decayed``.
 """
 
 from __future__ import annotations
