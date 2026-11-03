@@ -260,7 +260,9 @@ class DecayManager:
             # Skip neurons belonging to pinned (KB) fibers
             if state.neuron_id in pinned_neuron_ids:
                 continue
-            # Use last_activated if available, otherwise fall back to created_at
+            # Eligibility gate: idleness since the last real activation (or creation).
+            # Decay is not usage and no longer writes last_activated (it keeps its own
+            # bookmark, last_decayed), so this clock only moves when the neuron is used.
             if state.last_activated is None:
                 reference_activated = (
                     state.created_at if hasattr(state, "created_at") else reference_time
@@ -268,23 +270,24 @@ class DecayManager:
             else:
                 reference_activated = state.last_activated
 
-            # Eligibility gate: idleness since last activation (or creation). The epoch
-            # does not move it: it limits what may be charged, not whether the neuron
-            # is idle enough to deserve decay at all.
-            time_diff = reference_time - reference_activated
-            days_elapsed = time_diff.total_seconds() / 86400
+            days_elapsed = (reference_time - reference_activated).total_seconds() / 86400
 
             # Skip if too recent
             if days_elapsed < self.min_age_days:
                 continue
 
-            # Charge only the stretch at or after the decay epoch.
+            # Charge only the stretch no earlier pass billed and the decay epoch allows.
+            # Legacy rows (last_decayed None) fall back to last_activated/created_at,
+            # i.e. behave exactly as before on their first pass. The slices telescope,
+            # so N daily passes equal one pass over the whole window.
+            charge_from = reference_activated
+            if state.last_decayed is not None:
+                charge_from = max(charge_from, ensure_naive_utc(state.last_decayed))
             if epoch is not None:
-                days_elapsed = (
-                    reference_time - max(reference_activated, epoch)
-                ).total_seconds() / 86400
-                if days_elapsed <= 0:
-                    continue
+                charge_from = max(charge_from, epoch)
+            days_elapsed = (reference_time - charge_from).total_seconds() / 86400
+            if days_elapsed <= 0:
+                continue
 
             # Calculate decay using per-neuron rate (type-aware + tier-aware)
             neuron_tier = neuron_tier_map.get(state.neuron_id, "warm")
@@ -308,7 +311,7 @@ class DecayManager:
                     decayed_state = dc_replace(
                         state,
                         activation_level=final_level,
-                        last_activated=reference_time,
+                        last_decayed=reference_time,
                     )
                     await storage.update_neuron_state(decayed_state)
 

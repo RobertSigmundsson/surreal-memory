@@ -123,6 +123,9 @@ DEFINE FIELD firing_threshold  ON neuron_state TYPE float DEFAULT 0.3;
 DEFINE FIELD refractory_until  ON neuron_state TYPE option<datetime>;
 DEFINE FIELD refractory_period_ms ON neuron_state TYPE float DEFAULT 500.0;
 DEFINE FIELD homeostatic_target   ON neuron_state TYPE float DEFAULT 0.5;
+-- Decay bookmark (C2/P2): decay is maintenance, not usage, so it records here instead of
+-- stamping last_activated. Additive, no SCHEMA_VERSION bump; NEVER REMOVE FIELD on rollback.
+DEFINE FIELD last_decayed         ON neuron_state TYPE option<datetime>;
 DEFINE FIELD created_at        ON neuron_state TYPE datetime DEFAULT time::now();
 DEFINE INDEX idx_state_neuron  ON neuron_state FIELDS brain_id, neuron_id UNIQUE;
 

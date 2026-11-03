@@ -520,6 +520,7 @@ def _row_to_neuron_state(row: dict[str, Any]) -> NeuronState:
         refractory_until=_parse_datetime(row.get("refractory_until")),
         refractory_period_ms=float(row.get("refractory_period_ms", 500.0)),
         homeostatic_target=float(row.get("homeostatic_target", 0.5)),
+        last_decayed=_parse_datetime(row.get("last_decayed")),
     )
 
 
@@ -2080,6 +2081,8 @@ class SurrealDBStorage(
             update_data["last_activated"] = state.last_activated
         if state.refractory_until:
             update_data["refractory_until"] = state.refractory_until
+        if state.last_decayed:
+            update_data["last_decayed"] = state.last_decayed
 
         await conn.merge(f"neuron_state:state_{sid}", update_data)
 
@@ -4795,6 +4798,8 @@ class SurrealDBStorage(
                     data["last_activated"] = state.last_activated
                 if state.refractory_until:
                     data["refractory_until"] = state.refractory_until
+                if state.last_decayed:
+                    data["last_decayed"] = state.last_decayed
                 rows.append((f"state_{_to_surreal_id(state.neuron_id)}", data))
             await self._merge_records_batch("neuron_state", rows)
 

@@ -147,6 +147,9 @@ class NeuronState:
         last_activated: When this neuron was last activated
         decay_rate: How fast activation decays over time
         created_at: When this state was created
+        last_decayed: When a decay pass last charged this state (decay bookmark).
+            Distinct from ``last_activated``: decay is maintenance, not usage, so it
+            must never move the freshness signal that heat/tier/dormancy read.
     """
 
     neuron_id: str
@@ -159,6 +162,7 @@ class NeuronState:
     refractory_until: datetime | None = None
     refractory_period_ms: float = 500.0
     homeostatic_target: float = 0.5
+    last_decayed: datetime | None = None
 
     def activate(
         self,
@@ -206,6 +210,7 @@ class NeuronState:
             refractory_until=new_refractory,
             refractory_period_ms=self.refractory_period_ms,
             homeostatic_target=self.homeostatic_target,
+            last_decayed=self.last_decayed,
         )
 
     def decay(self, time_delta_seconds: float) -> NeuronState:
@@ -238,6 +243,7 @@ class NeuronState:
             refractory_until=self.refractory_until,
             refractory_period_ms=self.refractory_period_ms,
             homeostatic_target=self.homeostatic_target,
+            last_decayed=self.last_decayed,
         )
 
     @property
