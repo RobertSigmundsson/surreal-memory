@@ -209,8 +209,15 @@ async def recall(
         _require_brain_id,
     )
 
-    def _out(response: dict[str, Any], path: RecallPath, res: Any = None) -> RecallOutcome:
-        return RecallOutcome(response, res, path, "skipped", getattr(storage, "brain_id", None))
+    def _out(
+        response: dict[str, Any],
+        path: RecallPath,
+        res: Any = None,
+        pending: asyncio.Task[TraceStatus] | None = None,
+    ) -> RecallOutcome:
+        return RecallOutcome(
+            response, res, path, "skipped", getattr(storage, "brain_id", None), pending
+        )
 
     try:
         brain_id = _require_brain_id(storage)
@@ -374,6 +381,20 @@ async def recall(
         await extras.after_query(query)
 
     if result.confidence < min_confidence:
+        # skutki="odroczone": the pipeline already answered, but its post-answer side
+        # effects (reinforcement, flush, reconsolidation, session) live in _dokoncz and
+        # would be dropped by this early return. Run them, without writing a trace row
+        # (this path never wrote one), and surface a failure through the same pending
+        # barrier the caller already awaits.
+        pending_effects: asyncio.Task[TraceStatus] | None = None
+        if _dokoncz is not None:
+            finish = _dokoncz
+
+            async def _tylko_skutki() -> TraceStatus:
+                await finish()
+                return "skipped"
+
+            pending_effects = asyncio.create_task(_tylko_skutki())
         return _out(
             {
                 "answer": None,
@@ -382,6 +403,7 @@ async def recall(
             },
             "min_confidence",
             result,
+            pending_effects,
         )
 
     # Post-filter by trust_score and/or tier (single pass to avoid redundant DB lookups).
