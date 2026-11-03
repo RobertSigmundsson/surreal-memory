@@ -1018,6 +1018,17 @@ class NeuralStorage(ABC):
         """
         return await self.get_brain(brain_id)
 
+    async def brain_row_fingerprint(
+        self, brain_id: str, *, ignore_metadata_key: str | None = None
+    ) -> str | None:
+        """sha256 of the raw stored ``brain`` row, optionally ignoring one metadata key.
+
+        ``None`` when the row does not exist. Lets a caller that writes a single
+        ``metadata`` key prove, before/after, that nothing else in the row moved.
+        Backends that cannot produce it raise ``NotImplementedError`` (callers fail closed).
+        """
+        raise NotImplementedError
+
     async def find_brain_by_name(self, name: str) -> Brain | None:
         """Find a brain by its name.
 

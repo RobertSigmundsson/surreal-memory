@@ -3243,6 +3243,24 @@ class SurrealDBStorage(
             pass
         return None
 
+    async def brain_row_fingerprint(
+        self, brain_id: str, *, ignore_metadata_key: str | None = None
+    ) -> str | None:
+        """sha256 of the raw ``brain`` row (every column), minus one ``metadata`` key."""
+        import hashlib
+        import json
+
+        self._ensure_conn()
+        found = await self._find_brain_row(brain_id)
+        if found is None:
+            return None
+        row = dict(found[0])
+        meta = row.get("metadata")
+        if ignore_metadata_key is not None and isinstance(meta, dict):
+            row["metadata"] = {k: v for k, v in meta.items() if k != ignore_metadata_key}
+        blob = json.dumps(row, sort_keys=True, default=str)
+        return hashlib.sha256(blob.encode()).hexdigest()
+
     async def get_brain_strict(self, brain_id: str) -> Brain | None:
         """Like :meth:`get_brain`, but a read error raises instead of reading as "absent"."""
         self._ensure_conn()

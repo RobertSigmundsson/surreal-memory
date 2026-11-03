@@ -481,6 +481,21 @@ def decay(
         if brain is None:
             typer.echo(f"Brain '{brain_name}' not found; epoch not stored", err=True)
             raise typer.Exit(code=1)
+        # Fingerprint the RAW brain row before and after (ignoring only the epoch key):
+        # the dataclass comparison below cannot see a save that rewrites config/metadata.
+        try:
+            fp_before = await storage.brain_row_fingerprint(
+                brain_id, ignore_metadata_key=DECAY_EPOCH_KEY
+            )
+        except Exception as exc:
+            typer.echo(
+                f"Cannot fingerprint the brain row ({exc!r}); epoch not stored (fail closed)",
+                err=True,
+            )
+            raise typer.Exit(code=1) from exc
+        if fp_before is None:
+            typer.echo(f"Brain '{brain_name}' row not found; epoch not stored", err=True)
+            raise typer.Exit(code=1)
         config_before = brain.config
         brain.metadata[DECAY_EPOCH_KEY] = epoch_to_store.isoformat()
         await storage.save_brain(brain)
@@ -497,7 +512,22 @@ def decay(
                 err=True,
             )
             raise typer.Exit(code=1)
+        try:
+            fp_after = await storage.brain_row_fingerprint(
+                brain_id, ignore_metadata_key=DECAY_EPOCH_KEY
+            )
+        except Exception as exc:
+            typer.echo(f"Cannot re-fingerprint the brain row ({exc!r}); inspect it", err=True)
+            raise typer.Exit(code=1) from exc
+        if fp_after != fp_before:
+            typer.echo(
+                "Brain row CHANGED beyond metadata.decay_not_before "
+                f"(sha256 {fp_before} -> {fp_after}); restore the row from the snapshot",
+                err=True,
+            )
+            raise typer.Exit(code=1)
         typer.echo(f"Decay epoch stored and verified: {epoch_to_store.isoformat()}")
+        typer.echo(f"Brain row sha256 (epoch key excluded) unchanged: {fp_after}")
 
     async def _decay() -> None:
         config = get_config()
