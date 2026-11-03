@@ -386,6 +386,57 @@ def _is_connection_error(exc: Exception) -> bool:
     )
 
 
+# The pinned SDK (surrealdb 2.0.0, ``connections/async_ws.py``) keeps ONE dict of pending
+# requests, ``qry``, for every coroutine multiplexed over the WebSocket. Its receive loop
+# (``_recv_task``) ends on ``close()`` and on ANY exception -- including the
+# ``InvalidStateError`` it hits when a response arrives for a waiter that was already
+# cancelled -- and its ``finally`` cancels every pending future and CLEARS ``qry``. Each
+# waiter then runs ``_send``'s own ``finally: del self.qry[query_id]`` on a key that is gone,
+# so it raises ``KeyError`` INSTEAD of the ``CancelledError`` it was woken with:
+#
+# * a cancellation the caller asked for (``asyncio.wait_for`` / ``asyncio.timeout``) no longer
+#   becomes ``TimeoutError`` -- the UserPromptSubmit hook's 20 s cap was logged as
+#   ``recall-KeyError`` (38x, 2026-10-03..11-03, every one 20.6-24.9 s after the prompt);
+# * a request nobody cancelled fails with ``KeyError``, which is neither an auth nor a
+#   connection error, so the retry path never saw it (and the CancelledError translation in
+#   ``_run_query`` never fired for the case it was written for).
+#
+# The receiver does not come back by itself: the socket reference stays set, so the SDK's
+# ``connect()`` returns early and every later request waits for a reply nobody reads.
+_SDK_WS_SEND_FILE_SUFFIX = "surrealdb/connections/async_ws.py"
+
+
+def _is_sdk_pending_request_race(exc: BaseException) -> bool:
+    """True only for the ``KeyError`` raised by the SDK's ``_send`` cleanup (see above).
+
+    Decided by the frame that raised it, not by the message: any other ``KeyError`` (a missing
+    ``result`` key in a response, a bug of ours) must keep propagating unchanged.
+    """
+    if not isinstance(exc, KeyError):
+        return False
+    tb = exc.__traceback__
+    if tb is None:
+        return False
+    while tb.tb_next is not None:
+        tb = tb.tb_next
+    code = tb.tb_frame.f_code
+    return code.co_name == "_send" and code.co_filename.replace("\\", "/").endswith(
+        _SDK_WS_SEND_FILE_SUFFIX
+    )
+
+
+def _sdk_receiver_is_gone(conn: Any) -> bool:
+    """True when an SDK WebSocket connection still holds its socket but nothing reads it.
+
+    Only the SDK's WebSocket transport has a ``recv_task``; HTTP/embedded transports and test
+    doubles never match (``isinstance`` on a real Future, not truthiness of an attribute).
+    """
+    receiver = getattr(conn, "recv_task", None)
+    if not isinstance(receiver, asyncio.Future) or not receiver.done():
+        return False
+    return getattr(conn, "socket", None) is not None
+
+
 def _from_surreal_id(surreal_id: str) -> str:
     """Extract the original ID from a SurrealDB record ID like 'neuron:abc_def'."""
     if ":" in surreal_id:
@@ -980,15 +1031,37 @@ class SurrealDBStorage(
         away underneath me", which is precisely what the retry path exists to
         absorb. Translate it. A cancellation the task DID ask for (`task.cancel()`,
         `asyncio.wait_for` expiring) still propagates untouched.
+
+        With the real SDK the same two cases arrive as a `KeyError` from its
+        `_send` cleanup (see `_is_sdk_pending_request_race`); both are restored to
+        what actually happened. And a connection whose receiver is already gone is
+        never queried: the request would wait forever, so it goes to the retry
+        path, which rebuilds the connection.
         """
+        conn = self._ensure_conn()
+        if _sdk_receiver_is_gone(conn):
+            raise ConnectionResetError(
+                104, "SurrealDB receive loop has ended; the connection must be rebuilt"
+            )
         try:
-            return await self._ensure_conn().query(sql, params)
+            return await conn.query(sql, params)
         except asyncio.CancelledError:
             task = asyncio.current_task()
             if task is None or task.cancelling() > 0:
                 raise
             raise ConnectionResetError(
                 104, "SurrealDB connection was closed while the query was in flight"
+            ) from None
+        except KeyError as exc:
+            if not _is_sdk_pending_request_race(exc):
+                raise
+            task = asyncio.current_task()
+            if task is not None and task.cancelling() > 0:
+                # The cancel this task asked for: hand it back, so asyncio.timeout /
+                # wait_for report TimeoutError instead of an unexplained KeyError.
+                raise asyncio.CancelledError() from None
+            raise ConnectionResetError(
+                104, "SurrealDB receive loop ended while the query was in flight"
             ) from None
 
     async def _query_response(self, sql: str, **params: Any) -> Any:
