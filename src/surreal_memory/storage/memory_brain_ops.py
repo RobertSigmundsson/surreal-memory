@@ -48,6 +48,21 @@ class InMemoryBrainMixin:
     async def get_brain(self, brain_id: str) -> Brain | None:
         return self._brains.get(brain_id)
 
+    async def brain_row_fingerprint(
+        self, brain_id: str, *, ignore_metadata_key: str | None = None
+    ) -> str | None:
+        import hashlib
+        import json
+
+        brain = self._brains.get(brain_id)
+        if brain is None:
+            return None
+        row = asdict(brain)
+        if ignore_metadata_key is not None and isinstance(row.get("metadata"), dict):
+            row["metadata"] = {k: v for k, v in row["metadata"].items() if k != ignore_metadata_key}
+        blob = json.dumps(row, sort_keys=True, default=str)
+        return hashlib.sha256(blob.encode()).hexdigest()
+
     async def find_brain_by_name(self, name: str) -> Brain | None:
         for brain in self._brains.values():
             if brain.name == name:

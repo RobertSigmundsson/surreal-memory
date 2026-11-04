@@ -391,3 +391,58 @@ async def test_dekoracje_false_skips_sources_and_chunking_reads() -> None:
             dekoracje=True,
         )
         assert "get_synapses" in storage.calls
+
+
+@pytest.mark.asyncio
+async def test_odroczone_min_confidence_still_runs_side_effects_once() -> None:
+    """C2/P4: the min_confidence early return must not drop the deferred side effects."""
+    calls: list[str] = []
+
+    class _Pipe:
+        async def query_rozdzielone(self, **q: Any) -> Any:
+            res = _result()
+
+            async def _dokoncz() -> RetrievalResult:
+                calls.append("skutki")
+                return res
+
+            return res, _dokoncz
+
+    storage = _Storage()
+    with patch("surreal_memory.engine.retrieval.ReflexPipeline", return_value=_Pipe()):
+        out = await recall_api.recall(
+            storage,
+            {"query": "q", "min_confidence": 0.99},
+            config=_config(),
+            tor="http:test",
+            engine_session_id="s",
+            skutki="odroczone",
+        )
+        assert out.path == "min_confidence"
+        assert out.trace == "skipped" and storage.traces == []  # still no trace row
+        assert out.pending is not None
+        await out.pending
+    assert calls == ["skutki"]
+
+
+@pytest.mark.asyncio
+async def test_odroczone_min_confidence_side_effect_failure_is_not_silent() -> None:
+    class _Pipe:
+        async def query_rozdzielone(self, **q: Any) -> Any:
+            async def _dokoncz() -> RetrievalResult:
+                raise RuntimeError("reinforce down")
+
+            return _result(), _dokoncz
+
+    with patch("surreal_memory.engine.retrieval.ReflexPipeline", return_value=_Pipe()):
+        out = await recall_api.recall(
+            _Storage(),
+            {"query": "q", "min_confidence": 0.99},
+            config=_config(),
+            tor="http:test",
+            engine_session_id="s",
+            skutki="odroczone",
+        )
+        assert out.pending is not None
+        with pytest.raises(RuntimeError, match="reinforce down"):
+            await out.pending

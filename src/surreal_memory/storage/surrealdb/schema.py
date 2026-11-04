@@ -93,6 +93,10 @@ DEFINE FIELD ephemeral       ON neuron TYPE bool DEFAULT false;
 -- OVERWRITE converges databases that already have the pre-READONLY definition.
 DEFINE FIELD OVERWRITE created_at ON neuron TYPE datetime DEFAULT time::now() READONLY;
 DEFINE FIELD updated_at      ON neuron TYPE datetime DEFAULT time::now();
+-- LEGACY, no writer and no reader (batch_update_last_accessed is a no-op): access_frequency,
+-- last_activated and last_accessed_at below. Truth for recency/frequency is
+-- neuron_state.last_activated / neuron_state.access_frequency. Do not write them: neuron has
+-- a changefeed whose after-image carries the embedding.
 DEFINE FIELD access_frequency ON neuron TYPE int DEFAULT 0;
 DEFINE FIELD last_activated  ON neuron TYPE option<datetime>;
 DEFINE FIELD compression_tier ON neuron TYPE int DEFAULT 0;
@@ -123,6 +127,9 @@ DEFINE FIELD firing_threshold  ON neuron_state TYPE float DEFAULT 0.3;
 DEFINE FIELD refractory_until  ON neuron_state TYPE option<datetime>;
 DEFINE FIELD refractory_period_ms ON neuron_state TYPE float DEFAULT 500.0;
 DEFINE FIELD homeostatic_target   ON neuron_state TYPE float DEFAULT 0.5;
+-- Decay bookmark (C2/P2): decay is maintenance, not usage, so it records here instead of
+-- stamping last_activated. Additive, no SCHEMA_VERSION bump; NEVER REMOVE FIELD on rollback.
+DEFINE FIELD last_decayed         ON neuron_state TYPE option<datetime>;
 DEFINE FIELD created_at        ON neuron_state TYPE datetime DEFAULT time::now();
 DEFINE INDEX idx_state_neuron  ON neuron_state FIELDS brain_id, neuron_id UNIQUE;
 

@@ -353,6 +353,19 @@ class InMemoryStorage(
         brain_id = self._get_brain_id()
         self._states[brain_id][state.neuron_id] = state
 
+    async def update_neuron_decay_fields(
+        self, neuron_id: str, *, activation_level: float, last_decayed: datetime
+    ) -> None:
+        # Read-modify-write on the CURRENT state with no await in between, so a
+        # concurrent reinforce is never rolled back (only the two decay fields move).
+        brain_states = self._states[self._get_brain_id()]
+        current = brain_states.get(neuron_id)
+        if current is None:
+            return
+        brain_states[neuron_id] = replace(
+            current, activation_level=activation_level, last_decayed=last_decayed
+        )
+
     async def add_decay_pass(self, record: dict[str, Any]) -> None:
         self._decay_passes[self._get_brain_id()].append(dict(record))
 

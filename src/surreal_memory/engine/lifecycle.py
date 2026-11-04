@@ -2,6 +2,15 @@
 
 Implements the Ebbinghaus forgetting curve for natural memory decay
 and reinforcement for frequently accessed memories.
+
+Rollback caveat (decay bookmark ``NeuronState.last_decayed``): once even ONE real pass
+has run with this code, neuron decay no longer stamps ``last_activated``; the billed
+stretch lives in ``last_decayed``. Reverting to the previous code does NOT undo that: the
+old code bills from ``last_activated`` again and ignores ``last_decayed``, so every
+neuron is charged twice for the stretch already billed (measured on SurrealDB 3.2.3:
+0.3679 -> 0.1353 instead of 0.3679). After a real pass, a rollback of this change must
+leave decay DISABLED (``decay_enabled = false``, no timer) until the code moves forward
+again. Do not ``REMOVE FIELD last_decayed``.
 """
 
 from __future__ import annotations
@@ -50,6 +59,8 @@ class DecayReport:
     synapses_pruned: int = 0
     duration_ms: float = 0.0
     reference_time: datetime = field(default_factory=utcnow)
+    # Decay epoch in force for this pass (naive UTC), or None when none was set.
+    not_before: datetime | None = None
 
     # Why a processed synapse was not decayed. Without these, "processed" and
     # "decayed" differ by an unexplained number and no one can tell a healthy
@@ -85,6 +96,8 @@ class DecayReport:
             f"  Synapses: {self.synapses_decayed}/{self.synapses_processed} decayed, {self.synapses_pruned} pruned",
             f"  Duration: {self.duration_ms:.1f}ms",
         ]
+        epoch_text = "none" if self.not_before is None else self.not_before.isoformat()
+        lines.append(f"  Decay epoch (not_before): {epoch_text}")
         skipped = (
             self.synapses_skipped_pinned
             + self.synapses_skipped_idle_gate
@@ -98,6 +111,48 @@ class DecayReport:
                 f"{self.synapses_skipped_bookmark} already charged)"
             )
         return "\n".join(lines)
+
+
+class DecayRefusedError(RuntimeError):
+    """A decay pass was refused because it is not provably safe to run now."""
+
+
+class DecayEpochError(DecayRefusedError, ValueError):
+    """The decay epoch (``not_before``) is present but unusable: fail closed."""
+
+
+DECAY_EPOCH_KEY = "decay_not_before"
+
+
+def parse_decay_epoch(raw: Any) -> datetime | None:
+    """Parse a decay epoch into naive UTC; ``None`` means "no epoch".
+
+    Accepts a datetime or an ISO-8601 string (a trailing ``Z`` is allowed). Anything
+    else, including an empty string, raises :class:`DecayEpochError`: a garbled epoch
+    must never degrade into "charge the whole life of every row".
+    """
+    if raw is None:
+        return None
+    if isinstance(raw, datetime):
+        return ensure_naive_utc(raw)
+    if isinstance(raw, str) and raw.strip():
+        text = raw.strip()
+        if text.endswith(("Z", "z")):
+            text = text[:-1] + "+00:00"
+        try:
+            return ensure_naive_utc(datetime.fromisoformat(text))
+        except ValueError as exc:
+            raise DecayEpochError(f"invalid {DECAY_EPOCH_KEY} {raw!r}: {exc}") from exc
+    raise DecayEpochError(f"invalid {DECAY_EPOCH_KEY} {raw!r}: expected ISO-8601 datetime")
+
+
+# Backends with no durable consolidation state at all (a process-local dict): the only
+# ones for which ``get_consolidation_run_ids`` raising NotImplementedError proves "no run".
+_LOCAL_BACKEND_NAMES = frozenset({"InMemoryStorage"})
+
+
+def _is_local_backend(storage: object) -> bool:
+    return any(cls.__name__ in _LOCAL_BACKEND_NAMES for cls in type(storage).__mro__)
 
 
 class DecayManager:
@@ -115,6 +170,8 @@ class DecayManager:
         decay_rate: float = 0.1,
         prune_threshold: float = 0.01,
         min_age_days: float = 1.0,
+        not_before: datetime | str | None = None,
+        require_epoch: bool = False,
     ):
         """Initialize decay manager.
 
@@ -122,10 +179,54 @@ class DecayManager:
             decay_rate: Rate of decay per day (0.1 = 10% per day)
             prune_threshold: Activation level below which to prune
             min_age_days: Minimum age before applying decay
+            not_before: Decay epoch. No pass charges time earlier than this, so the
+                first pass after a pause does not bill the pause. Wins over the brain's
+                ``metadata["decay_not_before"]``. A malformed value raises
+                :class:`DecayEpochError` here (fail closed).
+            require_epoch: Refuse the pass (:class:`DecayEpochError`) when no epoch is
+                in force, instead of charging the whole life of every row.
         """
         self.decay_rate = decay_rate
         self.prune_threshold = prune_threshold
         self.min_age_days = min_age_days
+        self.not_before: datetime | None = parse_decay_epoch(not_before)
+        self.require_epoch = require_epoch
+
+    async def _resolve_epoch(self, storage: NeuralStorage) -> datetime | None:
+        """Epoch for this pass: the explicit parameter, else the brain's metadata.
+
+        Fail closed: a failed read of the brain row is a refusal, never "no epoch"
+        (that would bill the whole life of every row). ``require_epoch`` also refuses
+        when the epoch is genuinely absent.
+        """
+        epoch = await self._lookup_epoch(storage)
+        if epoch is None and self.require_epoch:
+            raise DecayEpochError(
+                f"no {DECAY_EPOCH_KEY} in force and a decay epoch is required "
+                "(--require-epoch); set one with --set-not-before or pass --not-before"
+            )
+        return epoch
+
+    async def _lookup_epoch(self, storage: NeuralStorage) -> datetime | None:
+        if self.not_before is not None:
+            return self.not_before
+        brain_id = getattr(storage, "brain_id", None)
+        if not brain_id:
+            return None
+        try:
+            brain = await storage.get_brain_strict(brain_id)
+        except Exception as exc:
+            raise DecayEpochError(
+                f"cannot read the brain row to resolve {DECAY_EPOCH_KEY} ({exc!r}); "
+                "refusing rather than assuming there is no epoch"
+            ) from exc
+        if brain is None:
+            return None
+        return parse_decay_epoch(brain.metadata.get(DECAY_EPOCH_KEY))
+
+    async def resolve_epoch(self, storage: NeuralStorage) -> datetime | None:
+        """Public wrapper of the fail-closed epoch resolution (CLI prints it up front)."""
+        return await self._resolve_epoch(storage)
 
     async def apply_decay(
         self,
@@ -148,6 +249,13 @@ class DecayManager:
         start_time = time.perf_counter()
         reference_time = reference_time or utcnow()
         report = DecayReport(reference_time=reference_time)
+
+        # Epoch first: a malformed one refuses the pass (dry run included) before any
+        # read-modify-write, so a refusal leaves zero writes behind.
+        epoch = await self._resolve_epoch(storage)
+        report.not_before = epoch
+        if not dry_run:
+            await self._refuse_beside_consolidation(storage)
 
         # Preload pinned neuron IDs to skip during decay
         pinned_neuron_ids = await storage.get_pinned_neuron_ids()
@@ -198,7 +306,9 @@ class DecayManager:
             # Skip neurons belonging to pinned (KB) fibers
             if state.neuron_id in pinned_neuron_ids:
                 continue
-            # Use last_activated if available, otherwise fall back to created_at
+            # Eligibility gate: idleness since the last real activation (or creation).
+            # Decay is not usage and no longer writes last_activated (it keeps its own
+            # bookmark, last_decayed), so this clock only moves when the neuron is used.
             if state.last_activated is None:
                 reference_activated = (
                     state.created_at if hasattr(state, "created_at") else reference_time
@@ -206,12 +316,23 @@ class DecayManager:
             else:
                 reference_activated = state.last_activated
 
-            # Calculate time since last activation (or creation)
-            time_diff = reference_time - reference_activated
-            days_elapsed = time_diff.total_seconds() / 86400
+            days_elapsed = (reference_time - reference_activated).total_seconds() / 86400
 
             # Skip if too recent
             if days_elapsed < self.min_age_days:
+                continue
+
+            # Charge only the stretch no earlier pass billed and the decay epoch allows.
+            # Legacy rows (last_decayed None) fall back to last_activated/created_at,
+            # i.e. behave exactly as before on their first pass. The slices telescope,
+            # so N daily passes equal one pass over the whole window.
+            charge_from = reference_activated
+            if state.last_decayed is not None:
+                charge_from = max(charge_from, ensure_naive_utc(state.last_decayed))
+            if epoch is not None:
+                charge_from = max(charge_from, epoch)
+            days_elapsed = (reference_time - charge_from).total_seconds() / 86400
+            if days_elapsed <= 0:
                 continue
 
             # Calculate decay using per-neuron rate (type-aware + tier-aware)
@@ -233,12 +354,13 @@ class DecayManager:
                     # Apply tier-aware level directly (skip state.decay() to avoid
                     # double-computing — we already have the correct new_level)
                     final_level = 0.0 if (pruned and tier_floor == 0.0) else new_level
-                    decayed_state = dc_replace(
-                        state,
+                    # Narrow write: only the two fields decay owns. Writing back the
+                    # snapshot would roll back a reinforce that landed mid-pass.
+                    await storage.update_neuron_decay_fields(
+                        state.neuron_id,
                         activation_level=final_level,
-                        last_activated=reference_time,
+                        last_decayed=reference_time,
                     )
-                    await storage.update_neuron_state(decayed_state)
 
         # Get all synapses and apply decay
         synapses = await storage.get_all_synapses()
@@ -305,6 +427,9 @@ class DecayManager:
             # than today. Repairing anomalous timestamps is not this fix's job.
             last_decayed = synapse.last_decayed
             charge_from = max(idle_since, last_decayed) if last_decayed else idle_since
+            # Decay epoch: never bill time before it (the pause the epoch was set for).
+            if epoch is not None:
+                charge_from = max(charge_from, epoch)
             days_elapsed = (reference_time - charge_from).total_seconds() / 86400
 
             if days_elapsed <= 0:
@@ -352,6 +477,44 @@ class DecayManager:
         report.duration_ms = (time.perf_counter() - start_time) * 1000
         await self._record_pass(storage, report, dry_run)
         return report
+
+    @staticmethod
+    async def _refuse_beside_consolidation(storage: NeuralStorage) -> None:
+        """Refuse a writing pass while any consolidation run is incomplete.
+
+        A pass rewrites every eligible synapse via single ``update_synapse`` calls;
+        against the strict ``semantic_link`` source fence that turns a running
+        consolidation into ``Changed`` (``Unavailable`` once the changefeed exceeds
+        its row cap). Only the explicit local backends in ``_LOCAL_BACKEND_NAMES`` may
+        answer ``NotImplementedError`` ("no durable runs") and proceed. Any other
+        lookup failure, and ``NotImplementedError`` from any other backend, means
+        safety cannot be proven, so the pass is refused.
+        """
+        from surreal_memory.engine.consolidation_progress import INCOMPLETE_STATUSES
+
+        try:
+            run_ids = await storage.get_consolidation_run_ids(statuses=INCOMPLETE_STATUSES)
+        except NotImplementedError as exc:
+            # "No durable runs" is only believable for an explicit list of local
+            # backends. A persistent or intermediary backend (SurrealDB, SharedStorage,
+            # anything unknown) that cannot answer has NOT shown there is no run.
+            if _is_local_backend(storage):
+                return
+            raise DecayRefusedError(
+                f"{type(storage).__name__} cannot report consolidation runs and is not a "
+                "known local backend; refusing a writing decay pass (use --dry-run to preview)"
+            ) from exc
+        except Exception as exc:
+            raise DecayRefusedError(
+                f"cannot verify that no consolidation run is incomplete ({exc!r}); "
+                "refusing a writing decay pass (use --dry-run to preview)"
+            ) from exc
+        if run_ids:
+            raise DecayRefusedError(
+                f"{len(run_ids)} consolidation run(s) incomplete "
+                f"({', '.join(sorted(run_ids)[:3])}); refusing a writing decay pass "
+                "(use --dry-run to preview)"
+            )
 
     async def _record_pass(
         self, storage: NeuralStorage, report: DecayReport, dry_run: bool

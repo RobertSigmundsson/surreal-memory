@@ -571,6 +571,7 @@ def _row_to_neuron_state(row: dict[str, Any]) -> NeuronState:
         refractory_until=_parse_datetime(row.get("refractory_until")),
         refractory_period_ms=float(row.get("refractory_period_ms", 500.0)),
         homeostatic_target=float(row.get("homeostatic_target", 0.5)),
+        last_decayed=_parse_datetime(row.get("last_decayed")),
     )
 
 
@@ -2153,8 +2154,21 @@ class SurrealDBStorage(
             update_data["last_activated"] = state.last_activated
         if state.refractory_until:
             update_data["refractory_until"] = state.refractory_until
+        if state.last_decayed:
+            update_data["last_decayed"] = state.last_decayed
 
         await conn.merge(f"neuron_state:state_{sid}", update_data)
+
+    async def update_neuron_decay_fields(
+        self, neuron_id: str, *, activation_level: float, last_decayed: datetime
+    ) -> None:
+        """Field-level merge of the two columns decay owns (never the rest of the row)."""
+        conn = self._ensure_conn()
+        sid = _to_surreal_id(neuron_id)
+        await conn.merge(
+            f"neuron_state:state_{sid}",
+            {"activation_level": activation_level, "last_decayed": last_decayed},
+        )
 
     # ================================================================
     # Synapse Operations
@@ -3254,39 +3268,77 @@ class SurrealDBStorage(
                             "UPDATE $rid SET " + field + " = $value", rid=rid, value=value
                         )
 
+    async def _find_brain_row(self, brain_id: str) -> tuple[dict[str, Any], str] | None:
+        """Matching raw ``brain`` row and its public id, or ``None`` when no row matches.
+
+        Raises on any read error (callers decide whether to swallow).
+        """
+        # Query all brains and filter manually (string matching in SurrealDB is problematic)
+        rows = await self._query("SELECT * FROM brain")
+        if rows and len(rows) > 0:
+            for r in rows:
+                rid = r["id"]
+                name = str(r.get("name") or "")
+                # Compare record ID string
+                rid_str = str(rid) if not hasattr(rid, "id") else f"brain:{rid.id}"
+                # Brains are addressed by name; match the name field first,
+                # then fall back to a record-id match for id-based lookups.
+                # Without the name match, get_brain(name) never resolves a
+                # brain whose record id is a random UUID, so the bootstrap
+                # re-creates a fresh brain on every start (orphan-row leak).
+                if name == brain_id or brain_id in rid_str or rid_str.endswith(f":{brain_id}"):
+                    bid_str = (
+                        str(rid.id).replace("_", "-")
+                        if hasattr(rid, "id")
+                        else str(rid).split(":")[-1].replace("_", "-")
+                    )
+                    return r, bid_str
+        return None
+
+    @staticmethod
+    def _brain_from_row(r: dict[str, Any], bid_str: str) -> Brain:
+        return Brain(
+            id=bid_str,
+            name=str(r.get("name") or ""),
+            config=_deserialize_brain_config(r.get("config")),
+            metadata=dict(r.get("metadata") or {}),
+            created_at=_parse_datetime(r.get("created_at")) or utcnow(),
+            updated_at=_parse_datetime(r.get("updated_at")) or utcnow(),
+        )
+
     async def get_brain(self, brain_id: str) -> Brain | None:
         self._ensure_conn()
         try:
-            # Query all brains and filter manually (string matching in SurrealDB is problematic)
-            rows = await self._query("SELECT * FROM brain")
-            if rows and len(rows) > 0:
-                for r in rows:
-                    rid = r["id"]
-                    name = str(r.get("name") or "")
-                    # Compare record ID string
-                    rid_str = str(rid) if not hasattr(rid, "id") else f"brain:{rid.id}"
-                    # Brains are addressed by name; match the name field first,
-                    # then fall back to a record-id match for id-based lookups.
-                    # Without the name match, get_brain(name) never resolves a
-                    # brain whose record id is a random UUID, so the bootstrap
-                    # re-creates a fresh brain on every start (orphan-row leak).
-                    if name == brain_id or brain_id in rid_str or rid_str.endswith(f":{brain_id}"):
-                        bid_str = (
-                            str(rid.id).replace("_", "-")
-                            if hasattr(rid, "id")
-                            else str(rid).split(":")[-1].replace("_", "-")
-                        )
-                        return Brain(
-                            id=bid_str,
-                            name=name,
-                            config=_deserialize_brain_config(r.get("config")),
-                            metadata=dict(r.get("metadata") or {}),
-                            created_at=_parse_datetime(r.get("created_at")) or utcnow(),
-                            updated_at=_parse_datetime(r.get("updated_at")) or utcnow(),
-                        )
+            found = await self._find_brain_row(brain_id)
+            if found is not None:
+                return self._brain_from_row(*found)
         except Exception:
             pass
         return None
+
+    async def brain_row_fingerprint(
+        self, brain_id: str, *, ignore_metadata_key: str | None = None
+    ) -> str | None:
+        """sha256 of the raw ``brain`` row (every column), minus one ``metadata`` key."""
+        import hashlib
+        import json
+
+        self._ensure_conn()
+        found = await self._find_brain_row(brain_id)
+        if found is None:
+            return None
+        row = dict(found[0])
+        meta = row.get("metadata")
+        if ignore_metadata_key is not None and isinstance(meta, dict):
+            row["metadata"] = {k: v for k, v in meta.items() if k != ignore_metadata_key}
+        blob = json.dumps(row, sort_keys=True, default=str)
+        return hashlib.sha256(blob.encode()).hexdigest()
+
+    async def get_brain_strict(self, brain_id: str) -> Brain | None:
+        """Like :meth:`get_brain`, but a read error raises instead of reading as "absent"."""
+        self._ensure_conn()
+        found = await self._find_brain_row(brain_id)
+        return None if found is None else self._brain_from_row(*found)
 
     async def export_brain(self, brain_id: str) -> BrainSnapshot:
         brain = await self.get_brain(brain_id)
@@ -4868,6 +4920,8 @@ class SurrealDBStorage(
                     data["last_activated"] = state.last_activated
                 if state.refractory_until:
                     data["refractory_until"] = state.refractory_until
+                if state.last_decayed:
+                    data["last_decayed"] = state.last_decayed
                 rows.append((f"state_{_to_surreal_id(state.neuron_id)}", data))
             await self._merge_records_batch("neuron_state", rows)
 

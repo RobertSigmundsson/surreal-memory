@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import math
+from datetime import datetime
 from pathlib import Path
 from typing import Annotated, Any
 
@@ -417,6 +419,51 @@ def decay(
     prune_threshold: Annotated[
         float, typer.Option("--prune", "-p", help="Prune below this activation level")
     ] = 0.01,
+    not_before: Annotated[
+        str | None,
+        typer.Option(
+            "--not-before",
+            help="Decay epoch for this pass only (ISO-8601 or 'now'); wins over the brain's stored epoch",
+        ),
+    ] = None,
+    set_not_before: Annotated[
+        str | None,
+        typer.Option(
+            "--set-not-before",
+            help="Store the decay epoch (ISO-8601 or 'now') in the brain, verify it, and exit "
+            "WITHOUT running a decay pass",
+        ),
+    ] = None,
+    require_epoch: Annotated[
+        bool,
+        typer.Option(
+            "--require-epoch",
+            help="Refuse the pass (rc 3) when no decay epoch is in force",
+        ),
+    ] = False,
+    reference_time: Annotated[
+        str | None,
+        typer.Option(
+            "--reference-time",
+            help="TRIAL: charge decay as of this ISO-8601 time instead of now (a writing pass "
+            "also needs --allow-reference-time)",
+        ),
+    ] = None,
+    rate: Annotated[
+        float | None,
+        typer.Option(
+            "--rate",
+            help="TRIAL: decay rate per day for this pass instead of the configured one "
+            "(a writing pass also needs --allow-reference-time)",
+        ),
+    ] = None,
+    allow_reference_time: Annotated[
+        bool,
+        typer.Option(
+            "--allow-reference-time",
+            help="Permit a WRITING pass with a non-default --reference-time or --rate",
+        ),
+    ] = False,
 ) -> None:
     """Apply memory decay to simulate forgetting.
 
@@ -428,8 +475,110 @@ def decay(
         smem decay -b work            # Apply to specific brain
         smem decay --dry-run          # Preview without changes
         smem decay --prune 0.05       # More aggressive pruning
+        smem decay --set-not-before now   # Stamp the epoch (no pass), then run decay later
     """
-    from surreal_memory.engine.lifecycle import DecayManager
+    from surreal_memory.engine.lifecycle import (
+        DECAY_EPOCH_KEY,
+        DecayEpochError,
+        DecayManager,
+        parse_decay_epoch,
+    )
+    from surreal_memory.utils.timeutils import utcnow
+
+    def _epoch_arg(raw: str | None) -> Any:
+        if raw is not None and raw.strip().lower() == "now":
+            return utcnow()
+        return parse_decay_epoch(raw)
+
+    try:
+        epoch_for_pass = _epoch_arg(not_before)
+        epoch_to_store = _epoch_arg(set_not_before)
+    except DecayEpochError as exc:
+        typer.echo(f"Decay refused: {exc}", err=True)
+        raise typer.Exit(code=2) from exc
+    if epoch_to_store is not None and (dry_run or epoch_for_pass is not None):
+        typer.echo("--set-not-before cannot be combined with --dry-run/--not-before", err=True)
+        raise typer.Exit(code=2)
+
+    # Trial instruments (KC-4 needs "reference_time = T0 -> decayed = 0" through the CLI).
+    reference_for_pass: datetime | None = None
+    if reference_time is not None:
+        try:
+            reference_for_pass = _epoch_arg(reference_time)
+        except DecayEpochError as exc:
+            typer.echo(f"Decay refused: --reference-time: {exc}", err=True)
+            raise typer.Exit(code=2) from exc
+        if reference_for_pass is None:
+            typer.echo("Decay refused: --reference-time is empty", err=True)
+            raise typer.Exit(code=2)
+    if rate is not None and not (math.isfinite(rate) and rate > 0):
+        typer.echo(f"Decay refused: --rate must be a finite number > 0 (got {rate})", err=True)
+        raise typer.Exit(code=2)
+    trial = reference_for_pass is not None or rate is not None
+    if trial and epoch_to_store is not None:
+        typer.echo("--reference-time/--rate cannot be combined with --set-not-before", err=True)
+        raise typer.Exit(code=2)
+    if trial and not dry_run and not allow_reference_time:
+        typer.echo(
+            "A writing pass with --reference-time/--rate is refused without "
+            "--allow-reference-time (use --dry-run for trials)",
+            err=True,
+        )
+        raise typer.Exit(code=2)
+
+    async def _set_epoch(storage: Any, brain_name: str) -> None:
+        brain_id = storage.brain_id
+        brain = await storage.get_brain(brain_id) if brain_id else None
+        if brain is None:
+            typer.echo(f"Brain '{brain_name}' not found; epoch not stored", err=True)
+            raise typer.Exit(code=1)
+        # Fingerprint the RAW brain row before and after (ignoring only the epoch key):
+        # the dataclass comparison below cannot see a save that rewrites config/metadata.
+        try:
+            fp_before = await storage.brain_row_fingerprint(
+                brain_id, ignore_metadata_key=DECAY_EPOCH_KEY
+            )
+        except Exception as exc:
+            typer.echo(
+                f"Cannot fingerprint the brain row ({exc!r}); epoch not stored (fail closed)",
+                err=True,
+            )
+            raise typer.Exit(code=1) from exc
+        if fp_before is None:
+            typer.echo(f"Brain '{brain_name}' row not found; epoch not stored", err=True)
+            raise typer.Exit(code=1)
+        config_before = brain.config
+        brain.metadata[DECAY_EPOCH_KEY] = epoch_to_store.isoformat()
+        await storage.save_brain(brain)
+        check = await storage.get_brain(brain_id)
+        stored = None if check is None else check.metadata.get(DECAY_EPOCH_KEY)
+        try:
+            ok = parse_decay_epoch(stored) == epoch_to_store
+        except DecayEpochError:
+            ok = False
+        if not ok or check is None or check.config != config_before:
+            typer.echo(
+                f"Epoch read-back FAILED (stored={stored!r}, config unchanged="
+                f"{check is not None and check.config == config_before}); inspect the brain row",
+                err=True,
+            )
+            raise typer.Exit(code=1)
+        try:
+            fp_after = await storage.brain_row_fingerprint(
+                brain_id, ignore_metadata_key=DECAY_EPOCH_KEY
+            )
+        except Exception as exc:
+            typer.echo(f"Cannot re-fingerprint the brain row ({exc!r}); inspect it", err=True)
+            raise typer.Exit(code=1) from exc
+        if fp_after != fp_before:
+            typer.echo(
+                "Brain row CHANGED beyond metadata.decay_not_before "
+                f"(sha256 {fp_before} -> {fp_after}); restore the row from the snapshot",
+                err=True,
+            )
+            raise typer.Exit(code=1)
+        typer.echo(f"Decay epoch stored and verified: {epoch_to_store.isoformat()}")
+        typer.echo(f"Brain row sha256 (epoch key excluded) unchanged: {fp_after}")
 
     async def _decay() -> None:
         config = get_config()
@@ -441,15 +590,39 @@ def decay(
 
         storage = await get_storage(config, brain_name=brain_name)
 
+        if epoch_to_store is not None:
+            await _set_epoch(storage, brain_name)
+            return
+
         from surreal_memory.unified_config import get_config as get_unified_config
 
         unified = get_unified_config()
         manager = DecayManager(
-            decay_rate=unified.brain.decay_rate,
+            decay_rate=unified.brain.decay_rate if rate is None else rate,
             prune_threshold=prune_threshold,
+            not_before=epoch_for_pass,
+            require_epoch=require_epoch,
         )
 
-        report = await manager.apply_decay(storage, dry_run=dry_run)
+        from surreal_memory.engine.lifecycle import DecayRefusedError
+
+        try:
+            # Resolve (fail-closed) and print the epoch BEFORE any write, "none" included,
+            # then pin it so the pass uses exactly what was shown.
+            epoch_in_force = await manager.resolve_epoch(storage)
+            typer.echo(
+                "Decay epoch (not_before): "
+                + ("none" if epoch_in_force is None else epoch_in_force.isoformat())
+            )
+            if epoch_in_force is not None:
+                manager.not_before = epoch_in_force
+            report = await manager.apply_decay(
+                storage, reference_time=reference_for_pass, dry_run=dry_run
+            )
+        except DecayRefusedError as exc:
+            # Includes DecayEpochError (a malformed stored epoch): never a silent rc 0.
+            typer.echo(f"Decay refused: {exc}", err=True)
+            raise typer.Exit(code=3) from exc
 
         typer.echo("")
         typer.echo(report.summary())

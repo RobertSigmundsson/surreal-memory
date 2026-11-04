@@ -1179,7 +1179,10 @@ class ReflexPipeline:
                 except Exception:
                     logger.debug("Reinforcement failed (non-critical)", exc_info=True)
 
-            # 9. Track access time for lifecycle heat scoring (batch update, non-critical)
+            # 9. Historical hook, currently a NO-OP on every backend (nothing is written
+            # and heat scoring does not read it: recency/frequency live in
+            # neuron_state, written by reinforcement above). Kept as the single seam
+            # should a neuron_state-backed access time ever be added.
             if activations:
                 try:
                     await self._storage.batch_update_last_accessed(list(activations.keys()))

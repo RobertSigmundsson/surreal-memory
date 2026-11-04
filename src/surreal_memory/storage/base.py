@@ -5,6 +5,7 @@ from __future__ import annotations
 import random
 from abc import ABC, abstractmethod
 from collections.abc import AsyncIterator
+from dataclasses import replace as dc_replace
 from datetime import datetime
 from typing import TYPE_CHECKING, Any, Literal
 
@@ -330,6 +331,24 @@ class NeuralStorage(ABC):
             state: The state to save
         """
         ...
+
+    async def update_neuron_decay_fields(
+        self, neuron_id: str, *, activation_level: float, last_decayed: datetime
+    ) -> None:
+        """Write ONLY ``activation_level`` and ``last_decayed`` of one neuron state.
+
+        Decay owns exactly these two fields. It must never write back the rest of a
+        state it read earlier (``last_activated``, ``access_frequency``, ...): a
+        reinforce that landed after the read would be rolled back. Backends should
+        override with a field-level merge; this default re-reads the current state
+        right before writing, which narrows (but cannot close) the race.
+        """
+        current = await self.get_neuron_state(neuron_id)
+        if current is None:
+            return
+        await self.update_neuron_state(
+            dc_replace(current, activation_level=activation_level, last_decayed=last_decayed)
+        )
 
     async def update_neuron_states_batch(self, states: list[NeuronState]) -> None:
         """Update multiple neuron states in one batch operation.
@@ -989,6 +1008,26 @@ class NeuralStorage(ABC):
             The brain if found, None otherwise
         """
         ...
+
+    async def get_brain_strict(self, brain_id: str) -> Brain | None:
+        """Get brain metadata, letting read errors propagate.
+
+        ``None`` means the row genuinely does not exist. Backends whose
+        :meth:`get_brain` swallows read errors (SurrealDB) override this so safety
+        decisions (the decay epoch) can tell "absent" from "could not read".
+        """
+        return await self.get_brain(brain_id)
+
+    async def brain_row_fingerprint(
+        self, brain_id: str, *, ignore_metadata_key: str | None = None
+    ) -> str | None:
+        """sha256 of the raw stored ``brain`` row, optionally ignoring one metadata key.
+
+        ``None`` when the row does not exist. Lets a caller that writes a single
+        ``metadata`` key prove, before/after, that nothing else in the row moved.
+        Backends that cannot produce it raise ``NotImplementedError`` (callers fail closed).
+        """
+        raise NotImplementedError
 
     async def find_brain_by_name(self, name: str) -> Brain | None:
         """Find a brain by its name.
@@ -2034,15 +2073,25 @@ class NeuralStorage(ABC):
     # ========== Access Tracking Operations ==========
 
     async def batch_update_last_accessed(self, neuron_ids: list[str]) -> None:
-        """Update last_accessed_at for neurons in batch (single SQL UPDATE).
+        """NO-OP on every shipped backend: nothing is written, nothing reads it.
 
-        Called after successful recall to track which neurons were activated.
-        Default is a no-op; SQLite backend overrides for efficiency.
+        The only implementation was the SQLite one, which disappeared with that
+        backend (#141); the SurrealDB backend inherits this stub. The columns
+        ``neuron.last_accessed_at`` / ``access_frequency`` / ``last_activated`` are
+        legacy: no writer, no reader. The source of truth for recency and frequency is
+        ``neuron_state.last_activated`` / ``neuron_state.access_frequency``, written by
+        reinforcement (and sleep replay) and read by heat scoring, tiering and dormancy.
+
+        Writing ``neuron.last_accessed_at`` here would be harmful, not just useless:
+        ``neuron`` has a changefeed whose after-image carries the embedding (~21 KB),
+        and each event also breaks the strict ``semantic_link`` source fence. Do not
+        "fix" this by writing to ``neuron``; if per-neuron access times are ever needed
+        they belong in ``neuron_state`` (outside the feed) with a consumer.
 
         Args:
-            neuron_ids: List of neuron IDs whose last_accessed_at should be updated.
+            neuron_ids: Ignored.
         """
-        return  # No-op default; SQLite backend overrides.
+        return  # Deliberate no-op; see above.
 
     # ========== Lifecycle State Operations ==========
 
