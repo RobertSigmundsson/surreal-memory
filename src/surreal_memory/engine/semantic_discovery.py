@@ -1238,13 +1238,14 @@ async def _discover_semantic_synapses_resumable(
         saved = dict(legacy_checkpoint)
     else:
         saved = manifest
+    epoch_needs_fresh_state_id = False
     if durable_neuron_state is not None:
         # Every owner epoch writes its snapshots under a fresh state_id. A previous epoch may
         # have saved revision N+1 and died before publishing the manifest pointer; re-saving
         # (state_id, N+1) with different content would collide with that orphan ("immutable
         # state revision was retried with conflicting content"). The snapshot loaded above stays
         # reachable through the manifest pointer until this epoch's first publish re-points it.
-        state_id, state_revision = str(uuid.uuid4()), 0
+        epoch_needs_fresh_state_id = True
     saved_stage = str(saved.get("stage") or "")
     saved_version = saved.get("version")
     saved_cursor = saved.get("cursor")
@@ -1561,10 +1562,19 @@ async def _discover_semantic_synapses_resumable(
     async def write_source_checkpoint(
         stage: str, cursor: str | None, *, preserve_legacy_cursor: bool = False
     ) -> None:
-        nonlocal state_revision
+        nonlocal state_id, state_revision, epoch_needs_fresh_state_id
         save = getattr(storage, "save_semantic_discovery_state", None)
         if not callable(save):
             raise RuntimeError("storage cannot save semantic_link staged source state")
+        if epoch_needs_fresh_state_id:
+            # The fresh state_id is allocated lazily, at this epoch's FIRST save. Until then the
+            # loaded (state_id, revision) stays the published reference: an epoch that resumes at
+            # the final similarity checkpoint and finishes without saving must not hand the apply
+            # manifest a revision-0 reference to a snapshot that was never written.
+            state_id, state_revision = str(uuid.uuid4()), 0
+            source_rebuild["state_id"] = state_id
+            source_rebuild["state_revision"] = 0
+            epoch_needs_fresh_state_id = False
         next_revision = state_revision + 1
         source_snapshot = source_rebuild_snapshot()
         source_snapshot["state_id"] = state_id
