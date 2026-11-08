@@ -27,7 +27,7 @@ import logging
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
-from typing import Annotated, Any, Literal
+from typing import Annotated, Any, Literal, get_args
 
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
@@ -51,6 +51,19 @@ _ZAKRES_TRASY: dict[str, Zakres] = {
 TOR_HTTP_PATTERN = r"^http:[a-z0-9][a-z0-9-]{0,31}$"
 AGENT_ID_PATTERN = r"^[A-Za-z0-9._:@-]+$"
 SESSION_ID_PATTERN = r"^[A-Za-z0-9._:@|-]+$"
+IDEM_PATTERN = r"^[A-Za-z0-9._:-]+$"
+# Why a write happens (program hermes-zapis-przez-silnik): lands in ``stored_by.intencja`` and in the
+# SHADOW ``gate_decision`` row; ``jawny`` = an explicit write (today's behaviour of every old client).
+Intencja = Literal[
+    "jawny",
+    "tura",
+    "przed_kompresja",
+    "delegacja",
+    "lustro",
+    "wynik_zadania",
+    "domkniecie",
+]
+INTENCJE: tuple[str, ...] = get_args(Intencja)
 # Memory types a pod may write (HIPOTEZA polityki D-U2.c): no boundary/instruction/preference and
 # no cognitive-layer types — those steer every agent and Robert's sessions.
 POD_MEMORY_TYPES = (
@@ -172,6 +185,10 @@ class RememberIn(BaseModel):
     agent_id: str = Field(min_length=1, max_length=120, pattern=AGENT_ID_PATTERN)
     tor: str = Field(pattern=TOR_HTTP_PATTERN)
     session_id: str | None = Field(default=None, max_length=128, pattern=SESSION_ID_PATTERN)
+    # Optional since hermes-zapis-przez-silnik: an old client that sends none of them is served exactly as before.
+    intencja: Intencja = "jawny"
+    idem: str | None = Field(default=None, min_length=1, max_length=64, pattern=IDEM_PATTERN)
+    autor: str | None = Field(default=None, min_length=1, max_length=120, pattern=AGENT_ID_PATTERN)
 
     @field_validator("content")
     @classmethod
@@ -196,6 +213,8 @@ class RememberOut(BaseModel):
     agent_id: str
     tor: str
     elapsed_ms: float
+    # True only on an idempotent repeat (same ``idem``): nothing was written, the answer names the first fiber.
+    powtorzenie: bool | None = None
 
 
 class BladSzczegol(BaseModel):
@@ -230,12 +249,78 @@ def _new_counters() -> dict[str, int]:
         "remember_ok": 0,
         "remember_odrzucone": 0,
         "remember_err": 0,
+        "remember_powtorzenie": 0,
         "recall_cli_ok": 0,
     }
 
 
 def _bledy(*codes: int) -> dict[int | str, dict[str, Any]]:
     return {c: {"model": BladOut} for c in codes}
+
+
+_IDEM_SKAN_LIMIT = (
+    5000  # backends without SurrealDB: how many newest fibers a repeat check may scan
+)
+
+
+async def _fiber_po_idem(storage: Any, idem: str) -> tuple[str, str] | None:
+    """The fiber an earlier write stored under this ``idem`` (``stored_by.idem``), as ``(fiber_id, anchor_neuron_id)``.
+
+    Called under ``zapis_lock``, so a repeat that arrives while the first write is still encoding waits and
+    then finds it. SurrealDB: one filtered select over the brain's fibers (``idx_fiber_brain``, no new index —
+    measured 385 ms at 3 242 fibers, small against a write); other backends: a bounded scan of the newest fibers.
+    """
+    zapytaj = getattr(storage, "_query", None)
+    if callable(zapytaj):
+        from surreal_memory.storage.surrealdb._ids import _to_public_id
+
+        rows = await zapytaj(
+            "SELECT id, anchor_neuron_id FROM fiber WHERE brain_id = $brain_id "
+            "AND metadata.stored_by.idem = $idem LIMIT 1",
+            brain_id=storage.brain_id,
+            idem=idem,
+        )
+        if rows:
+            return _to_public_id(str(rows[0]["id"])), str(rows[0].get("anchor_neuron_id") or "")
+        return None
+    for fiber in await storage.get_fibers(limit=_IDEM_SKAN_LIMIT):
+        stored_by = (fiber.metadata or {}).get("stored_by")
+        if isinstance(stored_by, dict) and stored_by.get("idem") == idem:
+            return fiber.id, fiber.anchor_neuron_id
+    return None
+
+
+async def _dziennik_shadow(storage: Any, req: RememberIn, tresc: str) -> None:
+    """SHADOW write-gate row for one stored write: scores the content, logs it, never blocks or raises.
+
+    ``source="recall-http"`` tells these rows from the host CLI's and hooks' (``"engine"``); ``intent`` is the
+    caller's ``intencja``. A failing gate or a failing insert only costs the row (debug log), never the write.
+    """
+    try:
+        from surreal_memory.engine.gate_telemetry import log_gate_decision
+        from surreal_memory.engine.quality_scorer import check_write_gate
+        from surreal_memory.unified_config import get_config
+
+        ocena = check_write_gate(
+            tresc,
+            gate_config=get_config().write_gate,
+            is_auto_capture=False,
+            memory_type=req.type,
+            tags=list(req.tags) or None,
+        )
+        await log_gate_decision(
+            storage,
+            intent=req.intencja,
+            accepted=not ocena.rejected,
+            reason=ocena.rejection_reason or "accept",
+            score=ocena.score,
+            mode="shadow",
+            content=tresc,
+            agent_id=req.agent_id,
+            source="recall-http",
+        )
+    except Exception:
+        logger.debug("recall-http: wiersz SHADOW bramki nie powstal (niekrytyczne)", exc_info=True)
 
 
 def create_app(
@@ -629,9 +714,60 @@ def create_app(
                 if brain is None:
                     counters["503"] += 1
                     return JSONResponse({"error": "No brain configured"}, status_code=503)
-                stored_by = {"agent_id": req.agent_id, "tor": req.tor, "kanal": "recall-http"}
+                if req.idem is not None:
+                    # Fail CLOSED: when the repeat check cannot run, an error (the caller retries with the same
+                    # idem) is safer than a possible duplicate.
+                    try:
+                        znaleziony = await _fiber_po_idem(storage, req.idem)
+                    except Exception:
+                        counters["remember_err"] += 1
+                        raise
+                    if znaleziony is not None:
+                        counters["remember_powtorzenie"] += 1
+                        sha_p = hashlib.sha256(chk.content.encode("utf-8")).hexdigest()
+                        ms_p = (time.perf_counter() - t0) * 1000.0
+                        logger.info(
+                            "remember tor=%s agent=%s sesja=%s tresc=%s dl=%d typ=%s intencja=%s fiber=%s "
+                            "ms=%.0f wynik=powtorzenie",
+                            req.tor,
+                            req.agent_id,
+                            req.session_id or "-",
+                            sha_p[:8],
+                            len(chk.content),
+                            req.type,
+                            req.intencja,
+                            znaleziony[0],
+                            ms_p,
+                        )
+                        return {
+                            "message": f"Already stored (idem): {chk.content[:50]}"
+                            f"{'...' if len(chk.content) > 50 else ''}",
+                            "fiber_id": znaleziony[0],
+                            "memory_type": mem_type.value,
+                            "priority": mem_priority.name.lower(),
+                            "neurons_created": 0,
+                            "neurons_linked": 0,
+                            "synapses_created": 0,
+                            "anchor_neuron_id": znaleziony[1],
+                            "content_sha256": sha_p,
+                            "oczyszczone": oczyszczone,
+                            "agent_id": req.agent_id,
+                            "tor": req.tor,
+                            "elapsed_ms": ms_p,
+                            "powtorzenie": True,
+                        }
+                stored_by = {
+                    "agent_id": req.agent_id,
+                    "tor": req.tor,
+                    "kanal": "recall-http",
+                    "intencja": req.intencja,
+                }
                 if req.session_id:
                     stored_by["session_id"] = req.session_id
+                if req.autor:
+                    stored_by["autor"] = req.autor
+                if req.idem:
+                    stored_by["idem"] = req.idem
                 try:
                     stored = await remember_api.encode_and_store(
                         storage,
@@ -655,6 +791,7 @@ def create_app(
         finally:
             zapis_lock.release()
 
+        await _dziennik_shadow(storage, req, chk.content)
         body = remember_api.response_dict(
             stored,
             content=chk.content,
@@ -678,7 +815,7 @@ def create_app(
         )
         counters["remember_ok"] += 1
         logger.info(
-            "remember tor=%s agent=%s sesja=%s tresc=%s dl=%d typ=%s tagi=%d fiber=%s kotwica=%s "
+            "remember tor=%s agent=%s sesja=%s tresc=%s dl=%d typ=%s intencja=%s tagi=%d fiber=%s kotwica=%s "
             "neurony=%d synapsy=%d oczyszczone=%s ms=%.0f bariera=%.0f wynik=ok",
             req.tor,
             req.agent_id,
@@ -686,6 +823,7 @@ def create_app(
             sha[:8],
             len(chk.content),
             req.type,
+            req.intencja,
             len(req.tags),
             stored.fiber_id,
             stored.anchor_neuron_id,

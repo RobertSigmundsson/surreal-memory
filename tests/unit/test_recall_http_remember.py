@@ -394,6 +394,7 @@ def test_health_keeps_old_counters_and_adds_new(tmp_path: Path) -> None:
         "remember_ok",
         "remember_odrzucone",
         "remember_err",
+        "remember_powtorzenie",  # hermes-zapis-przez-silnik: powtórzenia idempotentne (`idem`)
         "recall_cli_ok",
     }
     assert old | new == set(got["liczniki"])

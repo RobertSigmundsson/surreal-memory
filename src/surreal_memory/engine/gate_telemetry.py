@@ -38,8 +38,13 @@ async def log_gate_decision(
     mode: str,
     content: str,
     agent_id: str = "",
+    source: str = "engine",
 ) -> None:
-    """Best-effort insert of one gate decision (both SHADOW and ENFORCE log)."""
+    """Best-effort insert of one gate decision (both SHADOW and ENFORCE log).
+
+    ``source`` names the writer that produced the row (default ``"engine"`` = the host CLI, hooks and MCP);
+    the recall-http shim passes ``"recall-http"`` so its SHADOW rows can be told apart from theirs.
+    """
     try:
         from surreal_memory.utils.timeutils import utcnow
 
@@ -58,7 +63,7 @@ async def log_gate_decision(
                 "lang_hint": _lang_hint(s),
                 "agent_id": agent_id,
                 "mode": mode,
-                "source": "engine",
+                "source": source,
             },
         )
     except Exception:

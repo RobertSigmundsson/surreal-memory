@@ -912,6 +912,48 @@
               }
             ],
             "title": "Session Id"
+          },
+          "intencja": {
+            "type": "string",
+            "enum": [
+              "jawny",
+              "tura",
+              "przed_kompresja",
+              "delegacja",
+              "lustro",
+              "wynik_zadania",
+              "domkniecie"
+            ],
+            "title": "Intencja",
+            "default": "jawny"
+          },
+          "idem": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 64,
+                "minLength": 1,
+                "pattern": "^[A-Za-z0-9._:-]+$"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Idem"
+          },
+          "autor": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 120,
+                "minLength": 1,
+                "pattern": "^[A-Za-z0-9._:@-]+$"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Autor"
           }
         },
         "additionalProperties": false,
@@ -989,6 +1031,17 @@
           "elapsed_ms": {
             "type": "number",
             "title": "Elapsed Ms"
+          },
+          "powtorzenie": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Powtorzenie"
           }
         },
         "type": "object",
