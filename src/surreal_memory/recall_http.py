@@ -700,6 +700,7 @@ def create_app(
         expiry_days = remember_api.resolve_expiry_days(mem_type, None, ephemeral=False)
         mem_priority, jawny = remember_api.resolve_priority(req.priority)
 
+        t_zapis0 = time.monotonic()
         try:
             await asyncio.wait_for(zapis_lock.acquire(), timeout=zapis_wait_s)
         except TimeoutError:
@@ -707,7 +708,10 @@ def create_app(
             return JSONResponse({"error": "busy"}, status_code=503, headers={"Retry-After": "2"})
         try:
             try:
-                await asyncio.wait_for(sem.acquire(), timeout=zapis_wait_s)
+                # ŁĄCZNY budżet oczekiwania zapisu (zamek + slot) = zapis_wait_s: klient wie, po ilu sekundach najpóźniej dostanie odpowiedź
+                await asyncio.wait_for(
+                    sem.acquire(), timeout=max(0.001, zapis_wait_s - (time.monotonic() - t_zapis0))
+                )
             except TimeoutError:
                 counters["503"] += 1
                 return JSONResponse(
