@@ -38,6 +38,13 @@ def recall_http(
     queue_timeout_s: Annotated[
         float, typer.Option("--queue-timeout", help="Seconds to wait for a slot, then 503")
     ] = 2.0,
+    zapis_queue_timeout_s: Annotated[
+        float,
+        typer.Option(
+            "--zapis-queue-timeout",
+            help="Seconds a /v1/remember waits for its turn (write lock and slot) before 503 busy + Retry-After; a write takes ~6 s and writes are serialized",
+        ),
+    ] = 30.0,
     trace: Annotated[
         str,
         typer.Option("--trace", help="force = every recall writes a trace; config = obey [trace]"),
@@ -114,6 +121,7 @@ def recall_http(
         remember_key=remember_key,
         max_concurrency=max_concurrency,
         queue_timeout_s=queue_timeout_s,
+        zapis_queue_timeout_s=zapis_queue_timeout_s,
         trace_mode="force" if trace == "force" else "config",
         reconsolidate=reconsolidate,
         skutki="odroczone" if skutki == "odroczone" else "inline",

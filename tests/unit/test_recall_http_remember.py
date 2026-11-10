@@ -332,7 +332,87 @@ async def test_busy_write_lock_gives_503_and_writes_are_serialized() -> None:
             gate.set()
             r1 = await first
     assert (r1.status_code, second.status_code) == (200, 503)
+    assert second.headers.get("retry-after") == "2", (
+        "503 busy zapisu niesie Retry-After (klient wie, że to „wróć później”)"
+    )
     assert order == ["start", "end"]
+
+
+@pytest.mark.asyncio
+async def test_second_write_waits_for_its_turn_when_zapis_queue_timeout_is_long() -> None:
+    """P-5: zapis ~6 s + serializacja ⇒ przy limicie odczytu (2 s) drugi jednoczesny zapis dostawał 503; z długim `zapis_queue_timeout_s` czeka i dostaje 200."""
+    s, app = await _astorage(), _app(queue_timeout_s=0.05, zapis_queue_timeout_s=5.0)
+    gate = asyncio.Event()
+    orig = remember_api.encode_and_store
+    order: list[str] = []
+
+    async def slow(*a: Any, **kw: Any) -> Any:
+        order.append("start")
+        await gate.wait()
+        out = await orig(*a, **kw)
+        order.append("end")
+        return out
+
+    async def _get() -> Any:
+        return s
+
+    with (
+        patch.object(remember_api, "encode_and_store", slow),
+        patch("surreal_memory.unified_config.get_shared_storage", _get),
+    ):
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://t"
+        ) as c:
+            first = asyncio.create_task(c.post("/v1/remember", json=BODY, headers=WRITE))
+            await asyncio.sleep(0.02)
+            second = asyncio.create_task(
+                c.post("/v1/remember", json={**BODY, "content": TEXT + " drugi"}, headers=WRITE)
+            )
+            await asyncio.sleep(
+                0.3
+            )  # dłużej niż queue_timeout_s=0.05: bez poprawki drugi byłby już 503
+            assert not second.done(), "drugi zapis czeka w kolejce, nie dostał 503"
+            gate.set()
+            r1, r2 = await first, await second
+    assert (r1.status_code, r2.status_code) == (200, 200)
+    assert order == ["start", "end", "start", "end"], "zapisy nadal serializowane"
+
+
+@pytest.mark.asyncio
+async def test_write_still_gets_503_after_zapis_queue_timeout() -> None:
+    s, app = await _astorage(), _app(queue_timeout_s=5.0, zapis_queue_timeout_s=0.05)
+    gate = asyncio.Event()
+    orig = remember_api.encode_and_store
+
+    async def slow(*a: Any, **kw: Any) -> Any:
+        await gate.wait()
+        return await orig(*a, **kw)
+
+    async def _get() -> Any:
+        return s
+
+    with (
+        patch.object(remember_api, "encode_and_store", slow),
+        patch("surreal_memory.unified_config.get_shared_storage", _get),
+    ):
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://t"
+        ) as c:
+            first = asyncio.create_task(c.post("/v1/remember", json=BODY, headers=WRITE))
+            await asyncio.sleep(0.02)
+            t0 = asyncio.get_running_loop().time()
+            second = await c.post(
+                "/v1/remember", json={**BODY, "content": TEXT + " trzeci"}, headers=WRITE
+            )
+            czekal = asyncio.get_running_loop().time() - t0
+            gate.set()
+            r1 = await first
+    assert (r1.status_code, second.status_code) == (200, 503), (
+        "limit zapisu rządzi czekaniem zapisu, nie limit odczytu"
+    )
+    assert czekal < 2.0, (
+        f"503 po zapis_queue_timeout_s=0.05, nie po queue_timeout_s=5 (czekał {czekal:.2f} s)"
+    )
 
 
 @pytest.mark.asyncio

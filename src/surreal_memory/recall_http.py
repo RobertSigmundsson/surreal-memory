@@ -329,6 +329,7 @@ def create_app(
     remember_key: str | None = None,
     max_concurrency: int = 4,
     queue_timeout_s: float = 2.0,
+    zapis_queue_timeout_s: float | None = None,
     trace_mode: TraceMode = "force",
     reconsolidate: bool = True,
     skutki: Skutki = "inline",
@@ -348,6 +349,9 @@ def create_app(
         if hmac.compare_digest(zapis_bytes, key_bytes):
             raise ValueError("remember key must differ from the read key")
     zapis_lock = asyncio.Lock()
+    # Zapis trwa ~6 s (encode_and_store) i jest serializowany przez zapis_lock: przy limicie odczytu (2 s) KAŻDY drugi jednoczesny zapis dostawał 503 mimo że po chwili byłby obsłużony.
+    # Zapisy czekają więc na swoją kolej dłużej (zapis_queue_timeout_s); nadal 503 + Retry-After po jego upływie. None = jak queue_timeout_s (zgodność wsteczna, testy).
+    zapis_wait_s = queue_timeout_s if zapis_queue_timeout_s is None else zapis_queue_timeout_s
     counters = _new_counters()
     trace_tasks: set[asyncio.Task[None]] = set()
     # skutki="odroczone": post-answer side effects + trace of recalls already answered. The
@@ -697,16 +701,18 @@ def create_app(
         mem_priority, jawny = remember_api.resolve_priority(req.priority)
 
         try:
-            await asyncio.wait_for(zapis_lock.acquire(), timeout=queue_timeout_s)
+            await asyncio.wait_for(zapis_lock.acquire(), timeout=zapis_wait_s)
         except TimeoutError:
             counters["503"] += 1
-            return JSONResponse({"error": "busy"}, status_code=503)
+            return JSONResponse({"error": "busy"}, status_code=503, headers={"Retry-After": "2"})
         try:
             try:
-                await asyncio.wait_for(sem.acquire(), timeout=queue_timeout_s)
+                await asyncio.wait_for(sem.acquire(), timeout=zapis_wait_s)
             except TimeoutError:
                 counters["503"] += 1
-                return JSONResponse({"error": "busy"}, status_code=503)
+                return JSONResponse(
+                    {"error": "busy"}, status_code=503, headers={"Retry-After": "2"}
+                )
             try:
                 bariera_ms = await _bariera()
                 storage = await get_shared_storage()
