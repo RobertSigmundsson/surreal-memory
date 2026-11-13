@@ -167,22 +167,24 @@ async def flush_text(
         base_tags = {"emergency_flush", "pre_compact"}
         if project_name:
             base_tags.add(f"project:{project_name}")
-        # Detect ALL memory types with emergency settings
+        # Which types are detected is the operator's call: ``[auto] capture_<type>``.
         detected = analyze_text_for_memories(
             text,
-            capture_decisions=True,
-            capture_errors=True,
-            capture_todos=True,
-            capture_facts=True,
-            capture_insights=True,
-            capture_preferences=True,
+            capture_decisions=config.auto.capture_decisions,
+            capture_errors=config.auto.capture_errors,
+            capture_todos=config.auto.capture_todos,
+            capture_facts=config.auto.capture_facts,
+            capture_insights=config.auto.capture_insights,
+            capture_preferences=config.auto.capture_preferences,
         )
 
         if not detected:
             return {"saved": 0, "message": "No memorable content detected"}
 
-        # Emergency threshold: more aggressive than normal
-        eligible = [item for item in detected if item["confidence"] >= EMERGENCY_THRESHOLD]
+        # Emergency threshold: more aggressive than normal, but never below what the
+        # operator asked for in ``[auto] min_confidence`` (the Stop hook already obeys it).
+        threshold = max(EMERGENCY_THRESHOLD, config.auto.min_confidence)
+        eligible = [item for item in detected if item["confidence"] >= threshold]
         if not eligible:
             return {"saved": 0, "message": "No memories met emergency threshold"}
 
@@ -346,7 +348,7 @@ async def flush_text(
             "saved": len(saved),
             "memories": saved,
             "mode": "emergency_flush",
-            "threshold": EMERGENCY_THRESHOLD,
+            "threshold": threshold,
             "message": message,
         }
     finally:

@@ -511,14 +511,15 @@ async def capture_text(
         if project_name:
             base_tags.add(f"project:{project_name}")
 
+        # Which types are detected is the operator's call: ``[auto] capture_<type>``.
         detected = analyze_text_for_memories(
             text,
-            capture_decisions=True,
-            capture_errors=True,
-            capture_todos=True,
-            capture_facts=True,
-            capture_insights=True,
-            capture_preferences=True,
+            capture_decisions=config.auto.capture_decisions,
+            capture_errors=config.auto.capture_errors,
+            capture_todos=config.auto.capture_todos,
+            capture_facts=config.auto.capture_facts,
+            capture_insights=config.auto.capture_insights,
+            capture_preferences=config.auto.capture_preferences,
         )
 
         # Use configured threshold (or DEFAULT_CONFIDENCE as floor)
