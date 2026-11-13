@@ -1,8 +1,10 @@
 """W-4 (smem-higiena-autocapture): bramka punktowa na korpusie — POS-K, NEG i selektywność S0.
 
 * POS-K (``pos-kontrolne.jsonl``, 50 świadomych zapisów ``source='user_input'``) przez ``check_write_gate`` z kontekstem haka
-  stop i domyślną konfiguracją gałęzi (+ ``enforce``) ⇒ ≥ 95 % przyjętych (KA.10); kontrola pozytywna: pozycji ≥ 40;
-  kontrola zerowa / mutant „bramka odrzuca wszystko” ⇒ ten sam przyrząd daje 0 % ⇒ czerwony.
+  stop i domyślną konfiguracją gałęzi (+ ``enforce``) ⇒ test RAPORTUJE ``przyjęte POS-K = n/N`` (kryteria v1.4: liczba
+  raportowana z dolnym progiem regresji n ≥ 18; W-4b, próg domyślny 5); kontrola pozytywna: pozycji ≥ 40; mutant „odrzuca
+  wszystko” ⇒ 0 (asercja dolnego progu CZERWONA), „akceptuje wszystko” ⇒ N (próg spełniony) — przyrząd liczy, nie zakłada.
+* W∩POS-K (pozycje WARTOSCIOWE u A-r1 ∩ B-r3): TYLKO pomiar ``przyjęte W∩POS-K = m/k``, bez progu (próg liczy przyrząd runnera).
 * NEG (150 wpisów, które nie są wypowiedzią człowieka) przez ``read_transcript_tail`` haka stop, detektor i bramkę ⇒ 0 przyjętych.
 * S0 (selektywność): przyrząd ``qa/u1b-pomiary/s0_selektywnosc.py`` uruchomiony na tym drzewie ⇒ odrzuca ≥ 14 i > 5 z 31
   (``WYNIK: PASS``); kontrola: ten sam przyrząd na wariancie „kod przed W-4” (``V0_kod_dzis_prog5``) ⇒ ``FAIL``.
@@ -32,7 +34,7 @@ from surreal_memory.unified_config import WriteGateConfig
 
 KORPUS_ENV = "KORPUS_DETEKTORA"
 POSK_MIN_LICZNOSC = 40
-POSK_PROG = 0.95
+POSK_DOLNY_PROG = 18  # pomiar projektu H1 + próg 5 (13.11); „nie gorzej niż zmierzony projekt” — dolny próg regresji, nie cel
 TAGI_HAKA = ["stop_hook", "session_end", "project:uruboros"]
 
 
@@ -62,11 +64,10 @@ def _cfg_galezi() -> WriteGateConfig:
     return WriteGateConfig(enabled=True, mode="enforce", auto_capture_mode="enforce")
 
 
-def _posk_przyjete(bramka: Callable[..., Any]) -> tuple[int, int]:
-    """(liczba pozycji POS-K, przyjęte) — kontekst jak hak stop (``build_capture_context``)."""
-    pozycje = _wczytaj("pos-kontrolne.jsonl")
-    przyjete = 0
-    for p in pozycje:
+def _posk_wyniki(bramka: Callable[..., Any]) -> dict[str, bool]:
+    """id pozycji POS-K → czy przyjęta (kontekst jak hak stop, ``build_capture_context``)."""
+    wyniki: dict[str, bool] = {}
+    for p in _wczytaj("pos-kontrolne.jsonl"):
         wynik = bramka(
             p["tresc"],
             gate_config=_cfg_galezi(),
@@ -77,28 +78,49 @@ def _posk_przyjete(bramka: Callable[..., Any]) -> tuple[int, int]:
                 {"type": p["memory_type"], "confidence": 0.8}, source="stop_hook"
             ),
         )
-        if not wynik.rejected:
-            przyjete += 1
-    return len(pozycje), przyjete
+        wyniki[p["id"]] = not wynik.rejected
+    return wyniki
+
+
+def _posk_przyjete(bramka: Callable[..., Any]) -> tuple[int, int]:
+    """(liczba pozycji POS-K, przyjęte)."""
+    wyniki = _posk_wyniki(bramka)
+    return len(wyniki), sum(wyniki.values())
+
+
+def _asercja_dolnego_progu(przyjete: int) -> None:
+    """Dolny próg regresji POS-K (kryteria v1.4 KA.10): przyjęte ≥ ``POSK_DOLNY_PROG`` (H1 + próg 5 = 18/50)."""
+    assert przyjete >= POSK_DOLNY_PROG, (
+        f"POS-K: przyjęto {przyjete} (< dolny próg {POSK_DOLNY_PROG})"
+    )
 
 
 @wymaga_korpusu
 def test_posk_kontrola_pozytywna_liczebnosc() -> None:
-    """Kontrola pozytywna przyrządu: korpus ma ≥ 40 pozycji — inaczej „95 %” niczego nie dowodzi."""
+    """Kontrola pozytywna przyrządu: korpus ma ≥ 40 pozycji — inaczej liczba przyjętych niczego nie mówi."""
     n, _ = _posk_przyjete(check_write_gate)
     assert n >= POSK_MIN_LICZNOSC
 
 
 @wymaga_korpusu
-def test_posk_przyjete_co_najmniej_95_procent() -> None:
+def test_posk_raportuje_przyjete_liczone_przyrzadem(capsys: pytest.CaptureFixture[str]) -> None:
+    """POS-K to liczba RAPORTOWANA, nie próg (kryteria v1.4, D-18): przy progu 5 część świadomych zapisów odpada.
+
+    Test nie zakłada wyniku — liczy go przyrząd (``_posk_przyjete`` = ``check_write_gate`` z domyślną konfiguracją
+    gałęzi) i drukuje ``przyjęte POS-K = n/N``; asercje: poprawność przyrządu (liczność, zakres) i dolny próg regresji
+    ``przyjęte ≥ 18`` (kryteria v1.4; nie cel — wartość z pomiaru projektu H1 + próg 5).
+    """
     n, przyjete = _posk_przyjete(check_write_gate)
+    with capsys.disabled():
+        print(f"\nprzyjęte POS-K = {przyjete}/{n}")
     assert n >= POSK_MIN_LICZNOSC
-    assert przyjete / n >= POSK_PROG, f"POS-K: przyjęto {przyjete}/{n} (< {POSK_PROG:.0%})"
+    assert 0 <= przyjete <= n
+    _asercja_dolnego_progu(przyjete)
 
 
 @wymaga_korpusu
 def test_mutant_bramka_odrzuca_wszystko_jest_wykryty() -> None:
-    """Mutant: bramka odrzucająca wszystko ⇒ ten sam przyrząd daje 0 % ⇒ asercja 95 % byłaby CZERWONA."""
+    """Mutant: bramka odrzucająca wszystko ⇒ ten sam przyrząd daje 0 przyjętych (przyrząd liczy, nie zakłada)."""
 
     def odrzuca_wszystko(*_a: Any, **_k: Any) -> Any:
         return SimpleNamespace(rejected=True)
@@ -106,7 +128,63 @@ def test_mutant_bramka_odrzuca_wszystko_jest_wykryty() -> None:
     n, przyjete = _posk_przyjete(odrzuca_wszystko)
     assert n >= POSK_MIN_LICZNOSC
     assert przyjete == 0
-    assert not (przyjete / n >= POSK_PROG)
+    with pytest.raises(
+        AssertionError, match="dolny próg"
+    ):  # kontrola zerowa: asercja dolnego progu CZERWONA przy 0/N
+        _asercja_dolnego_progu(przyjete)
+
+
+@wymaga_korpusu
+def test_mutant_bramka_akceptuje_wszystko_daje_cala_liczbe_pozycji() -> None:
+    """Mutant: bramka akceptująca wszystko ⇒ ten sam przyrząd daje n/n; dolny próg spełniony (próg dolny, nie górny)."""
+
+    def akceptuje_wszystko(*_a: Any, **_k: Any) -> Any:
+        return SimpleNamespace(rejected=False)
+
+    n, przyjete = _posk_przyjete(akceptuje_wszystko)
+    assert n >= POSK_MIN_LICZNOSC
+    assert przyjete == n
+    _asercja_dolnego_progu(przyjete)
+
+
+def _etykiety_wartosciowe() -> set[str] | None:
+    """id oznaczone WARTOSCIOWE przez OBIE rodziny (A-r1 ∩ B-r3) albo None, gdy pliki etykiet są poza zasięgiem testu."""
+    if _KORPUS is None:
+        return None
+    vgate = _KORPUS.parent / "vgate"
+    zbiory = []
+    for nazwa in ("etykiety-A-r1.jsonl", "etykiety-B-r3.jsonl"):
+        plik = vgate / nazwa
+        if not plik.is_file():
+            return None
+        with open(plik, encoding="utf-8") as f:
+            wiersze = [json.loads(w) for w in f if w.strip()]
+        zbiory.append({w["id"] for w in wiersze if w["etykieta"] == "WARTOSCIOWE"})
+    return zbiory[0] & zbiory[1]
+
+
+@wymaga_korpusu
+def test_w_posk_raportuje_przyjete_bez_progu(capsys: pytest.CaptureFixture[str]) -> None:
+    """W∩POS-K (etykiety zgodne A∩B): TYLKO pomiar — drukuje ``przyjęte W∩POS-K = m/k``; progu tu nie ma (próg: przyrząd runnera)."""
+    w = _etykiety_wartosciowe()
+    if w is None:
+        pytest.skip(
+            "brak etykiet qa/vgate/etykiety-{A-r1,B-r3}.jsonl obok korpusu — W∩POS-K liczy przyrząd w qa/scripts"
+        )
+    wyniki = _posk_wyniki(check_write_gate)
+    wspolne = {i: v for i, v in wyniki.items() if i in w}
+    with capsys.disabled():
+        print(f"\nprzyjęte W∩POS-K = {sum(wspolne.values())}/{len(wspolne)}")
+    assert len(wspolne) > 0  # kontrola pozytywna: etykiety trafiają w id korpusu
+    _, akceptuje = _posk_przyjete_wspolne(lambda *a, **k: SimpleNamespace(rejected=False), w)
+    assert akceptuje == len(wspolne)  # mutant „akceptuje wszystko” ⇒ k/k
+    _, odrzuca = _posk_przyjete_wspolne(lambda *a, **k: SimpleNamespace(rejected=True), w)
+    assert odrzuca == 0  # mutant „odrzuca wszystko” ⇒ 0/k
+
+
+def _posk_przyjete_wspolne(bramka: Callable[..., Any], w: set[str]) -> tuple[int, int]:
+    wspolne = {i: v for i, v in _posk_wyniki(bramka).items() if i in w}
+    return len(wspolne), sum(wspolne.values())
 
 
 @wymaga_korpusu

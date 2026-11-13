@@ -267,6 +267,37 @@ class TestProvenanceContextEarnsNoPoints:
             )
             assert res.score == 4 and not res.rejected
 
+    def test_default_threshold_is_five_and_below_the_ceiling(self) -> None:
+        """W-4b: domyślny próg ścieżki auto == 5, a sufit (7) go osiąga — próg nie jest nieosiągalny."""
+        assert WriteGateConfig().auto_capture_min_score == 5
+
+    def test_provenance_only_context_scores_four_and_is_rejected_by_default_gate(self) -> None:
+        """Kontekst WYŁĄCZNIE z proweniencji = 4 pkt (długość 2 + tagi 1 + typ 1) < 5 ⇒ odrzucony domyślną bramką.
+
+        Dodanie klucza spoza proweniencji (+3) daje 7 ≥ 5 ⇒ przyjęty (kontrola pozytywna: próg nie odrzuca wszystkiego).
+        """
+        cfg = WriteGateConfig(enabled=True, mode="enforce", auto_capture_mode="enforce")
+        content = "x" * 60  # długość ≥ 50 ⇒ 2 pkt; bez markerów kognitywnych
+        ctx = build_capture_context({"type": "preference"}, source="stop_hook")
+        res = check_write_gate(
+            content,
+            gate_config=cfg,
+            is_auto_capture=True,
+            memory_type="preference",
+            tags=["stop_hook"],
+            context=ctx,
+        )
+        assert res.score == 4 and res.rejected
+        res_reason = check_write_gate(
+            content,
+            gate_config=cfg,
+            is_auto_capture=True,
+            memory_type="preference",
+            tags=["stop_hook"],
+            context={**ctx, "reason": "bo tak"},
+        )
+        assert res_reason.score == 7 and not res_reason.rejected
+
 
 class TestQualityResult:
     """Tests for QualityResult dataclass."""

@@ -482,10 +482,11 @@ class EternalConfig:
 
 
 # Default threshold of the passive-capture (hook) path of the write gate. THE one place of the value:
-# the dataclass field and ``WriteGateConfig.from_dict`` both read it. 4 = length 2 + tags 1 + non-fact type 1;
-# provenance context earns no points (``quality_scorer._PROVENANCE_KEYS``). A live config with an explicit
-# ``auto_capture_min_score`` key keeps its own value.
-DEFAULT_AUTO_CAPTURE_MIN_SCORE = 4
+# the dataclass field and ``WriteGateConfig.from_dict`` both read it. 5 against a ceiling of 7 on the auto path
+# (length 2 + tags 1 + non-fact type 1 + context beyond provenance 3): context made only of provenance keys
+# (``quality_scorer._PROVENANCE_KEYS``) earns no points, so such a fragment tops out at 4 and is rejected.
+# A live config with an explicit ``auto_capture_min_score`` key keeps its own value.
+DEFAULT_AUTO_CAPTURE_MIN_SCORE = 5
 
 
 @dataclass(frozen=True)

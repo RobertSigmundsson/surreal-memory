@@ -34,7 +34,7 @@ class TestWriteGateConfig:
         assert cfg.enabled is False
         assert cfg.min_length == 30
         assert cfg.min_quality_score == 3
-        assert cfg.auto_capture_min_score == 4
+        assert cfg.auto_capture_min_score == 5
         assert cfg.max_content_length == 2000
         assert cfg.reject_generic_filler is True
 
