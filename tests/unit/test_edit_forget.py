@@ -367,6 +367,7 @@ class TestNmemForget:
         storage.get_typed_memory = AsyncMock(return_value=None)
         storage.get_fiber = AsyncMock(return_value=None)
         storage.get_neuron = AsyncMock(return_value=None)
+        storage.find_fibers_anchored_at = AsyncMock(return_value=[])
         server.get_storage = AsyncMock(return_value=storage)
 
         result = await server.call_tool("smem_forget", {"memory_id": "nonexistent"})
@@ -421,8 +422,10 @@ class TestNmemForget:
 
         storage.get_typed_memory = AsyncMock(return_value=typed_mem)
         storage.get_fiber = AsyncMock(return_value=fiber)
-        storage.delete_typed_memory = AsyncMock()
-        storage.delete_fiber = AsyncMock()
+        # CHANGED FROM INTENT (smem-higiena-autocapture W-2): the hard branch no longer
+        # deletes typed_memory + fiber itself; the store's delete_memory_hard owns the
+        # whole cascade (neurons, derived rows) and the handler reports its counters.
+        storage.delete_memory_hard = AsyncMock(return_value={"typed_memory": 1, "fiber": 1})
         storage.batch_save = AsyncMock()
         storage.disable_auto_save = MagicMock()
         storage.enable_auto_save = MagicMock()
@@ -430,8 +433,10 @@ class TestNmemForget:
 
         result = await server.call_tool("smem_forget", {"memory_id": "fiber-1", "hard": True})
         assert result["status"] == "hard_deleted"
-        storage.delete_typed_memory.assert_awaited_once()
-        storage.delete_fiber.assert_awaited_once()
+        assert result["deleted"] == {"typed_memory": 1, "fiber": 1}
+        storage.delete_memory_hard.assert_awaited_once_with("fiber-1")
+        storage.delete_typed_memory.assert_not_awaited()
+        storage.delete_fiber.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_hard_delete_neuron_only(self) -> None:
@@ -446,6 +451,7 @@ class TestNmemForget:
 
         neuron = Neuron.create(type=NeuronType.CONCEPT, content="orphan")
         storage.get_neuron = AsyncMock(return_value=neuron)
+        storage.find_fibers_anchored_at = AsyncMock(return_value=[])
         storage.delete_neuron = AsyncMock(return_value=True)
         server.get_storage = AsyncMock(return_value=storage)
 

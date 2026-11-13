@@ -25,6 +25,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+from surreal_memory.storage.base import HardDeleteRefusedError
 from surreal_memory.storage.surrealdb._ids import _to_surreal_id
 from surreal_memory.storage.surrealdb.store import SurrealDBStorage
 
@@ -102,11 +103,34 @@ async def test_member_is_shed_for_every_id_form(form: str) -> None:
 @pytest.mark.asyncio
 @pytest.mark.parametrize("form", FORMS)
 async def test_anchor_is_found_for_every_id_form(form: str) -> None:
+    """CHANGED FROM INTENT (W-2): an anchor delete cascades the whole memory.
+
+    W-1 pinned the tombstone; since W-2 the fiber found through ``_shed`` is handed to
+    ``delete_memory_hard`` -- the id-form lookup is what is under test here, so the
+    cascade itself is a recording stub.
+    """
     fibers = {"f1": {"neuron_ids": [DASHED, OTHER], "anchor_neuron_id": DASHED, "metadata": {}}}
     store, _db, conn = _store(fibers)
+    hard = AsyncMock(return_value={})
+    store.delete_memory_hard = hard  # type: ignore[method-assign]
     assert await store.delete_neuron(form) is True
+    hard.assert_awaited_once()
+    assert hard.await_args.args == ("f1",), f"form {form!r}: anchor fiber not found"
+    assert hard.await_args.kwargs == {"pomin_neuron": form}
+    assert [c for c in conn.merge.await_args_list if str(c.args[0]).startswith("fiber:")] == []
+
+
+@pytest.mark.asyncio
+async def test_pinned_anchor_fiber_falls_back_to_the_tombstone() -> None:
+    fibers = {"f1": {"neuron_ids": [DASHED, OTHER], "anchor_neuron_id": DASHED, "metadata": {}}}
+    store, _db, conn = _store(fibers)
+    store.delete_memory_hard = AsyncMock(  # type: ignore[method-assign]
+        side_effect=HardDeleteRefusedError("f1", "pinned")
+    )
+    store.get_typed_memory = AsyncMock(return_value=None)  # type: ignore[method-assign]
+    assert await store.delete_neuron(f"neuron:{UNDERSCORED}") is True
     merges = [c for c in conn.merge.await_args_list if str(c.args[0]).startswith("fiber:")]
-    assert len(merges) == 1, f"form {form!r}: anchor fiber not found by the cascade"
+    assert len(merges) == 1
     assert merges[0].args[1]["neuron_ids"] == [OTHER]
     assert merges[0].args[1]["metadata"].get("_anchor_deleted")
 
@@ -115,11 +139,12 @@ async def test_anchor_is_found_for_every_id_form(form: str) -> None:
 async def test_fiber_whose_anchor_is_not_in_member_list_is_still_found() -> None:
     """Anchor missing from ``neuron_ids`` is reachable only via ``anchor_neuron_id IN``."""
     fibers = {"f1": {"neuron_ids": [OTHER], "anchor_neuron_id": DASHED, "metadata": {}}}
-    store, _db, conn = _store(fibers)
+    store, _db, _conn = _store(fibers)
+    hard = AsyncMock(return_value={})
+    store.delete_memory_hard = hard  # type: ignore[method-assign]
     assert await store.delete_neuron(f"neuron:{UNDERSCORED}") is True
-    merges = [c for c in conn.merge.await_args_list if str(c.args[0]).startswith("fiber:")]
-    assert len(merges) == 1
-    assert merges[0].args[1]["metadata"].get("_anchor_deleted")
+    hard.assert_awaited_once()
+    assert hard.await_args.args == ("f1",)
 
 
 @pytest.mark.asyncio

@@ -27,6 +27,49 @@ if TYPE_CHECKING:
     from surreal_memory.utils.geo import GeoFilter
 
 
+#: Tables ``delete_memory_hard`` reports counters for, in the order it empties them.
+HARD_DELETE_TABLES: tuple[str, ...] = (
+    "typed_memory",
+    "fiber",
+    "neuron",
+    "maturation",
+    "compression_backups",
+    "review_schedules",
+    "entity_refs",
+    "co_activations",
+)
+
+
+class HardDeleteRefusedError(ValueError):
+    """``delete_memory_hard`` refused the whole operation; nothing was deleted.
+
+    Raised for a pinned fiber: a pinned memory is protected from every automatic
+    removal and must be unpinned by its owner first.
+    """
+
+    def __init__(self, fiber_id: str, reason: str) -> None:
+        super().__init__(f"hard delete of memory {fiber_id} refused: {reason}")
+        self.fiber_id = fiber_id
+        self.reason = reason
+
+
+class HardDeleteIncompleteError(RuntimeError):
+    """``delete_memory_hard`` failed part-way through.
+
+    ``deleted`` carries the per-table counters of what was already removed before
+    the failure, so the caller can report (and retry from) the real state instead
+    of guessing; the original error is chained as ``__cause__``.
+    """
+
+    def __init__(self, fiber_id: str, deleted: dict[str, int], cause: BaseException) -> None:
+        super().__init__(
+            f"hard delete of memory {fiber_id} stopped part-way ({type(cause).__name__}: "
+            f"{cause}); already deleted: {deleted}"
+        )
+        self.fiber_id = fiber_id
+        self.deleted = deleted
+
+
 class NeuralStorage(ABC):
     """
     Abstract interface for neural graph storage.
@@ -897,6 +940,39 @@ class NeuralStorage(ABC):
             True if deleted, False if not found
         """
         ...
+
+    async def delete_memory_hard(
+        self, fiber_id: str, *, pomin_neuron: str | None = None
+    ) -> dict[str, int]:
+        """Permanently delete a whole memory: typed_memory, fiber and everything it owns.
+
+        Removes, in this order: the ``typed_memory`` row, the fiber, every neuron
+        the memory OWNS (its anchor and members that no other fiber lists or
+        anchors on, plus ALIAS neurons of the anchor that anchor no fiber), and
+        the derived rows (maturation, compression backup, review schedule,
+        entity refs of the anchor, co-activations of the deleted neurons).
+        Neurons shared with another fiber, reasoning-pattern concepts and
+        ``task_result`` neurons stay. A pinned fiber is refused outright.
+
+        Args:
+            fiber_id: The fiber (= typed memory) to delete.
+            pomin_neuron: A neuron the caller (``delete_neuron``) has ALREADY
+                deleted; it counts as owned but is not deleted again.
+
+        Returns:
+            Rows deleted per table (``typed_memory``, ``fiber``, ``neuron``,
+            ``maturation``, ``compression_backups``, ``review_schedules``,
+            ``entity_refs``, ``co_activations``).
+
+        Raises:
+            HardDeleteRefusedError: the fiber is pinned; nothing was deleted.
+            HardDeleteIncompleteError: a step failed; carries what was deleted so far.
+        """
+        raise NotImplementedError
+
+    async def find_fibers_anchored_at(self, neuron_id: str) -> list[Fiber]:
+        """Fibers whose ``anchor_neuron_id`` is ``neuron_id`` (any id spelling)."""
+        raise NotImplementedError
 
     async def find_fibers_batch(
         self,

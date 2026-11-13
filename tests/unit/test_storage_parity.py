@@ -52,6 +52,10 @@ _CONTRACT = (
     # would silently make every backend "unsupported" instead of failing the
     # override check below.
     "find_neurons_by_embedding",
+    # W-2 (smem-higiena-autocapture): the hard forget cascade. Inheriting the base
+    # NotImplementedError would turn `smem_forget(hard)` into an error on that backend.
+    "delete_memory_hard",
+    "find_fibers_anchored_at",
 )
 
 # SharedStorage is a thin HTTP client against a remote server, with no local

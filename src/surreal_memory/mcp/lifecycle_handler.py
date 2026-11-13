@@ -192,6 +192,25 @@ class LifecycleHandler:
         fiber = await storage.get_fiber(memory_id) if typed_mem else None
 
         if not typed_mem and not fiber:
+            # A neuron that anchors a live fiber is the load-bearing member of a
+            # memory: deleting it alone would leave the fiber without its anchor
+            # (graph invariant I2). Refuse and point at the fiber instead.
+            try:
+                anchored = await storage.find_fibers_anchored_at(memory_id)
+            except NotImplementedError:
+                return {
+                    "error": "This storage backend cannot tell whether the neuron anchors a "
+                    "memory, so deleting a single neuron is refused."
+                }
+            if anchored:
+                fiber_ids = [f.id for f in anchored]
+                return {
+                    "error": f"Neuron {memory_id} is the anchor of live memory "
+                    f"{', '.join(fiber_ids)}; deleting only the anchor would orphan it. "
+                    "Forget the memory by its fiber id instead (hard=true removes the "
+                    "whole memory).",
+                    "fiber_ids": fiber_ids,
+                }
             # Try as neuron_id — find its fiber
             neuron = await storage.get_neuron(memory_id)
             if not neuron:
@@ -209,24 +228,44 @@ class LifecycleHandler:
             }
 
         if hard:
-            # Permanent deletion: fiber + typed_memory + neurons
+            # Permanent deletion of the WHOLE memory: typed_memory, fiber, the
+            # neurons it owns and the derived rows (see delete_memory_hard).
+            from surreal_memory.storage.base import (
+                HardDeleteIncompleteError,
+                HardDeleteRefusedError,
+            )
+
             storage.disable_auto_save()
             try:
-                # Delete typed memory
-                await storage.delete_typed_memory(memory_id)
-
-                # Delete fiber (CASCADE handles fiber_neurons junction)
-                if fiber:
-                    await storage.delete_fiber(memory_id)
+                try:
+                    deleted = await storage.delete_memory_hard(memory_id)
+                except HardDeleteRefusedError as exc:
+                    return {"error": str(exc), "memory_id": memory_id}
+                except HardDeleteIncompleteError as exc:
+                    logger.error("Hard delete of %s incomplete: %s", memory_id, exc)
+                    return {
+                        "error": str(exc),
+                        "memory_id": memory_id,
+                        "deleted": exc.deleted,
+                    }
+                except NotImplementedError:
+                    return {
+                        "error": "Hard delete of a whole memory is not supported by this "
+                        "storage backend.",
+                        "memory_id": memory_id,
+                    }
 
                 await storage.batch_save()
             finally:
                 storage.enable_auto_save()
 
-            logger.info("Hard-deleted memory %s (reason: %s)", memory_id, reason or "none")
+            logger.info(
+                "Hard-deleted memory %s (reason: %s): %s", memory_id, reason or "none", deleted
+            )
             return {
                 "status": "hard_deleted",
                 "memory_id": memory_id,
+                "deleted": deleted,
                 "message": "Memory permanently deleted with cascade cleanup",
             }
         else:

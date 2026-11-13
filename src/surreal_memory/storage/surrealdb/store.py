@@ -27,7 +27,12 @@ from surreal_memory.core.neuron import Neuron, NeuronState, NeuronType
 from surreal_memory.core.project import Project
 from surreal_memory.core.synapse import Direction, Synapse, SynapseType
 from surreal_memory.core.sync_records import ChangeEntry, DeviceRecord
-from surreal_memory.storage.base import NeuralStorage
+from surreal_memory.storage.base import (
+    HARD_DELETE_TABLES,
+    HardDeleteIncompleteError,
+    HardDeleteRefusedError,
+    NeuralStorage,
+)
 from surreal_memory.storage.surrealdb._ids import (
     _record_id_part,
     _safe_brain_id,
@@ -1858,12 +1863,15 @@ class SurrealDBStorage(
         """Remove ``neuron_id`` from every fiber listing it (issue #194).
 
         A fiber whose ANCHOR is the deleted neuron loses its load-bearing
-        member: it is soft-forgotten the way ``smem_forget`` does it — the
-        typed_memory row's ``expires_at`` is set to now, so it leaves recall
-        immediately — and carries a ``_anchor_deleted`` metadata tombstone
-        (graph-only fibers without a typed row keep at least the marker).
-        Fibers that merely listed the id keep living with the id shed.
-        Returns ``{fibers_repaired, ids_shed, fibers_expired}``.
+        member, so the whole memory goes with it: ``delete_memory_hard`` removes
+        typed_memory, fiber, the neurons it owns and the derived rows (W-1/W-2;
+        the fiber is deleted before its neurons, so the recursion through
+        ``delete_neuron`` finds nothing to cascade into). A PINNED fiber is the
+        exception -- ``delete_memory_hard`` refuses it and it keeps the old
+        treatment: soft-forgotten (typed_memory ``expires_at`` = now) plus a
+        ``_anchor_deleted`` metadata tombstone. Fibers that merely listed the id
+        keep living with the id shed.
+        Returns ``{fibers_repaired, ids_shed, fibers_expired, fibers_deleted}``.
         """
         conn = self._ensure_conn()
         # Fibers store ids with dashes, neuron records carry underscores, and callers
@@ -1884,7 +1892,7 @@ class SurrealDBStorage(
             f=forms,
         )
         rows = list({str(r.get("id")): r for r in (*by_member, *by_anchor)}.values())
-        stats = {"fibers_repaired": 0, "ids_shed": 0, "fibers_expired": 0}
+        stats = {"fibers_repaired": 0, "ids_shed": 0, "fibers_expired": 0, "fibers_deleted": 0}
         now = utcnow()
         for row in rows:
             fid = row.get("id")
@@ -1895,7 +1903,16 @@ class SurrealDBStorage(
             shed = [m for m in members if _to_surreal_id(m) != sid]
             update: dict[str, Any] = {"neuron_ids": shed}
             anchor = row.get("anchor_neuron_id")
-            if anchor and _to_surreal_id(str(anchor)) == sid:
+            anchored = bool(anchor) and _to_surreal_id(str(anchor)) == sid
+            if anchored:
+                try:
+                    await self.delete_memory_hard(fiber_id, pomin_neuron=neuron_id)
+                except HardDeleteRefusedError:
+                    pass  # pinned: fall through to the tombstone below
+                else:
+                    stats["fibers_deleted"] += 1
+                    continue
+            if anchored:
                 metadata = dict(row.get("metadata") or {})
                 metadata["_anchor_deleted"] = now.isoformat()
                 update["metadata"] = metadata
@@ -3214,6 +3231,163 @@ class SurrealDBStorage(
             return True
         except Exception:
             return False
+
+    async def find_fibers_anchored_at(self, neuron_id: str) -> list[Fiber]:
+        brain_id = self._get_brain_id()
+        rows = await self._query(
+            "SELECT * FROM fiber WHERE brain_id = $brain_id AND anchor_neuron_id IN $f",
+            brain_id=brain_id,
+            f=_neuron_id_forms(neuron_id),
+        )
+        return [_row_to_fiber(r) for r in rows]
+
+    async def _hard_delete_owned_neurons(self, fiber: Fiber, pomin_neuron: str | None) -> list[str]:
+        """Neuron ids (as stored in ``fiber``) the memory OWNS, safe to delete with it.
+
+        Candidates: the anchor, the members, and ALIAS neurons of the anchor (the
+        ``_dedup_alias_of`` copies a duplicate write leaves behind, found through
+        their ALIAS synapse -- ``neuron.metadata`` has no index to scan). A
+        candidate stays when another fiber lists it or anchors on it (that is
+        someone else's memory, e.g. an alias that anchors its own fiber), when it
+        is a reasoning-pattern concept or a ``task_result``, or when it no longer
+        exists. ``pomin_neuron`` is already deleted by the caller and counts as
+        owned.
+        """
+        brain_id = self._get_brain_id()
+        anchor = fiber.anchor_neuron_id
+        candidates: dict[str, str] = {}  # sid -> id as stored
+        for nid in (anchor, *sorted(fiber.neuron_ids)):
+            if nid:
+                candidates.setdefault(_neuron_sid(nid), nid)
+        alias_sids: set[str] = set()
+        if anchor:
+            for syn in await self.get_synapses(target_id=anchor, type=SynapseType.ALIAS):
+                sid_alias = _neuron_sid(syn.source_id)
+                if sid_alias not in candidates:
+                    alias_sids.add(sid_alias)
+                    candidates[sid_alias] = syn.source_id
+        pomin_sid = _neuron_sid(pomin_neuron) if pomin_neuron else None
+        forms = list(dict.fromkeys(f for nid in candidates.values() for f in _neuron_id_forms(nid)))
+        referenced: set[str] = set()
+        if forms:
+            own_fid = _to_surreal_id(fiber.id)
+            by_member = await self._query(
+                "SELECT id, neuron_ids, anchor_neuron_id FROM fiber"
+                " WHERE brain_id = $brain_id AND neuron_ids CONTAINSANY $f",
+                brain_id=brain_id,
+                f=forms,
+            )
+            by_anchor = await self._query(
+                "SELECT id, neuron_ids, anchor_neuron_id FROM fiber"
+                " WHERE brain_id = $brain_id AND anchor_neuron_id IN $f",
+                brain_id=brain_id,
+                f=forms,
+            )
+            for row in (*by_member, *by_anchor):
+                if _to_surreal_id(str(row.get("id"))) == own_fid:
+                    continue
+                referenced.update(_to_surreal_id(str(m)) for m in row.get("neuron_ids") or [])
+                if row.get("anchor_neuron_id"):
+                    referenced.add(_to_surreal_id(str(row["anchor_neuron_id"])))
+        live = await self.get_neurons_batch(list(candidates.values()))
+        live_by_sid = {_neuron_sid(k): v for k, v in live.items()}
+        owned: list[str] = []
+        for sid_c, nid in candidates.items():
+            if sid_c == pomin_sid:
+                owned.append(nid)
+                continue
+            neuron = live_by_sid.get(sid_c)
+            if neuron is None or sid_c in referenced:
+                continue
+            if sid_c in alias_sids and _neuron_sid(
+                str(neuron.metadata.get("_dedup_alias_of", ""))
+            ) != _neuron_sid(anchor):
+                continue
+            if neuron.metadata.get("_reasoning_pattern_concept"):
+                continue
+            if neuron.metadata.get("type") == "task_result":
+                continue
+            owned.append(nid)
+        return owned
+
+    async def _delete_rows_by_id(self, sql: str, **params: Any) -> int:
+        """``SELECT id`` rows (by ``sql``), then delete each by its record id; returns the count."""
+        conn = self._ensure_conn()
+        rows = await self._query(sql, **params)
+        count = 0
+        for row in rows:
+            rid = row.get("id")
+            if rid is not None:
+                await conn.delete(rid)
+                count += 1
+        return count
+
+    async def delete_memory_hard(
+        self, fiber_id: str, *, pomin_neuron: str | None = None
+    ) -> dict[str, int]:
+        brain_id = self._get_brain_id()
+        conn = self._ensure_conn()
+        deleted = dict.fromkeys(HARD_DELETE_TABLES, 0)
+        fiber = await self.get_fiber(fiber_id)
+        if fiber is not None and fiber.pinned:
+            raise HardDeleteRefusedError(fiber_id, "the fiber is pinned (unpin it first)")
+        owned = await self._hard_delete_owned_neurons(fiber, pomin_neuron) if fiber else []
+        pomin_sid = _neuron_sid(pomin_neuron) if pomin_neuron else None
+        try:
+            if await self.delete_typed_memory(fiber_id):
+                deleted["typed_memory"] += 1
+            if fiber is not None:
+                if not await self.delete_fiber(fiber_id):
+                    raise RuntimeError(f"fiber {fiber_id} could not be deleted")
+                deleted["fiber"] += 1
+            for nid in owned:
+                if pomin_sid is not None and _neuron_sid(nid) == pomin_sid:
+                    deleted["neuron"] += 1  # the caller already deleted this one
+                elif await self.delete_neuron(_to_public_id(_neuron_sid(nid))):
+                    deleted["neuron"] += 1
+                else:
+                    raise RuntimeError(f"neuron {nid} could not be deleted")
+            # Derived rows. Each is addressed by record id read first, never by a
+            # filtered DELETE (a filtered DELETE of record-typed fields misses
+            # silently -- surrealdb-technical-reference.md).
+            mat = await self._find_maturation_row(fiber_id, brain_id)
+            if mat is not None and mat.get("id") is not None:
+                await conn.delete(mat["id"])
+                deleted["maturation"] += 1
+            fid_forms = list(
+                dict.fromkeys([fiber_id, _to_surreal_id(fiber_id), _to_public_id(fiber_id)])
+            )
+            deleted["compression_backups"] += await self._delete_rows_by_id(
+                "SELECT id FROM compression_backups WHERE brain_id = $brain_id AND fiber_id IN $f",
+                brain_id=brain_id,
+                f=fid_forms,
+            )
+            deleted["review_schedules"] += await self._delete_rows_by_id(
+                "SELECT id FROM review_schedules WHERE brain_id = $brain_id AND fiber_id IN $f",
+                brain_id=brain_id,
+                f=fid_forms,
+            )
+            if fiber is not None and any(
+                _neuron_sid(nid) == _neuron_sid(fiber.anchor_neuron_id) for nid in owned
+            ):
+                # entity_refs.fiber_id holds the ANCHOR id; a surviving (shared)
+                # anchor keeps its refs.
+                deleted["entity_refs"] += await self._delete_rows_by_id(
+                    "SELECT id FROM entity_refs WHERE brain_id = $brain_id AND fiber_id IN $f",
+                    brain_id=brain_id,
+                    f=_neuron_id_forms(fiber.anchor_neuron_id),
+                )
+            if owned:
+                gone = list(dict.fromkeys(f for nid in owned for f in _neuron_id_forms(nid)))
+                for side in ("neuron_a", "neuron_b"):
+                    deleted["co_activations"] += await self._delete_rows_by_id(
+                        f"SELECT id FROM co_activations WHERE brain_id = $brain_id AND {side} IN $f",
+                        brain_id=brain_id,
+                        f=gone,
+                    )
+        except Exception as exc:
+            raise HardDeleteIncompleteError(fiber_id, dict(deleted), exc) from exc
+        return deleted
 
     async def get_fibers(
         self,

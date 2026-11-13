@@ -32,7 +32,12 @@ from surreal_memory.core.sync_records import ChangeEntry, DeviceRecord
 from surreal_memory.engine.brain_versioning import BrainVersion
 from surreal_memory.engine.depth_prior import DepthPrior
 from surreal_memory.engine.leksyka import tokenizuj
-from surreal_memory.storage.base import NeuralStorage
+from surreal_memory.storage.base import (
+    HARD_DELETE_TABLES,
+    HardDeleteIncompleteError,
+    HardDeleteRefusedError,
+    NeuralStorage,
+)
 from surreal_memory.storage.memory_brain_ops import InMemoryBrainMixin
 from surreal_memory.storage.memory_collections import InMemoryCollectionsMixin
 from surreal_memory.storage.memory_drift import InMemoryDriftMixin
@@ -282,13 +287,20 @@ class InMemoryStorage(
         del self._neurons[brain_id][neuron_id]
         self._states[brain_id].pop(neuron_id, None)
 
-        # Same contract as the SurrealDB backend (issue #194): no fiber keeps
-        # listing a deleted member; a fiber losing its anchor is soft-forgotten
-        # (typed_memory expires_at, like smem_forget) and tombstoned in metadata.
+        # Same contract as the SurrealDB backend (issue #194, W-1/W-2): no fiber keeps
+        # listing a deleted member; a fiber whose ANCHOR was deleted loses its
+        # load-bearing member, so the whole memory goes with it (delete_memory_hard)
+        # -- except a pinned one, which is tombstoned and soft-forgotten instead.
         now = utcnow()
         for fid, fiber in list(self._fibers[brain_id].items()):
             if neuron_id not in fiber.neuron_ids and fiber.anchor_neuron_id != neuron_id:
                 continue
+            if fiber.anchor_neuron_id == neuron_id:
+                try:
+                    await self.delete_memory_hard(fid, pomin_neuron=neuron_id)
+                    continue
+                except HardDeleteRefusedError:
+                    pass
             members = fiber.neuron_ids - {neuron_id}
             updates: dict[str, Any] = {"neuron_ids": members}
             if fiber.anchor_neuron_id == neuron_id:
@@ -302,6 +314,81 @@ class InMemoryStorage(
                 if typed is not None:
                     self._typed_memories[brain_id][fid] = replace(typed, expires_at=now)
         return True
+
+    async def find_fibers_anchored_at(self, neuron_id: str) -> list[Fiber]:
+        brain_id = self._get_brain_id()
+        return [f for f in self._fibers[brain_id].values() if f.anchor_neuron_id == neuron_id]
+
+    async def delete_memory_hard(
+        self, fiber_id: str, *, pomin_neuron: str | None = None
+    ) -> dict[str, int]:
+        brain_id = self._get_brain_id()
+        deleted = dict.fromkeys(HARD_DELETE_TABLES, 0)
+        fiber = self._fibers[brain_id].get(fiber_id)
+        if fiber is not None and fiber.pinned:
+            raise HardDeleteRefusedError(fiber_id, "the fiber is pinned (unpin it first)")
+
+        owned: list[str] = []
+        if fiber is not None:
+            anchor = fiber.anchor_neuron_id
+            candidates = dict.fromkeys([anchor, *sorted(fiber.neuron_ids)])
+            for syn in self._synapses[brain_id].values():
+                if syn.type == SynapseType.ALIAS and syn.target_id == anchor:
+                    candidates.setdefault(syn.source_id)
+            other_refs: set[str] = set()
+            for other_id, other in self._fibers[brain_id].items():
+                if other_id != fiber_id:
+                    other_refs.update(other.neuron_ids)
+                    other_refs.add(other.anchor_neuron_id)
+            for nid in candidates:
+                if nid == pomin_neuron:
+                    owned.append(nid)  # already deleted by the caller; still ours
+                    continue
+                neuron = self._neurons[brain_id].get(nid)
+                if nid in other_refs or neuron is None:
+                    continue
+                if nid != anchor and nid not in fiber.neuron_ids:
+                    # alias candidate: only a genuine alias of THIS anchor
+                    if neuron.metadata.get("_dedup_alias_of") != anchor:
+                        continue
+                if neuron.metadata.get("_reasoning_pattern_concept"):
+                    continue
+                if neuron.metadata.get("type") == "task_result":
+                    continue
+                owned.append(nid)
+
+        try:
+            if await self.delete_typed_memory(fiber_id):
+                deleted["typed_memory"] += 1
+            if fiber is not None and await self.delete_fiber(fiber_id):
+                deleted["fiber"] += 1
+            for nid in owned:
+                # the caller (delete_neuron) already deleted `pomin_neuron`
+                if nid == pomin_neuron or await self.delete_neuron(nid):
+                    deleted["neuron"] += 1
+            if await self.delete_compression_backup(fiber_id):
+                deleted["compression_backups"] += 1
+            if await self.delete_review_schedule(fiber_id):
+                deleted["review_schedules"] += 1
+            if fiber is not None and fiber.anchor_neuron_id in owned:
+                refs = self._entity_refs.get(brain_id, {})
+                for entity in list(refs):
+                    kept = [f for f in refs[entity] if f != fiber.anchor_neuron_id]
+                    deleted["entity_refs"] += len(refs[entity]) - len(kept)
+                    if kept:
+                        refs[entity] = kept
+                    else:
+                        del refs[entity]
+            gone = set(owned)
+            events = self._co_activations[brain_id]
+            kept_events = [
+                e for e in events if e["neuron_a"] not in gone and e["neuron_b"] not in gone
+            ]
+            deleted["co_activations"] += len(events) - len(kept_events)
+            self._co_activations[brain_id] = kept_events
+        except Exception as exc:
+            raise HardDeleteIncompleteError(fiber_id, dict(deleted), exc) from exc
+        return deleted
 
     async def repair_fiber_member_drift(self) -> dict[str, int]:
         """One-off maintenance: shed ids that no longer resolve from all fibers.

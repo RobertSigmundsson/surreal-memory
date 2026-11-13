@@ -1,8 +1,9 @@
 """delete_neuron sheds the id from every fiber listing it (issue #194).
 
 The cascade contract, identical in both backends: after deletion no fiber
-claims a nonexistent member, and a fiber whose ANCHOR was deleted is expired
-(tombstoned) rather than left pointing at nothing. The enrichment pass
+claims a nonexistent member, and a fiber whose ANCHOR was deleted is removed with
+its whole memory (``delete_memory_hard``; a pinned fiber is tombstoned instead)
+rather than left pointing at nothing. The enrichment pass
 additionally refuses to mint RELATED_TO edges at anchors that no longer
 resolve — previously every pass re-created persistent edges pointing at
 deleted rows.
@@ -62,17 +63,20 @@ async def test_deleting_a_member_sheds_the_id_and_keeps_the_fiber() -> None:
 
 
 @pytest.mark.asyncio
-async def test_deleting_the_anchor_expires_the_fiber() -> None:
-    storage, _member, anchor, fid = await _storage_with_fiber()
+async def test_deleting_the_anchor_removes_the_whole_memory() -> None:
+    """CHANGED FROM INTENT (smem-higiena-autocapture W-2, PROJEKT Q5 P3).
+
+    Upstream #194 tombstoned the fiber (``_anchor_deleted`` + typed_memory
+    ``expires_at``) and left it for the expiry sweep -- which is switched off here, so
+    the fiber hung forever pointing at a dead anchor (invariant I2). A memory without
+    its anchor is deleted whole: typed_memory, fiber and its own neurons.
+    """
+    storage, member, anchor, fid = await _storage_with_fiber()
     assert await storage.delete_neuron(anchor) is True
-    fiber = await storage.get_fiber(fid)
-    assert fiber is not None
-    assert anchor not in fiber.neuron_ids, "the dead anchor id must also be shed"
-    assert fiber.metadata.get("_anchor_deleted"), "metadata tombstone is set"
-    typed = await storage.get_typed_memory("f1")
-    assert typed is not None and typed.expires_at is not None, (
-        "a typed fiber is soft-forgotten the same way smem_forget does it"
-    )
+    assert await storage.get_fiber(fid) is None, "the fiber must not outlive its anchor"
+    assert await storage.get_typed_memory("f1") is None
+    assert await storage.get_neuron(member) is None, "own member goes with the memory"
+    assert await storage.get_neuron("n-extra") is not None, "unrelated neurons stay"
 
 
 @pytest.mark.asyncio

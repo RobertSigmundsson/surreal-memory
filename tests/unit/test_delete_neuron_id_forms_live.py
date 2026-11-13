@@ -76,10 +76,9 @@ async def test_anchor_delete_reaches_the_fiber_for_every_id_form(store: Any, for
     assert await store.delete_neuron(_spell(anchor, form)) is True
 
     assert await store.get_neuron(anchor) is None
-    fiber = await store.get_fiber(fid)
-    assert fiber is not None
-    assert anchor not in fiber.neuron_ids, f"form {form}: dead anchor still listed"
-    assert fiber.metadata.get("_anchor_deleted"), f"form {form}: anchor delete missed the fiber"
+    # CHANGED FROM INTENT (W-2): the fiber found through the anchor is deleted with its
+    # memory (it used to get an `_anchor_deleted` tombstone).
+    assert await store.get_fiber(fid) is None, f"form {form}: anchor delete missed the fiber"
 
 
 @pytest.mark.asyncio
