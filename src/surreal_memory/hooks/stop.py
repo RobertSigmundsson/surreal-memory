@@ -29,6 +29,8 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
+from surreal_memory.hooks.transcript_filter import tekst_wypowiedzi_uzytkownika
+
 logger = logging.getLogger(__name__)
 
 # Max lines to read from transcript tail (increased for longer sessions)
@@ -118,11 +120,12 @@ def _has_memory_markers(text: str) -> bool:
 
 
 def read_transcript_tail(transcript_path: str, max_lines: int = MAX_TRANSCRIPT_LINES) -> str:
-    """Read the last N entries from a JSONL transcript and extract text content.
+    """Read the last N entries from a JSONL transcript and extract the human's text.
 
-    Applies role-based filtering: user messages get full capture,
-    assistant messages are only included if they contain explicit
-    memory markers. Tool results are skipped entirely.
+    Only what the human wrote reaches the detector (``transcript_filter``): tool
+    results, harness reminders, API-request blobs, compaction summaries, task
+    notifications, hook-injected context and agent prose are dropped, and pasted
+    blocks are cut out of the human's own text.
     """
     path = Path(transcript_path)
     if not path.exists() or not path.is_file():
@@ -140,24 +143,11 @@ def read_transcript_tail(transcript_path: str, max_lines: int = MAX_TRANSCRIPT_L
                 continue
             try:
                 entry = json.loads(raw_line)
-                role = _get_entry_role(entry)
-
-                # Skip tool results entirely — data, not decisions
-                if role == "tool":
-                    continue
-
-                text = _extract_text(entry)
-                if not text or len(text) <= 20:
-                    continue
-
-                # Assistant messages: only include if they contain
-                # explicit memory markers (decisions, root causes, etc.)
-                if role == "assistant" and not _has_memory_markers(text):
-                    continue
-
-                lines.append(text)
             except json.JSONDecodeError:
                 continue
+            text = tekst_wypowiedzi_uzytkownika(entry)
+            if text:
+                lines.append(text)
     except OSError:
         return ""
 

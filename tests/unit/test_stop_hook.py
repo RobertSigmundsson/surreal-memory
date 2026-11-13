@@ -162,7 +162,7 @@ class TestReadTranscriptTailFiltering:
         assert "root cause" in result.lower()
         assert "File contents:" not in result
 
-    def test_skips_assistant_without_markers(self, tmp_path: object) -> None:
+    def test_skips_assistant_prose_even_with_markers(self, tmp_path: object) -> None:
         import json
         from pathlib import Path
 
@@ -186,8 +186,9 @@ class TestReadTranscriptTailFiltering:
         assert "help me with this feature" in result
         # Generic assistant response filtered out
         assert "read the file and check" not in result
-        # Decision-bearing assistant response included
-        assert "factory pattern" in result
+        # W-3 (smem-higiena-autocapture): agent prose is never read, marker or not. Before: the
+        # decision-bearing assistant response ("factory pattern") was required to be included.
+        assert "factory pattern" not in result
 
     def test_includes_all_user_messages(self, tmp_path: object) -> None:
         import json

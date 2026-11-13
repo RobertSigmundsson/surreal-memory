@@ -167,7 +167,7 @@ def test_read_transcript_tail_empty_file(tmp_path: Path) -> None:
 
 
 def test_read_transcript_tail_valid_jsonl(tmp_path: Path) -> None:
-    """Valid JSONL with long-enough text entries are included in output."""
+    """Valid JSONL: the human's long-enough entry is included; agent prose is not (W-3)."""
     entries = [
         {"role": "user", "content": "This is a meaningful message that has enough characters"},
         {"role": "assistant", "content": "And this is the assistant response with enough text too"},
@@ -177,14 +177,17 @@ def test_read_transcript_tail_valid_jsonl(tmp_path: Path) -> None:
 
     result = read_transcript_tail(str(f))
     assert "meaningful message" in result
-    assert "assistant response" in result
+    # W-3 (smem-higiena-autocapture): the detector reads only the human's words, so agent prose
+    # no longer reaches it. Before: this test required the assistant entry to be present.
+    assert "assistant response" not in result
 
 
 def test_read_transcript_tail_short_entries_skipped(tmp_path: Path) -> None:
     """Entries with content <= 20 characters are skipped."""
     entries = [
         {"role": "user", "content": "ok"},  # too short
-        {"role": "assistant", "content": "This entry is long enough to be included in the output"},
+        # W-3: was role "assistant"; agent prose is no longer read, so the long entry is the human's.
+        {"role": "user", "content": "This entry is long enough to be included in the output"},
     ]
     f = tmp_path / "session.jsonl"
     f.write_text("\n".join(json.dumps(e) for e in entries), encoding="utf-8")

@@ -48,6 +48,21 @@ def _linia(tekst: str) -> str:
     )
 
 
+def _linia_czlowieka(tekst: str) -> str:
+    """Wpis wypowiedzi człowieka w formacie transkryptu Claude Code."""
+    return (
+        json.dumps(
+            {
+                "type": "user",
+                "isSidechain": False,
+                "origin": {"kind": "human"},
+                "message": {"role": "user", "content": [{"type": "text", "text": tekst}]},
+            }
+        )
+        + "\n"
+    )
+
+
 def _bieg(monkeypatch, sciezka: Path | str) -> None:
     monkeypatch.setattr(
         "sys.stdin",
@@ -84,14 +99,18 @@ def test_transkrypt_hooka_zcode_przyjety_i_policzony(stanowisko, monkeypatch):
     k.mkdir()
     (k / "transcript.jsonl").write_text(_linia(TEKST))
     _bieg(monkeypatch, k / "transcript.jsonl")
-    assert stanowisko["zapisane"] == [TEKST]
+    # W-3 (smem-higiena-autocapture): transkrypt hooka ZCode niesie jedną linię roli `assistant`, a detektor
+    # czyta wyłącznie wypowiedzi człowieka — skutek ZAMIERZONY: ścieżka przyjęta i POLICZONA, zapisu brak.
+    # Przed zmianą ten test wymagał zapisu `[TEKST]`.
+    assert stanowisko["zapisane"] == []
     assert _liczniki(stanowisko["dane"]) == {"stop_transkrypt_zcode": 1}
 
 
 def test_transkrypt_claude_code_bez_zmian_i_bez_licznika(stanowisko, monkeypatch):
     """Kontrola: ścieżka CC pod `~/.claude` przechwytywana jak dotąd; nowy kod nie pisze licznika na ścieżce CC (zero nowego I/O)."""
     p = stanowisko["home"] / ".claude/projects/p/sesja.jsonl"
-    p.write_text(_linia(TEKST))
+    # W-3: ścieżka CC przechwytuje wypowiedź człowieka (przed zmianą: linia roli `assistant`).
+    p.write_text(_linia_czlowieka(TEKST))
     _bieg(monkeypatch, p)
     assert stanowisko["zapisane"] == [TEKST]
     assert _liczniki(stanowisko["dane"]) == {}

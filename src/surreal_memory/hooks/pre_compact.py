@@ -23,6 +23,8 @@ import sys
 from pathlib import Path
 from typing import Any
 
+from surreal_memory.hooks.transcript_filter import tekst_wypowiedzi_uzytkownika
+
 logger = logging.getLogger(__name__)
 
 # Max lines to read from transcript tail
@@ -48,12 +50,14 @@ def read_hook_input() -> dict[str, Any]:
 
 
 def read_transcript_tail(transcript_path: str, max_lines: int = MAX_TRANSCRIPT_LINES) -> str:
-    """Read the last N entries from a JSONL transcript and extract text content.
+    """Read the last N entries from a JSONL transcript and extract the human's text.
 
-    Handles multiple transcript formats:
-    - {"role": "...", "content": "text"}
-    - {"role": "...", "content": [{"type": "text", "text": "..."}]}
-    - {"type": "human|assistant", "message": {"content": [...]}}
+    Only what the human wrote reaches the detector (``transcript_filter``).
+    Handles both transcript formats:
+    - {"role": "user", "content": "text" | [{"type": "text", "text": "..."}]}
+    - {"type": "user", "message": {"role": "user", "content": [...]}}
+    Agent prose, tool results, harness reminders, API-request blobs, compaction
+    summaries and hook-injected context are dropped; pasted blocks are cut out.
     """
     path = Path(transcript_path)
     if not path.exists() or not path.is_file():
@@ -71,11 +75,11 @@ def read_transcript_tail(transcript_path: str, max_lines: int = MAX_TRANSCRIPT_L
                 continue
             try:
                 entry = json.loads(raw_line)
-                text = _extract_text(entry)
-                if text and len(text) > 20:  # Skip trivial entries
-                    lines.append(text)
             except json.JSONDecodeError:
                 continue
+            text = tekst_wypowiedzi_uzytkownika(entry)
+            if text:
+                lines.append(text)
     except OSError:
         return ""
 
