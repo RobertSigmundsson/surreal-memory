@@ -832,6 +832,8 @@ class DedupCheckStep:
                 if existing_neuron is not None:
                     # Store reused anchor in metadata for CreateAnchorStep
                     ctx.effective_metadata["_dedup_reused_anchor"] = existing_neuron
+                    if dedup_result.exact:
+                        ctx.effective_metadata["_dedup_exact"] = True
                     logger.debug(
                         "Dedup: reusing anchor %s (tier=%d, score=%.3f)",
                         dedup_result.existing_neuron_id,
@@ -860,8 +862,15 @@ class CreateAnchorStep:
         config: BrainConfig,
     ) -> PipelineContext:
         dedup_reused = ctx.effective_metadata.pop("_dedup_reused_anchor", None)
+        dedup_exact = bool(ctx.effective_metadata.pop("_dedup_exact", False))
 
-        if dedup_reused is not None:
+        if dedup_reused is not None and dedup_exact:
+            # Exact duplicate (same SimHash, same normalised text): the new fiber anchors on
+            # the existing anchor itself. No alias neuron and no alias edge — two writes of
+            # one text are two memories (own fiber, own typed_memory) over ONE anchor, so
+            # the duplicate census and "second anchor of this text" stay at zero.
+            ctx.anchor_neuron = dedup_reused
+        elif dedup_reused is not None:
             anchor_neuron = dedup_reused
             # Create alias neuron pointing to existing anchor
             alias_neuron = Neuron.create(
@@ -1735,7 +1744,9 @@ class BuildFiberStep:
     ) -> PipelineContext:
         assert ctx.anchor_neuron is not None
 
-        neuron_ids = {n.id for n in ctx.neurons_created}
+        # The anchor is always a member. It is already in ``neurons_created`` unless the dedup
+        # step reused an EXACT duplicate's anchor (CreateAnchorStep), which creates nothing.
+        neuron_ids = {n.id for n in ctx.neurons_created} | {ctx.anchor_neuron.id}
         synapse_ids = {s.id for s in ctx.synapses_created}
 
         pathway = _build_pathway(

@@ -198,6 +198,15 @@ class InMemoryStorage(
         results.sort(key=lambda n: n.id)
         return results[offset : offset + limit]
 
+    async def find_neurons_by_content_hash(
+        self, content_hash: int, limit: int = 30
+    ) -> list[Neuron]:
+        """Mirrors ``SurrealDBStorage.find_neurons_by_content_hash``: same hash, oldest first, capped."""
+        brain_id = self._get_brain_id()
+        matches = [n for n in self._neurons[brain_id].values() if n.content_hash == content_hash]
+        matches.sort(key=lambda n: (n.created_at, n.id))
+        return matches[:limit]
+
     async def any_neuron_matches_any_token(self, tokens: list[str]) -> bool:
         """Mirrors `storage/surrealdb/store.py`'s `SurrealDBStorage.any_neuron_matches_
         any_token` — same contract, same fail-closed validation, same "match by TOKEN,

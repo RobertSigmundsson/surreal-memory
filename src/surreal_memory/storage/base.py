@@ -203,6 +203,18 @@ class NeuralStorage(ABC):
         """
         return False
 
+    async def find_neurons_by_content_hash(
+        self, content_hash: int, limit: int = 30
+    ) -> list[Neuron]:
+        """Neurons of the current brain whose ``content_hash`` equals ``content_hash``, oldest first.
+
+        The write-time dedup pool uses this to reach an exact duplicate even when the
+        first-word pool (``find_neurons(content_contains=...)``, capped) misses it.
+        Default returns no candidates (a backend without a hash lookup keeps the
+        first-word pool only); SurrealDB and in-memory backends override it.
+        """
+        return []
+
     @abstractmethod
     async def find_neurons(
         self,

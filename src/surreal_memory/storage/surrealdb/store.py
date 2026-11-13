@@ -2110,6 +2110,22 @@ class SurrealDBStorage(
         )
         return len(rows) > 0
 
+    async def find_neurons_by_content_hash(
+        self, content_hash: int, limit: int = 30
+    ) -> list[Neuron]:
+        """Neurons of this brain with ``content_hash`` (``idx_neuron_hash``), oldest first.
+
+        ``brain_id`` is inlined as a literal for the same planner reason as in
+        ``find_neurons``; the embedding vector is omitted (dedup compares hashes and text).
+        """
+        rows = await self._query(
+            "SELECT * OMIT embedding_vec FROM neuron"
+            f" WHERE brain_id = {_brain_literal(self._get_brain_id())} AND content_hash = $ch"
+            f" ORDER BY created_at ASC LIMIT {int(limit)}",
+            ch=content_hash,
+        )
+        return [_row_to_neuron(r) for r in rows]
+
     # ================================================================
     # Neuron State Operations
     # ================================================================

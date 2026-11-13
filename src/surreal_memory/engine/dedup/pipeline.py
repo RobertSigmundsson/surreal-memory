@@ -32,6 +32,9 @@ class DedupResult:
         tier: Which tier determined the result (1=SimHash, 2=Embedding, 3=LLM, 0=none).
         similarity_score: Similarity score from the determining tier.
         reason: Human-readable explanation.
+        exact: Tier-1 match at SimHash distance 0 whose text is also equal after
+            normalisation (``_normalise_text``). The new fiber then anchors on the
+            existing anchor itself (no alias neuron); near-duplicates keep the alias.
     """
 
     is_duplicate: bool
@@ -39,6 +42,12 @@ class DedupResult:
     tier: int = 0
     similarity_score: float = 0.0
     reason: str = ""
+    exact: bool = False
+
+
+def _normalise_text(text: str) -> str:
+    """Case-folded text with whitespace runs collapsed — the equality used for ``exact``."""
+    return " ".join(text.lower().split())
 
 
 class DedupPipeline:
@@ -85,12 +94,12 @@ class DedupPipeline:
             content_hash = simhash(content)
 
         # Fetch candidate anchors from storage
-        candidates = await self._get_candidates(content)
+        candidates = await self._get_candidates(content, content_hash)
         if not candidates:
             return DedupResult(is_duplicate=False, reason="no candidates found")
 
         # Tier 1: SimHash
-        tier1_result = self._tier1_simhash(content_hash, candidates)
+        tier1_result = self._tier1_simhash(content_hash, candidates, content)
         if tier1_result is not None:
             return tier1_result
 
@@ -108,9 +117,21 @@ class DedupPipeline:
 
         return DedupResult(is_duplicate=False, reason="no tier found a match")
 
-    async def _get_candidates(self, content: str) -> list[Neuron]:
-        """Fetch candidate anchor neurons for comparison."""
+    async def _get_candidates(self, content: str, content_hash: int | None = None) -> list[Neuron]:
+        """Fetch candidate anchor neurons for comparison.
+
+        Candidates sharing ``content_hash`` come first (``idx_neuron_hash``), then the
+        first-word pool. The word pool alone is capped at ``max_candidates``: with more
+        anchors than that sharing the first word (``TODO:``, ``Decision:``, a file path)
+        an identical earlier anchor falls out of it and the same text got a second anchor.
+        """
         max_candidates = min(self._config.max_candidates, 50)
+
+        by_hash: list[Neuron] = []
+        if content_hash:
+            by_hash = list(
+                await self._storage.find_neurons_by_content_hash(content_hash, limit=max_candidates)
+            )
 
         # Use first significant word as search key
         words = content.split()
@@ -121,13 +142,19 @@ class DedupPipeline:
                 search_term = cleaned
                 break
 
-        if not search_term:
-            return []
+        by_word: list[Neuron] = []
+        if search_term:
+            by_word = await self._storage.find_neurons(
+                content_contains=search_term,
+                limit=max_candidates,
+            )
 
-        candidates = await self._storage.find_neurons(
-            content_contains=search_term,
-            limit=max_candidates,
-        )
+        seen: set[str] = set()
+        candidates: list[Neuron] = []
+        for neuron in [*by_hash, *by_word]:
+            if neuron.id not in seen:
+                seen.add(neuron.id)
+                candidates.append(neuron)
 
         # Filter to anchor neurons only. GRAPH_ONLY tombstones are excluded
         # here, ahead of every tier: legacy ones still carry the SimHash of
@@ -148,12 +175,30 @@ class DedupPipeline:
         self,
         content_hash: int,
         candidates: list[Neuron],
+        content: str | None = None,
     ) -> DedupResult | None:
         """Tier 1: SimHash near-duplicate detection.
 
-        Returns DedupResult if a definitive match is found, None otherwise.
+        An EXACT duplicate (distance 0 and equal text after normalisation) wins over
+        any earlier near match. Returns DedupResult if a definitive match is found,
+        None otherwise.
         """
         threshold = self._config.simhash_threshold
+
+        if content is not None and content_hash != 0:
+            wanted = _normalise_text(content)
+            for candidate in candidates:
+                if candidate.content_hash == content_hash and (
+                    _normalise_text(candidate.content) == wanted
+                ):
+                    return DedupResult(
+                        is_duplicate=True,
+                        existing_neuron_id=candidate.id,
+                        tier=1,
+                        similarity_score=1.0,
+                        reason="exact duplicate (same SimHash and same normalised text)",
+                        exact=True,
+                    )
 
         for candidate in candidates:
             if candidate.content_hash is None or candidate.content_hash == 0:
