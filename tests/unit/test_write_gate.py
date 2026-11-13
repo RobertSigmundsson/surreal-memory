@@ -34,7 +34,7 @@ class TestWriteGateConfig:
         assert cfg.enabled is False
         assert cfg.min_length == 30
         assert cfg.min_quality_score == 3
-        assert cfg.auto_capture_min_score == 5
+        assert cfg.auto_capture_min_score == 4
         assert cfg.max_content_length == 2000
         assert cfg.reject_generic_filler is True
 
@@ -42,6 +42,12 @@ class TestWriteGateConfig:
         cfg = WriteGateConfig.from_dict({})
         assert cfg.enabled is False
         assert cfg.min_length == 30
+        # Jedno miejsce wartości domyślnej: pole i from_dict nie mogą się rozjechać.
+        assert cfg.auto_capture_min_score == WriteGateConfig().auto_capture_min_score
+
+    def test_from_dict_explicit_auto_threshold_is_not_overridden(self) -> None:
+        """Żywy config ma klucz jawnie (5) — nowy default go nie rusza."""
+        assert WriteGateConfig.from_dict({"auto_capture_min_score": 5}).auto_capture_min_score == 5
 
     def test_from_dict_custom(self) -> None:
         cfg = WriteGateConfig.from_dict(
@@ -478,10 +484,11 @@ class TestCaptureContext:
         }
 
     def test_structured_fragment_passes_auto_capture_gate(self) -> None:
+        """W-4: proweniencja haka sama NIE daje punktów; próg ścieżki auto 4 (domyślny)."""
         from surreal_memory.mcp.auto_capture import build_capture_context
 
         content = "Preference: mogl zlapac wycieku ua — buduje igly tylko z wartosci"
-        cfg = WriteGateConfig()
+        cfg = WriteGateConfig(auto_capture_min_score=4)
         tags = ["stop_hook", "session_end"]
         ctx = build_capture_context({"type": "preference", "confidence": 0.85}, source="stop_hook")
 
@@ -501,9 +508,42 @@ class TestCaptureContext:
             context=ctx,
         )
 
-        assert without.rejected and without.score < cfg.auto_capture_min_score
-        assert not with_ctx.rejected
-        assert with_ctx.score >= cfg.auto_capture_min_score
+        # Kontekst z samej proweniencji daje +0: ten sam wynik z kontekstem i bez.
+        assert with_ctx.score == without.score == 4
+        # Fragment 4-punktowy (długość 2 + tagi 1 + typ 1) przechodzi próg 4.
+        assert not without.rejected and not with_ctx.rejected
+
+        # 3-punktowy (typ fact odbiera 1 pkt) nie przechodzi progu 4.
+        three = check_write_gate(
+            content,
+            gate_config=cfg,
+            is_auto_capture=True,
+            memory_type="fact",
+            tags=tags,
+            context=ctx,
+        )
+        assert three.score == 3
+        assert three.rejected
+
+        # Kontekst z kluczem spoza proweniencji daje +3 (próg 7 odrzuca bez niego, przyjmuje z nim).
+        high = WriteGateConfig(auto_capture_min_score=7)
+        rich = check_write_gate(
+            content,
+            gate_config=high,
+            is_auto_capture=True,
+            memory_type="preference",
+            tags=tags,
+            context={**ctx, "reason": "bo tak"},
+        )
+        assert rich.score == 7 and not rich.rejected
+        assert check_write_gate(
+            content,
+            gate_config=high,
+            is_auto_capture=True,
+            memory_type="preference",
+            tags=tags,
+            context=ctx,
+        ).rejected
 
     def test_short_junk_still_rejected_with_context(self) -> None:
         from surreal_memory.mcp.auto_capture import build_capture_context

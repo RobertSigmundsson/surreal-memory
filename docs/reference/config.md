@@ -147,7 +147,7 @@ Write-gate configuration for memory quality enforcement.
 | `auto_capture_mode` | `str` | `""` | Inherit | off disables | ungated bypasses | shadow | enforce |
 | `min_length` | `int` | `30` | reject content shorter than this |
 | `min_quality_score` | `int` | `3` | reject score below this (0-10 scale) |
-| `auto_capture_min_score` | `int` | `5` | stricter threshold for passive captures |
+| `auto_capture_min_score` | `int` | `4` | stricter threshold for passive captures |
 | `max_content_length` | `int` | `2000` | reject wall-of-text above this |
 | `reject_generic_filler` | `bool` | `true` | reject "done", "ok", "completed" etc. |
 

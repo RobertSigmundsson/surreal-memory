@@ -244,12 +244,14 @@ def build_capture_context(
     """Structured context for one auto-captured fragment.
 
     Carries only what the detector already measured, in the shape the write
-    gate and ``merge_context`` understand. The hooks used to pass no context
-    at all, so a fragment without two cognitive markers could not reach
-    ``auto_capture_min_score`` 5 (length 2 + tags 1 + non-fact type 1 = 4) and
-    the enforce gate rejected every capture from 2026-10-20 onward. These keys
-    are provenance, not padding: they also reach the stored content through
-    ``merge_context``, so the score reflects structure the memory really has.
+    gate and ``merge_context`` understand. These keys are provenance, not
+    structure: they reach the stored content through ``merge_context``, but
+    ``score_memory`` gives them NO points (``_PROVENANCE_KEYS``) — a context
+    earns the +3 only with a key beyond them (e.g. ``reason``). The hooks used
+    to pass no context at all; later the bare provenance keys earned +3 on
+    every capture, so the gate stopped discriminating (345/345 accepted).
+    The auto-capture threshold (``WriteGateConfig.auto_capture_min_score``)
+    is therefore reachable from length 2 + tags 1 + non-fact type 1 = 4.
     """
     context: dict[str, Any] = {"captured_by": source}
     detected_type = item.get("type")

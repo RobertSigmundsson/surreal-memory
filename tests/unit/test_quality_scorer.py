@@ -4,7 +4,14 @@ from __future__ import annotations
 
 import pytest
 
-from surreal_memory.engine.quality_scorer import QualityResult, _is_machine_noise, score_memory
+from surreal_memory.engine.quality_scorer import (
+    QualityResult,
+    _is_machine_noise,
+    check_write_gate,
+    score_memory,
+)
+from surreal_memory.mcp.auto_capture import build_capture_context
+from surreal_memory.unified_config import WriteGateConfig
 
 
 class TestIsMachineNoise:
@@ -186,6 +193,79 @@ class TestScoreMemory:
         score_memory("test content", tags=tags, context=context)
         assert tags == tags_copy
         assert context == context_copy
+
+
+class TestProvenanceContextEarnsNoPoints:
+    """W-4: kontekst z samej proweniencji haka (``build_capture_context``) nie daje +3.
+
+    Regresja: hak zawsze podaje ``captured_by``/``detected_type``/``confidence``, więc +3 za „kontekst niepusty”
+    było stałym prezentem — 345/345 wpisów z haków przechodziło bramkę (PROJEKT Q8).
+    """
+
+    CONTENT = "some content here"
+
+    def test_provenance_keys_are_exactly_what_the_hook_context_builds(self) -> None:
+        from surreal_memory.engine.quality_scorer import _PROVENANCE_KEYS
+
+        ctx = build_capture_context({"type": "decision", "confidence": 0.8}, source="stop_hook")
+        assert set(ctx) == set(_PROVENANCE_KEYS)
+
+    def test_provenance_only_context_adds_nothing(self) -> None:
+        base = score_memory(self.CONTENT)
+        ctx = build_capture_context({"type": "decision", "confidence": 0.8}, source="stop_hook")
+        assert score_memory(self.CONTENT, context=ctx).score == base.score
+
+    def test_each_single_provenance_key_adds_nothing(self) -> None:
+        from surreal_memory.engine.quality_scorer import _PROVENANCE_KEYS
+
+        base = score_memory(self.CONTENT)
+        for key in _PROVENANCE_KEYS:
+            assert score_memory(self.CONTENT, context={key: "x"}).score == base.score, key
+
+    def test_reason_key_adds_3(self) -> None:
+        base = score_memory(self.CONTENT)
+        assert score_memory(self.CONTENT, context={"reason": "bo tak"}).score == base.score + 3
+
+    def test_provenance_plus_reason_adds_3_once(self) -> None:
+        base = score_memory(self.CONTENT)
+        ctx = {
+            **build_capture_context({"type": "decision", "confidence": 0.8}, source="stop_hook"),
+            "reason": "bo tak",
+        }
+        assert score_memory(self.CONTENT, context=ctx).score == base.score + 3
+
+    def test_auto_path_ceiling_reaches_default_threshold(self) -> None:
+        """Sufit ścieżki auto haka policzony FUNKCJĄ (nie stałą) ≥ ``auto_capture_min_score``.
+
+        Pułapka „próg nieosiągalny” (wiki ``smem-write-gate-auto-capture``): maksimum fragmentu z haka — kontekst
+        z SAMEJ proweniencji (+0), tagi 1, typ ≠ fact 1, długość ≥ 50 ⇒ 2, trzy markery kognitywne 3 — musi być
+        ≥ progu ścieżki auto z domyślnej konfiguracji (PROJEKT §2.4: 2 + 1 + 1 + 3 = 7).
+        """
+        content = "After testing, chose PostgreSQL over MongoDB because ACID is needed for payments"
+        ceiling = score_memory(
+            content,
+            memory_type="decision",
+            tags=["stop_hook", "session_end"],
+            context=build_capture_context({"type": "decision"}, source="stop_hook"),
+        ).score
+        assert ceiling == 7
+        assert ceiling >= WriteGateConfig().auto_capture_min_score
+
+    def test_gate_without_provenance_points_for_short_four_point_fragment(self) -> None:
+        """Fragment 4-punktowy (długość 2 + tagi 1 + typ 1) przechodzi próg 4 bez kontekstu i z kontekstem proweniencji."""
+        cfg = WriteGateConfig(auto_capture_min_score=4)
+        content = "x" * 60  # długość ≥ 50 ⇒ 2 pkt; bez markerów kognitywnych
+        ctx = build_capture_context({"type": "preference"}, source="stop_hook")
+        for context in (None, ctx):
+            res = check_write_gate(
+                content,
+                gate_config=cfg,
+                is_auto_capture=True,
+                memory_type="preference",
+                tags=["stop_hook"],
+                context=context,
+            )
+            assert res.score == 4 and not res.rejected
 
 
 class TestQualityResult:

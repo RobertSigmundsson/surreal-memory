@@ -15,6 +15,11 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from surreal_memory.unified_config import WriteGateConfig
 
+# Keys that ``mcp.auto_capture.build_capture_context`` sets on every hook capture.
+# They describe where a fragment came from, not what it means, so they earn no
+# context points (pinned against ``build_capture_context`` in the unit tests).
+_PROVENANCE_KEYS = frozenset({"captured_by", "detected_type", "confidence"})
+
 # -- Cognitive richness word lists ------------------------------------------
 
 _CAUSAL_PATTERN = re.compile(
@@ -150,7 +155,9 @@ def score_memory(
 
     Scoring breakdown:
     - Content length (0-2): >=10 chars +1, >=50 chars +1
-    - Context dict provided (+3)
+    - Context dict with at least one key beyond hook provenance (+3); the keys
+      ``captured_by``/``detected_type``/``confidence`` set by the capture hooks
+      (``build_capture_context``) earn nothing
     - Tags provided, at least 1 (+1)
     - Non-default type provided (+1)
     - Cognitive richness (0-3): causal +1, temporal +1, comparative +1
@@ -178,8 +185,10 @@ def score_memory(
     if content_len >= 50:
         points += 1
 
-    # 2. Context dict (+3 points)
-    if context and len(context) > 0:
+    # 2. Context dict (+3 points) — only for keys the caller really supplied.
+    # The capture hooks always pass provenance keys; counting them made +3 a
+    # constant gift (345/345 hook entries passed the gate).
+    if context and any(key not in _PROVENANCE_KEYS for key in context):
         points += 3
     else:
         hints.append("Add context dict (reason, alternatives, cause) for richer neural connections")

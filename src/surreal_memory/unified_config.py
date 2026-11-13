@@ -481,6 +481,13 @@ class EternalConfig:
         )
 
 
+# Default threshold of the passive-capture (hook) path of the write gate. THE one place of the value:
+# the dataclass field and ``WriteGateConfig.from_dict`` both read it. 4 = length 2 + tags 1 + non-fact type 1;
+# provenance context earns no points (``quality_scorer._PROVENANCE_KEYS``). A live config with an explicit
+# ``auto_capture_min_score`` key keeps its own value.
+DEFAULT_AUTO_CAPTURE_MIN_SCORE = 4
+
+
 @dataclass(frozen=True)
 class WriteGateConfig:
     """Write-gate configuration for memory quality enforcement.
@@ -500,7 +507,9 @@ class WriteGateConfig:
     auto_capture_mode: str = ""  # Inherit | off disables | ungated bypasses | shadow | enforce
     min_length: int = 30  # reject content shorter than this
     min_quality_score: int = 3  # reject score below this (0-10 scale)
-    auto_capture_min_score: int = 5  # stricter threshold for passive captures
+    auto_capture_min_score: int = (
+        DEFAULT_AUTO_CAPTURE_MIN_SCORE  # stricter threshold for passive captures
+    )
     max_content_length: int = 2000  # reject wall-of-text above this
     reject_generic_filler: bool = True  # reject "done", "ok", "completed" etc.
 
@@ -554,7 +563,9 @@ class WriteGateConfig:
             auto_capture_mode=str(data.get("auto_capture_mode", "")),
             min_length=int(data.get("min_length", 30)),
             min_quality_score=int(data.get("min_quality_score", 3)),
-            auto_capture_min_score=int(data.get("auto_capture_min_score", 5)),
+            auto_capture_min_score=int(
+                data.get("auto_capture_min_score", DEFAULT_AUTO_CAPTURE_MIN_SCORE)
+            ),
             max_content_length=int(data.get("max_content_length", 2000)),
             reject_generic_filler=bool(data.get("reject_generic_filler", True)),
         )
