@@ -28,7 +28,12 @@ from surreal_memory.core.project import Project
 from surreal_memory.core.synapse import Direction, Synapse, SynapseType
 from surreal_memory.core.sync_records import ChangeEntry, DeviceRecord
 from surreal_memory.storage.base import NeuralStorage
-from surreal_memory.storage.surrealdb._ids import _safe_brain_id, _to_public_id, _to_surreal_id
+from surreal_memory.storage.surrealdb._ids import (
+    _record_id_part,
+    _safe_brain_id,
+    _to_public_id,
+    _to_surreal_id,
+)
 from surreal_memory.storage.surrealdb.activity import SurrealDBActivityMixin
 from surreal_memory.storage.surrealdb.alerts import SurrealDBAlertsMixin
 from surreal_memory.storage.surrealdb.cognitive import SurrealDBCognitiveMixin
@@ -330,6 +335,31 @@ def _chunked(items: list[_T], size: int = _BATCH_WRITE_CHUNK) -> Iterator[list[_
     """
     for start in range(0, len(items), size):
         yield items[start : start + size]
+
+
+def _neuron_id_forms(neuron_id: str) -> list[str]:
+    """Every spelling under which a neuron id may be stored in ``fiber`` rows.
+
+    Fibers hold the dashed form, the record id holds underscores, and callers pass
+    either, with or without the ``neuron:`` prefix (and ``⟨...⟩`` quoting). The set
+    is the bare id part as given, its ``_to_surreal_id`` fold, and the fold turned
+    back into the public (dashed) spelling. ``_to_public_id`` is lossy for ids that
+    carry real underscores (``concept_pin`` -> ``concept-pin``); the extra member is
+    harmless in an ``IN`` / ``CONTAINSANY`` set and the as-given form stays in it.
+    """
+    sid = _neuron_sid(neuron_id)
+    forms = (_record_id_part(neuron_id), sid, _to_public_id(sid))
+    return list(dict.fromkeys(f for f in forms if f))
+
+
+def _neuron_sid(neuron_id: str) -> str:
+    """Record-name form of a neuron id, tolerant of the ``neuron:⟨...⟩`` spelling.
+
+    ``_to_surreal_id`` alone maps the guillemets of a quoted record id to ``_``
+    (``neuron:⟨3872d6a8-...⟩`` -> ``_3872d6a8_..._``), which addresses no row.
+    ``_record_id_part`` strips them first; the fold then yields the real record name.
+    """
+    return _to_surreal_id(_record_id_part(neuron_id))
 
 
 def _brain_literal(brain_id: str) -> str:
@@ -1788,7 +1818,7 @@ class SurrealDBStorage(
 
     async def delete_neuron(self, neuron_id: str) -> bool:
         conn = self._ensure_conn()
-        sid = _to_surreal_id(neuron_id)
+        sid = _neuron_sid(neuron_id)
 
         # Delete connected synapses first. This is brain-agnostic ON PURPOSE (audit
         # DB-01): a synapse whose in/out points at this neuron becomes a dangling
@@ -1836,11 +1866,24 @@ class SurrealDBStorage(
         Returns ``{fibers_repaired, ids_shed, fibers_expired}``.
         """
         conn = self._ensure_conn()
-        rows = await self._query(
+        # Fibers store ids with dashes, neuron records carry underscores, and callers
+        # hand over any spelling (dashes, underscores, ``neuron:<...>``). Match the
+        # whole form set in the query and compare through ``_to_surreal_id`` below --
+        # a raw ``CONTAINS <input>`` missed every fiber whose spelling differed.
+        sid = _neuron_sid(neuron_id)
+        forms = _neuron_id_forms(neuron_id)
+        by_member = await self._query(
             "SELECT id, neuron_ids, anchor_neuron_id, metadata FROM fiber"
-            " WHERE neuron_ids CONTAINS $nid",
-            nid=neuron_id,
+            " WHERE neuron_ids CONTAINSANY $f",
+            f=forms,
         )
+        # A fiber whose anchor is not on its member list is reachable only here.
+        by_anchor = await self._query(
+            "SELECT id, neuron_ids, anchor_neuron_id, metadata FROM fiber"
+            " WHERE anchor_neuron_id IN $f",
+            f=forms,
+        )
+        rows = list({str(r.get("id")): r for r in (*by_member, *by_anchor)}.values())
         stats = {"fibers_repaired": 0, "ids_shed": 0, "fibers_expired": 0}
         now = utcnow()
         for row in rows:
@@ -1849,9 +1892,10 @@ class SurrealDBStorage(
             if not fiber_id:
                 continue
             members = list(row.get("neuron_ids") or [])
-            shed = [m for m in members if m != neuron_id]
+            shed = [m for m in members if _to_surreal_id(m) != sid]
             update: dict[str, Any] = {"neuron_ids": shed}
-            if row.get("anchor_neuron_id") == neuron_id:
+            anchor = row.get("anchor_neuron_id")
+            if anchor and _to_surreal_id(str(anchor)) == sid:
                 metadata = dict(row.get("metadata") or {})
                 metadata["_anchor_deleted"] = now.isoformat()
                 update["metadata"] = metadata
