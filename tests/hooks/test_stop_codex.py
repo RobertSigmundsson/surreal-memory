@@ -307,15 +307,24 @@ def test_inna_sciezka_pominieta_i_policzona(stanowisko, monkeypatch, tmp_path, b
     assert _liczniki(stanowisko["dane"]) == {"stop_transkrypt_pominiety": 1}
 
 
+def _wpis_czlowieka_cc(tekst: str) -> dict[str, object]:
+    """Wpis wypowiedzi człowieka w formacie transkryptu Claude Code (W-3, smem-higiena-autocapture: czytnik CC przepuszcza
+    wyłącznie `type="user"` z `message.role="user"`; wpis bez `type` w tym kształcie nie jest wpisem CC). Przed W-3 ten
+    plik był wpisem bez `type` — oczekiwanie zmienione Z ZAMYSŁU, wynik testu (zapis `[TEKST]`, brak licznika) ten sam."""
+    return {
+        "type": "user",
+        "isSidechain": False,
+        "origin": {"kind": "human"},
+        "message": {"role": "user", "content": [{"type": "text", "text": tekst}]},
+    }
+
+
 # ---- ścieżki .claude i ZCode bez zmian (test złotego pliku) ------------------------------------------------------------------
 
 
 def test_zloty_plik_claude_code_bez_zmian_i_bez_licznika(stanowisko, monkeypatch):
     p = stanowisko["home"] / ".claude/projects/p/sesja.jsonl"
-    p.write_text(
-        json.dumps({"message": {"role": "user", "content": [{"type": "text", "text": TEKST}]}})
-        + "\n"
-    )
+    p.write_text(json.dumps(_wpis_czlowieka_cc(TEKST)) + "\n")
     _bieg(monkeypatch, p)
     assert stanowisko["zapisane"] == [TEKST]
     assert _liczniki(stanowisko["dane"]) == {}
@@ -324,10 +333,7 @@ def test_zloty_plik_claude_code_bez_zmian_i_bez_licznika(stanowisko, monkeypatch
 def test_plik_rollout_pod_claude_idzie_sciezka_claude_code_nie_codexa(stanowisko, monkeypatch):
     """Kolejność gałęzi: `.claude` pierwsza — plik o nazwie rollout-*.jsonl pod `~/.claude` czytany czytnikiem CC, bez licznika Codexa."""
     p = stanowisko["home"] / ".claude/projects/p/rollout-udaje.jsonl"
-    p.write_text(
-        json.dumps({"message": {"role": "user", "content": [{"type": "text", "text": TEKST}]}})
-        + "\n"
-    )
+    p.write_text(json.dumps(_wpis_czlowieka_cc(TEKST)) + "\n")
     _bieg(monkeypatch, p)
     assert stanowisko["zapisane"] == [TEKST]
     assert _liczniki(stanowisko["dane"]) == {}
